@@ -1,0 +1,9 @@
+streamlit>=1.58.0
+streamlit-lightweight-charts-v5>=0.1.8
+plotly>=6.8.0
+numpy>=1.26.0
+pandas>=2.0.0
+schwab-py>=1.5.1
+pyyaml>=6.0
+tzdata
+python-telegram-bot>=22.8

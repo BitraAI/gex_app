@@ -1,0 +1,12 @@
+[schwab]
+client_id = "YOUR_CLIENT_ID"
+client_secret = "YOUR_CLIENT_SECRET"
+callback_url = "https://127.0.0.1:8182/"
+token_file = "~/.local/share/gex_app/schwab_token.json"
+base_url = "https://api.schwabapi.com"
+max_token_age_days = 7
+[telegram]
+enabled = true                     # set false to mute alerts without removing secrets
+BOT_TOKEN = "YOUR_BOT_TOKEN"       # from @BotFather
+CHAT_ID = "YOUR_CHAT_ID"           # from @userinfobot (or a negative group id, or @channelname)
+
