@@ -64,6 +64,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 ### Installation
 
 ```bash
+git clone https://github.com/BitraAI/gex_app.git
 cd gex_app
 uv pip install -r requirements.txt
 ```
