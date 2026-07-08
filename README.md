@@ -7,7 +7,13 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 ## Features
 
 - **Real-time Option Chain Data** — Fetches live options data via the Schwab API
-- **Candlestick Charts** — Interactive OHLCV charts with SMA/EMA overlays, Trend, Volume (buy/sell pressure with streaming delta), ATM_Option_Flow (real-time ATM option trade flow via LEVELONE_OPTIONS streaming — computes `(call_buy + put_sell) - (call_sell + put_buy)` per 1s bar with Bullish/Bearish Flow label over last 20 bars), Andean Oscillator, and EMA 50 Squeeze indicators
+- **Candlestick Charts** — Interactive OHLCV charts with SMA/EMA overlays, Trend, Volume (buy/sell pressure with streaming delta), ATM_Option_Flow (real-time ATM option trade flow via LEVELONE_OPTIONS streaming — computes `(call_buy + put_sell) - (call_sell + put_buy)` per 1s bar with Bullish/Bearish Flow label over last 20 bars), Volume Profile (VPVR — client-side per-bar volume binned at each visible price level with buy/sell split, POC highlighted, recomputes on every pan/zoom), Anchored VWAP (session-reset line, anchored at each 09:30 ET boundary), Andean Oscillator, and EMA 50 Squeeze indicators
+- **Candlestick Chart Interactions** — TradingView-style dual-axis pan and zoom:
+  - **Drag in the chart body** pans BOTH the time (X) and price (Y) axes together vertically and horizontally (custom body-drag handler pans Y; LWC handles X natively).
+  - **Drag the price-scale labels** (right edge) or **drag the time-scale labels** (bottom) zooms each respective axis natively (LWC `axisPressedMouseMove`).
+  - **Mouse wheel** zooms the X-axis (bar spacing) anywhere over the chart; a crosshair tracks the cursor.
+  - The Y range is **persistent across the 1-second streaming fragment re-renders**: user-set Y-zoom (via body drag, axis-label drag, or autoscaleInfoProvider pin) is saved losslessly on gesture end and restored on each re-render, so streaming ticks do not snap the chart back to the auto-fit range and the Y range doesn't drift over time. X-axis range persistence works the same way.
+  - Each pane (main candlesticks / Volume / ATM / Andean Osc) pans its own Y range independently when dragged in its own vertical band.
 - **3 Calculations** — GEX (Gamma), VEX (Vanna), CEX (Charm) Exposure
 - **10 Interactive Charts:**
   - GEX by Strike (bar chart with Call/Put Wall, Gamma Flip overlays)
@@ -206,6 +212,11 @@ You can then open the app in your local browser.
 4. Use the sidebar expiration selector to filter the Options Data table (charts use sliders to control expiration count)
 5. Toggle dark/light theme in the sidebar
 6. Use sliders in GEX by Expiration, IV by Strike, IV by Expiration, Heatmaps, and Gamma Surface tabs to control expiration count
+7. In the **Candlesticks** tab:
+   - Click and **drag in the chart body** to pan both axes (vertical drag pans the price range; horizontal drag pans time).
+   - **Drag the price-scale labels** (right edge) to zoom the Y-axis, or the **time-scale labels** (bottom) to zoom the X-axis.
+   - **Scroll the mouse wheel** to zoom the X-axis (bar spacing).
+   - The Y zoom persists across the live 1-second streaming updates — drag it to where you want and the chart stays there.
 
 ## Architecture
 
@@ -215,7 +226,7 @@ gex_app/
 ├── analytics.py           # Analytical calculations (walls, flip, skew, etc.)
 ├── calculations.py        # GEX/VEX/CEX calculation engine and data aggregation
 ├── charts.py              # Plotly chart generators
-├── chart_component.py     # Lightweight Charts HTML/JS component (custom indicators)
+├── chart_component.py     # Lightweight Charts HTML/JS component (custom indicators, dual-axis pan/zoom, VPVR overlay, Y-range persistence across streaming re-renders)
 ├── client.py              # Schwab API client wrapper
 ├── option_streaming_service.py  # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, 1s aggregation with buy/sell split)
 ├── streaming_service.py   # Schwab WebSocket streaming (Level 1 + NASDAQ/NYSE Level 2 order books, 1s OHLCV aggregation with tick-direction buy/sell volume split)
