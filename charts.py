@@ -15,8 +15,8 @@ DARK_TEMPLATE = {
 LIGHT_TEMPLATE = {
     "plot_bgcolor": "#ffffff",
     "paper_bgcolor": "#ffffff",
-    "font_color": "#31333f",
-    "grid_color": "#e0e0e0",
+    "font_color": "#1e293b",
+    "grid_color": "#e9eef3",
 }
 
 
@@ -1464,9 +1464,10 @@ def create_candlestick_chart(
     """Build a lightweight-charts chart dict for 1-min OHLCV."""
     if max_candles > 0 and len(candles) > max_candles:
         candles = candles[-max_candles:]
-    bg = "#0e1117" if is_dark else "#ffffff"
-    tc = "#fafafa" if is_dark else "#31333f"
-    grid_col = "#262730" if is_dark else "#e0e0e0"
+    tmpl = _t(is_dark)
+    bg = tmpl["plot_bgcolor"]
+    tc = tmpl["font_color"]
+    grid_col = tmpl["grid_color"]
     et_offset = _get_est_offset()
 
     if not candles:
@@ -1679,7 +1680,7 @@ def create_candlestick_chart(
     
     if "Volume" in (indicators or []):
         volume_chart = {
-            "height": 100,
+            "height": 150,
             "layout": {"background": {"type": "solid", "color": bg}, "textColor": tc},
             "handleScroll": True,
             "handleScale": True,
@@ -1688,7 +1689,7 @@ def create_candlestick_chart(
                 "horzLines": {"color": grid_col},
             },
             "rightPriceScale": {
-                "scaleMargins": {"top": 0.0, "bottom": 0.25},
+                "scaleMargins": {"top": 0.15, "bottom": 0.15},
                 "borderVisible": False,
             },
             "timeScale": volume_time_scale,
@@ -1712,13 +1713,13 @@ def create_candlestick_chart(
             },
         }]
         charts.append({"chart": volume_chart, "series": volume_series})
-
+    
     if "Andean Osc" in (indicators or []):
         bull, bear, signal = _andean_oscillator(opens, closes,
                                                 INDICATORS["Andean Osc"]["length"],
                                                 INDICATORS["Andean Osc"]["sigLength"])
         andean_chart = {
-            "height": 100,
+            "height": 150,
             "layout": {"background": {"type": "solid", "color": bg}, "textColor": tc},
             "handleScroll": True,
             "handleScale": True,
@@ -1735,14 +1736,16 @@ def create_candlestick_chart(
         }
         andean_series = [
             {"type": "Line", "data": [{"time": cd[i]["time"], "value": bull[i]} for i in range(len(cd))],
-             "options": {"color": "#00cc96", "lineWidth": 2, "title": "Andean Bull"}},
+             "options": {"color": "#00cc96", "lineWidth": 2, "priceLineVisible": False}},
             {"type": "Line", "data": [{"time": cd[i]["time"], "value": bear[i]} for i in range(len(cd))],
-             "options": {"color": "#ef553b", "lineWidth": 2, "title": "Andean Bear"}},
+             "options": {"color": "#ef553b", "lineWidth": 2, "priceLineVisible": False}},
             {"type": "Line", "data": [{"time": cd[i]["time"], "value": signal[i]} for i in range(len(cd))],
-             "options": {"color": "#ffa15a", "lineWidth": 1, "title": "Andean Signal"}},
+             "options": {"color": "#ffa15a", "lineWidth": 1, "priceLineVisible": False}},
+            {"type": "Line", "data": [{"time": cd[i]["time"], "value": 0} for i in range(len(cd))],
+             "options": {"color": "#ffffff", "lineWidth": 1, "lineStyle": 2, "priceLineVisible": False, "lastValueVisible": False, "crosshairMarkerVisible": False}},
         ]
         charts.append({"chart": andean_chart, "series": andean_series})
-
+    
     return charts
 
 
@@ -1797,15 +1800,15 @@ DARK_CSS = """
 LIGHT_CSS = """
 <style>
     .gex-metric {
-        background: #f0f2f6;
+        background: #f8fafc;
         border-radius: 8px;
         padding: 12px 16px;
-        border: 1px solid #d0d4dd;
+        border: 1px solid #e2e8f0;
         text-align: center;
     }
     .gex-metric .label {
         font-size: 0.75rem;
-        color: #666;
+        color: #64748b;
         text-transform: uppercase;
         letter-spacing: 0.05em;
         margin-bottom: 4px;
@@ -1817,6 +1820,6 @@ LIGHT_CSS = """
     }
     .gex-metric .value.positive { color: #00cc96; }
     .gex-metric .value.negative { color: #ef553b; }
-    .gex-metric .value.neutral { color: #31333f; }
+    .gex-metric .value.neutral { color: #1e293b; }
 </style>
 """
