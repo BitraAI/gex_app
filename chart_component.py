@@ -1263,21 +1263,23 @@ def compute_latest_indicators(
     return result
 
 
-def render_chart(candles, indicators=None, call_wall=None, put_wall=None, is_dark=True, force_reinit=False, last_close=None, status=None):
+def render_chart(candles, indicators=None, call_wall=None, put_wall=None, is_dark=True, force_reinit=False, last_close=None, status=None, symbol="SPY"):
     import time
     main_height = 420
-    vol_height = 100
-    osc_height = 100
+    vol_height = 100 if (indicators and "Volume" in indicators) else 0
+    osc_height = 100 if (indicators and "Andean Osc" in indicators) else 0
     init_data = build_init_data(candles, indicators, call_wall, put_wall, is_dark, last_close=last_close)
     if status:
         init_data["status"] = status
     payload = {"init": init_data}
     # Stable DOM id so save/restore of user scroll position survives the
     # 1-second fragment re-render.  The JS code stores the visible range
-    # keyed by this id in window.__lwc_saved_{root_id}.
-    root_id = "lwc_candlestick"
+    # keyed by this id in window.__lwc_saved_{root_id}. Using the symbol
+    # ensures different tickers maintain separate chart state, but switching
+    # the same ticker preserves Y-axis if saved range exists.
+    root_id = f"lwc_candlestick_{symbol}"
     json_str = json.dumps(payload)
-    atm_height = 100
+    atm_height = 100 if (indicators and "ATM_Option_Flow" in indicators) else 0
     total_height = main_height + vol_height + atm_height + osc_height
     html = _HTML_TEMPLATE % {"root_id": root_id, "main_height": main_height, "vol_height": vol_height, "atm_height": atm_height, "osc_height": osc_height, "total_height": total_height, "lib": _JS_LIB, "json_data": json_str}
     st.html(html, unsafe_allow_javascript=True)

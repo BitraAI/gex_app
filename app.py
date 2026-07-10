@@ -9,7 +9,6 @@ from typing import Any, Optional
 _ASYNC_LOOP: asyncio.AbstractEventLoop | None = None
 _ASYNC_LOOP_THREAD: threading.Thread | None = None
 _ASYNC_LOOP_LOCK = threading.Lock()
-_ASYNC_LOOP_VERSION: int = 0
 
 
 def _run_async_loop_forever(loop: asyncio.AbstractEventLoop):
@@ -18,20 +17,14 @@ def _run_async_loop_forever(loop: asyncio.AbstractEventLoop):
 
 
 def _ensure_async_loop() -> asyncio.AbstractEventLoop:
-    global _ASYNC_LOOP, _ASYNC_LOOP_THREAD, _ASYNC_LOOP_VERSION
+    global _ASYNC_LOOP, _ASYNC_LOOP_THREAD
     with _ASYNC_LOOP_LOCK:
-        if _ASYNC_LOOP is None or _ASYNC_LOOP.is_closed() or (_ASYNC_LOOP_THREAD is not None and not _ASYNC_LOOP_THREAD.is_alive()):
-            if _ASYNC_LOOP is not None:
-                try:
-                    _ASYNC_LOOP.close()
-                except RuntimeError:
-                    pass
+        if _ASYNC_LOOP is None or _ASYNC_LOOP.is_closed():
             _ASYNC_LOOP = asyncio.new_event_loop()
             _ASYNC_LOOP_THREAD = threading.Thread(
                 target=_run_async_loop_forever, args=(_ASYNC_LOOP,), daemon=True,
             )
             _ASYNC_LOOP_THREAD.start()
-            _ASYNC_LOOP_VERSION += 1
     return _ASYNC_LOOP
 
 import numpy as np
@@ -135,7 +128,6 @@ _SESSION_DEFAULTS = {
     "iv_rank": None,
     "candlestick_data": pd.DataFrame(),
     "candlestick_label": "",
-    "_loop_version": -1,
 }
 
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
@@ -164,34 +156,19 @@ if not st.session_state.ticker_history:
 
 st.markdown(DARK_CSS if st.session_state.theme == "dark" else LIGHT_CSS, unsafe_allow_html=True)
 
-# Detect event loop changes (e.g. after background thread crash) and rebuild
-loop = _ensure_async_loop()
-if st.session_state._loop_version != _ASYNC_LOOP_VERSION:
-    st.session_state._loop_version = _ASYNC_LOOP_VERSION
-    old_client = st.session_state.get("client")
-    if old_client is not None:
-        st.session_state.client = None
+# Replace streaming service if it was created with old code (no shared loop)
+if st.session_state.get("client") is not None:
+    loop = _ensure_async_loop()
     old = st.session_state.get("streaming_service")
-    if old is not None:
-        old.stop()
-        st.session_state.streaming_service = None
+    if old is None or getattr(old, '_loop', None) is None:
+        if old is not None:
+            old.stop()
+        st.session_state.streaming_service = StreamingService(st.session_state.client, loop)
     atm_opt = st.session_state.get("atm_option_service")
-    if atm_opt is not None:
-        atm_opt.stop()
-        st.session_state.atm_option_service = None
-    st.session_state._loop = loop
-
-    if st.session_state.get("client") is not None:
-        old = st.session_state.get("streaming_service")
-        if old is None or getattr(old, '_loop', None) is None or old._loop != loop:
-            if old is not None:
-                old.stop()
-            st.session_state.streaming_service = StreamingService(st.session_state.client, loop)
-        atm_opt = st.session_state.get("atm_option_service")
-        if atm_opt is None or getattr(atm_opt, '_loop', None) is None or atm_opt._loop != loop:
-            if atm_opt is not None:
-                atm_opt.stop()
-            st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
+    if atm_opt is None or getattr(atm_opt, '_loop', None) is None:
+        if atm_opt is not None:
+            atm_opt.stop()
+        st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
 
 
 async def _create_client_async():
@@ -209,12 +186,12 @@ def init_client():
             st.error(f"Failed to create Schwab client: {e}")
             return False
     old = st.session_state.get("streaming_service")
-    if old is None or getattr(old, '_loop', None) is None or old._loop != loop:
+    if old is None or getattr(old, '_loop', None) is None:
         if old is not None:
             old.stop()
         st.session_state.streaming_service = StreamingService(st.session_state.client, loop)
     atm_opt = st.session_state.get("atm_option_service")
-    if atm_opt is None or getattr(atm_opt, '_loop', None) is None or atm_opt._loop != loop:
+    if atm_opt is None or getattr(atm_opt, '_loop', None) is None:
         if atm_opt is not None:
             atm_opt.stop()
         st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
@@ -1104,6 +1081,9 @@ def render_candlesticks_frag():
                     c[atm_col] = int(row[atm_col])
             candles_payload.append(c)
 
+        # Use unique chart id for the current ticker to preserve Y-axis state
+        chart_id = s.get("symbol", "SPY")
+
         last_close = float(df["close"].iloc[-1]) if not df.empty else None
 
         # Call/Put wall horizontal lines (price levels from analytics)
@@ -1144,17 +1124,17 @@ def render_candlesticks_frag():
                 _msg += f": {_err}"
             _status = {"text": _msg, "level": "warning"}
 
-    if candles_payload:
-        st.subheader("Price History")
-        render_chart(
-            candles_payload,
-            indicators=selected_indicators,
-            call_wall=_cw,
-            put_wall=_pw,
-            is_dark=is_dark,
-            last_close=last_close,
-            status=_status,
-        )
+        if candles_payload:
+            render_chart(
+                candles_payload,
+                indicators=selected_indicators,
+                call_wall=_cw,
+                put_wall=_pw,
+                is_dark=is_dark,
+                last_close=last_close,
+                status=_status,
+                symbol=symbol,
+            )
         st.caption(f"{s.candlestick_label} bars ({len(s.candlestick_data)})")
 
 
@@ -1175,38 +1155,6 @@ def render_metrics_frag():
     metrics_container = st.container()
     with metrics_container:
         render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=s.get("iv_rank"))
-
-
-@st.fragment(run_every=1)
-def render_iv_skew_frag():
-    """Dedicated fragment to update the IV Skew widget independently every second."""
-    s = st.session_state
-    if not s.get("data"):
-        return
-    
-    # Get the current IV Skew value directly from analytics
-    iv_skew = s.get("analytics", {}).get("iv_skew")
-    
-    # Update the IV Skew widget in-place
-    if iv_skew is not None:
-        skew_cls = "positive" if iv_skew >= 0 else "negative"
-        # Find the column to update
-        c2 = st.columns(4)[1]
-        with c2:
-            st.markdown(
-                f'<div class="gex-metric"><div class="label">IV Skew (25Δ)</div>'
-                f'<div class="value {skew_cls}">{iv_skew:+.2%}</div></div>',
-                unsafe_allow_html=True,
-            )
-    # If no IV skew data, show N/A
-    else:
-        c2 = st.columns(4)[1]
-        with c2:
-            st.markdown(
-                '<div class="gex-metric"><div class="label">IV Skew (25Δ)</div>'
-                '<div class="value neutral">N/A</div></div>',
-                unsafe_allow_html=True,
-            )
 
 
 @st.fragment(run_every=10)
@@ -1505,10 +1453,10 @@ def render_table():
     put_wall_idx = df[df["Strike"] == put_wall].index.tolist()
 
     is_dark = st.session_state.theme == "dark"
-    atm_bg = "#555555" if is_dark else "#e2e8f0"
-    max_pain_bg = "#8b1a1a" if is_dark else "#ffd6d6"
-    call_wall_bg = "#ef553b" if is_dark else "#ffd6d6"
-    put_wall_bg = "#00cc96" if is_dark else "#d1fae5"
+    atm_bg = "#555555" if is_dark else "#e0e0e0"
+    max_pain_bg = "#8b1a1a" if is_dark else "#ffcccc"
+    call_wall_bg = "#ef553b" if is_dark else "#ffcccc"
+    put_wall_bg = "#00cc96" if is_dark else "#ccffcc"
 
     def highlight_atm(row):
         is_atm = abs(row["Strike"] - spot) == min(
