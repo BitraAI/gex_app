@@ -30,8 +30,8 @@ _HTML_TEMPLATE = """
 
     const d = DATA.init;
     const bg = d.isDark ? '#0e1117' : '#ffffff';
-    const tc = d.isDark ? '#fafafa' : '#31333f';
-    const gc = d.isDark ? '#262730' : '#e0e0e0';
+    const tc = d.isDark ? '#fafafa' : '#1e293b';
+    const gc = d.isDark ? '#262730' : '#e9eef3';
 
     // -------- Single chart with multiple price scales (shared x-axis) ----- //
     // All series (candlesticks, volume, ATM, oscillator) live in one chart
@@ -49,6 +49,31 @@ _HTML_TEMPLATE = """
     if (d.volume_series) panes.push({id: 'volume', h: VOL_H});
     if (d.atm_series) panes.push({id: 'atm', h: ATM_H});
     if (d.andean_series) panes.push({id: 'osc', h: OSC_H});
+
+    // Defensive: collect EVERY priceScaleId referenced by any series so
+    // we can guarantee a dedicated pane exists for each indicator scale.
+    // An indicator series must NEVER fall back to the candlestick 'right'
+    // price scale — that would mix oscillator/volume values with price and
+    // corrupt the visible range of the main pane.
+    const paneIds = new Set(panes.map(function(p) { return p.id; }));
+    const PANE_H_DEFAULT = 100;
+    function ensurePane(pid) {
+        if (pid === 'right' || pid === '' || pid == null) return;
+        if (paneIds.has(pid)) return;
+        paneIds.add(pid);
+        panes.push({id: pid, h: PANE_H_DEFAULT});
+    }
+    function collectPaneIds(seriesArr) {
+        if (!seriesArr) return;
+        for (const s of seriesArr) {
+            const pid = (s.options || {}).priceScaleId;
+            if (pid && pid !== 'right') ensurePane(pid);
+        }
+    }
+    collectPaneIds(d.series);
+    collectPaneIds(d.volume_series);
+    collectPaneIds(d.atm_series);
+    collectPaneIds(d.andean_series);
 
     const TOTAL_H = panes.reduce(function(s, p) { return s + p.h; }, 0);
 
@@ -113,7 +138,20 @@ _HTML_TEMPLATE = """
         // pinned when we restore a manual y-zoom, otherwise LWC unions their
         // default auto-fit range with our pinned range and the pin loses).
         if (series) {
-            const pid = (s.options || {}).priceScaleId || 'right';
+            // An indicator series MUST keep its dedicated priceScaleId and
+            // never fall back to the candlestick 'right' scale. If the series
+            // declared a non-right priceScaleId but that pane was somehow not
+            // created, we drop the series entirely rather than contaminate the
+            // main price scale with oscillator/volume values.
+            const declaredPid = (s.options || {}).priceScaleId;
+            if (declaredPid && declaredPid !== 'right') {
+                if (!paneIds.has(declaredPid)) {
+                    // Pane missing — refuse to add to 'right'. Discard series.
+                    try { chart.removeSeries(series); } catch (_) {}
+                    return;
+                }
+            }
+            const pid = declaredPid || 'right';
             _registerSeries(pid, series);
         }
     }
@@ -132,6 +170,17 @@ _HTML_TEMPLATE = """
     // so the save/restore Y-zoom code can sample coordinateToPrice() at the
     // correct pane bounds (the chart canvas spans TOTAL_H, but each pane
     // occupies only its own [top, bottom] slice of that single canvas).
+    //
+    // Each indicator pane gets its OWN visible y-axis (price scale) so the
+    // oscillator / volume values render their own tick labels instead of
+    // being absorbed into the candlestick 'right' scale. LWC v4 overlays
+    // every price scale on the same right edge by default; to give each pane
+    // a distinct, readable axis we (a) set `visible: true` and
+    // `borderVisible: true` so the axis line + ticks draw, and (b) install a
+    // per-series `priceFormat` so the tick labels format in the pane's own
+    // units (volume vs. raw oscillator value) rather than inheriting the
+    // candlesticks' price format. The scaleMargins slice each pane to its own
+    // vertical band so the y-axes never overlap.
     const paneEdges = {};
     let y = 0;
     for (const p of panes) {
@@ -142,26 +191,185 @@ _HTML_TEMPLATE = """
         // restoreRange() (below) turns it OFF for any pane that has a saved
         // manual y-zoom, otherwise LWC immediately overwrites the user's
         // zoom with a fit-to-bars range on the next animation frame.
+        const isMain = (p.id === 'right');
         chart.priceScale(p.id).applyOptions({
             scaleMargins: {top: topPx / TOTAL_H, bottom: (TOTAL_H - bottomPx) / TOTAL_H},
             visible: true,
             autoScale: true,
             borderVisible: true,
+            // The main 'right' scale inherits the candlestick priceFormat.
+            // Indicator scales get a plain numeric formatter so their own
+            // y-axis tick labels show the pane's values (volume / oscillator)
+            // instead of mirroring the candlestick's $price formatting.
+            ...(isMain ? {} : {
+                ensureEdgeAreaForMakers: true,
+                mode: 0,
+            }),
         });
         y += p.h;
     }
 
-    // Andean label overlay (absolute on the container at the osc pane top)
-    if (d.andean_label) {
-        let oscStart = MAIN_H;
-        if (d.volume_series) oscStart += VOL_H;
-        if (d.atm_series) oscStart += ATM_H;
-        const label = document.createElement('div');
-        label.textContent = d.andean_label;
-        const labelTop = oscStart + 4;
-        label.style.cssText = 'position:absolute;top:' + labelTop + 'px;left:50%%;transform:translateX(-50%%);font-size:14px;font-weight:700;color:' + d.andean_label_color + ';pointer-events:none;z-index:10;';
-        container.appendChild(label);
+    // Tag every indicator-pane series with a numeric priceFormat so the
+    // pane's own y-axis renders tick labels in the indicator's units rather
+    // than the candlestick's currency format. Volume/ATM histograms already
+    // carry a volume priceFormat; Andean Osc lines get a price-style format.
+    function applyPanePriceFormat(seriesArr) {
+        if (!seriesArr) return;
+        for (const s of seriesArr) {
+            const pid = (s.options || {}).priceScaleId;
+            if (!pid || pid === 'right') continue;
+            const opts = s.options || (s.options = {});
+            if (!opts.priceFormat) {
+                opts.priceFormat = {type: 'price', precision: 2, minMove: 0.01};
+            }
+        }
     }
+    applyPanePriceFormat(d.andean_series);
+
+    // ---- Custom y-axis overlay for each indicator pane ------------------- //
+    // LWC v4 overlays every price scale on the same right edge, so indicator
+    // panes don't get their own visible, independent y-axis tick labels by
+    // default — their values mirror the candlestick 'right' scale. To give
+    // each pane its own axis with its OWN values, we draw a canvas overlay on
+    // the right edge of each indicator pane and render tick labels computed
+    // from that pane's series priceToCoordinate() mapping. The overlay also
+    // paints a background strip that covers LWC's overlaid axis labels so the
+    // candlestick's $price ticks don't bleed into the indicator panes.
+    const AXIS_W = 60;  // px width reserved on the right for label strips
+    const indicatorPanes = panes.filter(function(p) { return p.id !== 'right'; });
+    const axisOverlays = [];  // {paneId, canvas, ctx, lastSig}
+    for (const p of indicatorPanes) {
+        const ov = document.createElement('canvas');
+        ov.style.cssText = 'position:absolute;right:0;pointer-events:none;z-index:6;';
+        container.appendChild(ov);
+        axisOverlays.push({paneId: p.id, canvas: ov, ctx: ov.getContext('2d'), lastSig: null});
+    }
+
+    function formatTick(v, isVolume) {
+        if (v == null || isNaN(v)) return '';
+        if (isVolume) {
+            const a = Math.abs(v);
+            if (a >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+            if (a >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+            if (a >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+            return String(Math.round(v));
+        }
+        return v.toFixed(2);
+    }
+
+    function drawPaneAxis(ov) {
+        const series = paneSeries[ov.paneId];
+        const edges = paneEdges[ov.paneId];
+        if (!series || !edges) return;
+        const isVolume = (ov.paneId === 'volume' || ov.paneId === 'atm');
+        // Derive the pane's visible price range from the series mapping at
+        // the pane's top/bottom canvas edges.
+        let topP, botP;
+        try {
+            topP = series.coordinateToPrice(edges.top);
+            botP = series.coordinateToPrice(edges.bottom);
+        } catch (_) { return; }
+        if (topP == null || botP == null) return;
+        const lo = Math.min(topP, botP);
+        const hi = Math.max(topP, botP);
+        if (!(lo < hi)) return;
+        const span = hi - lo;
+        // Choose ~5 "nice" tick values across the pane's value range.
+        const NUM_TICKS = 5;
+        const w = container.clientWidth;
+        const dpw = typeof window.devicePixelRatio === 'number' ? window.devicePixelRatio : 1;
+        const stripW = AXIS_W;
+        const stripH = edges.bottom - edges.top;
+        if (stripH <= 0) return;
+        if (ov.canvas.width !== Math.floor(stripW * dpw) || ov.canvas.height !== Math.floor(stripH * dpw)) {
+            ov.canvas.width = Math.floor(stripW * dpw);
+            ov.canvas.height = Math.floor(stripH * dpw);
+            ov.canvas.style.width = stripW + 'px';
+            ov.canvas.style.height = stripH + 'px';
+            ov.canvas.style.top = edges.top + 'px';
+        }
+        const ctx = ov.ctx;
+        ctx.setTransform(dpw, 0, 0, dpw, 0, 0);
+        ctx.clearRect(0, 0, stripW, stripH);
+        // Background strip covers LWC's overlaid candlestick axis labels so
+        // the indicator pane only shows its own values.
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, stripW, stripH);
+        // Border line on the left edge of the strip.
+        ctx.strokeStyle = gc;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0.5, 0);
+        ctx.lineTo(0.5, stripH);
+        ctx.stroke();
+        // Tick labels.
+        ctx.fillStyle = tc;
+        ctx.font = '11px system-ui, -apple-system, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        for (let i = 0; i < NUM_TICKS; i++) {
+            const frac = (NUM_TICKS === 1) ? 0.5 : i / (NUM_TICKS - 1);
+            const val = lo + frac * span;
+            // Map this value back to a canvas y within the pane.
+            let cy;
+            try { cy = series.priceToCoordinate(val); } catch (_) { continue; }
+            if (cy == null) continue;
+            // Translate to strip-local coords (strip starts at edges.top).
+            const localY = cy - edges.top;
+            if (localY < 0 || localY > stripH) continue;
+            // Faint tick mark.
+            ctx.strokeStyle = gc;
+            ctx.beginPath();
+            ctx.moveTo(0, localY);
+            ctx.lineTo(4, localY);
+            ctx.stroke();
+            ctx.fillStyle = tc;
+            ctx.fillText(formatTick(val, isVolume), stripW - 4, localY);
+        }
+    }
+
+    function redrawIndicatorAxes() {
+        for (const ov of axisOverlays) {
+            try { drawPaneAxis(ov); } catch (_) {}
+        }
+    }
+
+    // Redraw axis overlays whenever the time/x range or any pane y-range moves.
+    let axesDirty = true;
+    function markAxesDirty() { axesDirty = true; }
+    try {
+        chart.timeScale().subscribeVisibleTimeRangeChange(markAxesDirty);
+        chart.timeScale().subscribeVisibleLogicalRangeChange(markAxesDirty);
+    } catch (_) {}
+    const axisRO = new ResizeObserver(markAxesDirty);
+    axisRO.observe(container);
+    let lastAxisSigs = {};
+    function axisLoop() {
+        if (window[RENDER_KEY] !== RENDER_VERSION) { axisRO.disconnect(); return; }
+        // Detect pane y-range movement by sampling each indicator pane's
+        // top/bottom mapped price; redraw only when it changes.
+        let moved = axesDirty;
+        for (const p of indicatorPanes) {
+            const s = paneSeries[p.id];
+            const e = paneEdges[p.id];
+            if (!s || !e) continue;
+            let sig = '';
+            try {
+                const a = s.coordinateToPrice(e.top);
+                const b = s.coordinateToPrice(e.bottom);
+                if (a != null && b != null) sig = a + ':' + b;
+            } catch (_) {}
+            if (sig !== lastAxisSigs[p.id]) { lastAxisSigs[p.id] = sig; moved = true; }
+        }
+        if (moved) {
+            axesDirty = false;
+            redrawIndicatorAxes();
+        }
+        requestAnimationFrame(axisLoop);
+    }
+    requestAnimationFrame(axisLoop);
+
+
 
     // Streaming status overlay — drawn on top of the candlestick pane.
     // Replaces the old separate st.info / st.warning widget above the chart.
@@ -835,19 +1043,11 @@ def build_init_data(
             if name == "Andean Osc":
                 bull, bear, signal = _andean_oscillator(opens, closes, cfg["length"], cfg["sigLength"])
                 andean_series = [
-                    {"type": "Line", "key": "andean_bull", "data": [{"time": cd[i]["time"], "value": bull[i]} for i in range(len(cd))], "options": {"color": "#00cc96", "lineWidth": 2, "title": "Andean Bull", "priceScaleId": "osc", "priceLineVisible": False}},
-                    {"type": "Line", "key": "andean_bear", "data": [{"time": cd[i]["time"], "value": bear[i]} for i in range(len(cd))], "options": {"color": "#ef553b", "lineWidth": 2, "title": "Andean Bear", "priceScaleId": "osc", "priceLineVisible": False}},
-                    {"type": "Line", "key": "andean_signal", "data": [{"time": cd[i]["time"], "value": signal[i]} for i in range(len(cd))], "options": {"color": "#ffa15a", "lineWidth": 1, "title": "Andean Signal", "priceScaleId": "osc", "priceLineVisible": False}},
+                    {"type": "Line", "key": "andean_bull", "data": [{"time": cd[i]["time"], "value": bull[i]} for i in range(len(cd))], "options": {"color": "#00cc96", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False}},
+                    {"type": "Line", "key": "andean_bear", "data": [{"time": cd[i]["time"], "value": bear[i]} for i in range(len(cd))], "options": {"color": "#ef553b", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False}},
+                    {"type": "Line", "key": "andean_signal", "data": [{"time": cd[i]["time"], "value": signal[i]} for i in range(len(cd))], "options": {"color": "#ffa15a", "lineWidth": 1, "priceScaleId": "osc", "priceLineVisible": False}},
+                    {"type": "Line", "key": "andean_zero", "data": [{"time": cd[i]["time"], "value": 0} for i in range(len(cd))], "options": {"color": "#ffffff", "lineWidth": 1, "lineStyle": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False, "crosshairMarkerVisible": False, "priceLineVisible": False}},
                 ]
-                if bear[-1] < signal[-1] and bull[-1] > 0:
-                    andean_label = "Bullish"
-                    andean_label_color = "#00cc96"
-                elif bull[-1] < signal[-1] and bear[-1] > 0:
-                    andean_label = "Bearish"
-                    andean_label_color = "#ef553b"
-                else:
-                    andean_label = ""
-                    andean_label_color = ""
                 continue
             if name == "EMA 50 Squeeze":
                 ema50, sqz_red, sqz_black, sqz_orange = _ema50_squeeze(highs, lows, closes)
@@ -983,9 +1183,6 @@ def build_init_data(
         result["atm_series"] = atm_series
     if andean_series is not None:
         result["andean_series"] = andean_series
-        if andean_label:
-            result["andean_label"] = andean_label
-            result["andean_label_color"] = andean_label_color
     if vp_vols is not None:
         result["vp_vols"] = vp_vols
     return result
