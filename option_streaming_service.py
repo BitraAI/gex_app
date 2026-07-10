@@ -82,7 +82,7 @@ class AtmOptionVolumeService:
     @property
     def has_data(self) -> bool:
         with self._lock:
-            return self._current_bar is not None or not self._df.empty
+            return self._ticks_received > 0
 
     def update_spot(self, spot: float):
         """Called when the underlying spot price changes (e.g. from equity
@@ -268,7 +268,9 @@ class AtmOptionVolumeService:
             except Exception:
                 pass
 
-        # Subscribe to new symbols
+        # Subscribe to new symbols. Only mark as subscribed if the
+        # subscription actually succeeds, so update_spot() will retry
+        # on the next fragment tick if the WebSocket wasn't ready yet.
         new_syms = []
         if not old_call or old_call != call_sym:
             new_syms.append(call_sym)
@@ -279,7 +281,7 @@ class AtmOptionVolumeService:
             try:
                 await sc.level_one_option_subs(new_syms)
             except Exception:
-                pass
+                return   # don't update _subscribed_* — retry on next tick
 
         with self._lock:
             self._subscribed_call_sym = call_sym

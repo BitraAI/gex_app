@@ -201,8 +201,12 @@ _HTML_TEMPLATE = """
             // Indicator scales get a plain numeric formatter so their own
             // y-axis tick labels show the pane's values (volume / oscillator)
             // instead of mirroring the candlestick's $price formatting.
+            // We hide LWC's built-in axis labels for indicator panes and
+            // draw our own via the custom canvas overlay below — this avoids
+            // two overlapping sets of labels that appear misaligned.
             ...(isMain ? {} : {
-                ensureEdgeAreaForMakers: true,
+                visible: false,
+                borderVisible: false,
                 mode: 0,
             }),
         });

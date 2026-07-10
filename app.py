@@ -1109,9 +1109,10 @@ def render_candlesticks_frag():
             _msg = f"Receiving {stream_symbol} ticks · {_eq_svc.ticks_received} received"
             if "ATM_Option_Flow" in selected_indicators and _atm_svc is not None:
                 if _atm_svc.is_running and _atm_svc.has_data:
-                    _msg += f" · { _atm_svc.ticks_received } option trades"
+                    _n = _atm_svc.ticks_received
+                    _msg += f" · { _n } option tick{'s' if _n != 1 else ''}"
                 elif _atm_svc.is_running and not _atm_svc.has_data:
-                    _msg += " · waiting for option trades..."
+                    _msg += f" · waiting for option trades..."
                 elif not _atm_svc.is_running:
                     _msg += " · option flow not subscribed"
             _status = {"text": _msg, "level": "success"}
