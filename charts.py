@@ -1129,6 +1129,7 @@ def create_iv_by_strike(
     spot: float,
     is_dark: bool = True,
     rv: float = 0.0,
+    iv_rank: float | None = None,
 ) -> go.Figure:
     tmpl = _t(is_dark)
     fig = go.Figure()
@@ -1218,6 +1219,12 @@ def create_iv_by_strike(
         fig.add_hline(y=rv, line_dash="dash", line_color="#ab63fa",
                       annotation_text=f"RV: {rv*100:.2f}%",
                       annotation_font_color="#ab63fa")
+
+    if iv_rank is not None:
+        rank_val = iv_rank / 100.0
+        fig.add_hline(y=rank_val, line_dash="dot", line_color="#00cc96",
+                      annotation_text=f"IV Rank: {iv_rank:.2f}%",
+                      annotation_font_color="#00cc96")
 
     fig.update_layout(
         title="Implied Volatility by Strike",

@@ -1257,7 +1257,7 @@ def render_volatility_frag():
         )
 
         if vol_view == "IV by Strike":
-            tm = st.radio("View", ["IV", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
+            tm = st.radio("View", ["IV Rank", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
         else:
             mo = st.radio("View", ["ATM IV", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
 
@@ -1271,6 +1271,14 @@ def render_volatility_frag():
             if tm == "IV":
                 if vk: st.plotly_chart(create_iv_by_strike(vk, s.spot, is_dark=d, rv=_rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike_tab6")
                 else: st.info("No strike data")
+            elif tm == "IV Rank":
+                _iv_rank = s.get("iv_rank")
+                if vk and _iv_rank is not None:
+                    st.plotly_chart(create_iv_by_strike(vk, s.spot, is_dark=d, rv=_rv, iv_rank=_iv_rank).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_rank_by_strike")
+                elif vk:
+                    st.info("IV Rank not available yet")
+                else:
+                    st.info("No strike data")
             elif _rv > 0 and vk:
                 st.plotly_chart(create_vrp_by_strike(vk, s.spot, _rv, is_dark=d, mode="vrp" if tm=="VRP" else "vrp_ratio").update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_by_strike")
             else: st.info("No RV data")
