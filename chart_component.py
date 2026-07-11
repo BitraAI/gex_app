@@ -716,6 +716,7 @@ _HTML_TEMPLATE = """
         } catch (_) {}
         requestAnimationFrame(saveLoop);
     }
+    requestAnimationFrame(saveLoop);
     // ---- Volume Profile Visible Range (VPVR) right-edge overlay --------- //
     // Bins bar volume by price across the bars currently visible on the
     // main pane's x-axis and draws horizontal bars on a transparent canvas

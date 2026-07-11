@@ -21,7 +21,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - 3D Gamma Surface (strike × expiration × GEX, expandable via slider)
   - Dealer Curve (cumulative GEX/VEX/CEX across strikes, with Spot/Call Wall/Put Wall/Gamma Flip markers in GEX mode, VEX Magnet/Repellent markers in VEX mode)
   - OI/Vol by Strike (grouped bars, toggle OI or Volume)
-  - IV by Strike (bar chart, toggle IV/VRP/VRP Ratio, with Spot/RV lines, expandable via slider)
+  - IV by Strike (bar chart, toggle IV Rank/VRP/VRP Ratio, with Spot/RV lines, expandable via slider)
   - IV by Expiration (bar chart, toggle ATM IV/VRP/VRP Ratio, expandable via slider)
   - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP/VRP Ratio, expandable via slider, x-axis locked)
   - Strategy Signals (scored options with automated trade recommendations)
@@ -169,7 +169,7 @@ The alert types fired are identical to the in-app `check_alerts` flow — both p
 Run the auth script to perform the OAuth browser flow and save a token:
 
 ```bash
-(gex_env) uv run schwab_auth.py
+(gex_env) $ uv run schwab_auth.py
 ```
 
 This opens a browser for Schwab login. The token is automatically refreshed by the client library.
@@ -241,9 +241,12 @@ gex_app/
 ├── signals.py             # Strategy signals engine (scoring, recommendations, bias)
 ├── telegram_notifier.py   # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
 ├── telegram_alerts.py     # Standalone cron runner — multi-ticker alerts from ticker_history.json (RTH-guarded)
+├── schwab_data.py         # Standalone Schwab price history fetcher
 ├── test_calculations.py   # Unit tests for calculations
+├── test_streaming.py      # Unit tests for streaming service
 ├── requirements.txt       # Python dependencies
 ├── run.sh                 # Convenience run script
+├── assets/                # Screenshots of charts and dashboard panels
 ├── LICENSE                # License file
 └── README.md              # This file
 ```
