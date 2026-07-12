@@ -41,6 +41,8 @@ _HTML_TEMPLATE = """
     const VOL_H = %(vol_height)d;
     const ATM_H = %(atm_height)d;
     const OSC_H = %(osc_height)d;
+    const IV_SKEW_H = %(iv_skew_height)d;
+    const IV_SKEW_HIST_H = %(iv_skew_hist_height)d;
 
     // Build visible pane list so chart height adjusts to whichever
     // indicators are active — the main pane gets the full window when
@@ -49,6 +51,8 @@ _HTML_TEMPLATE = """
     if (d.volume_series) panes.push({id: 'volume', h: VOL_H});
     if (d.atm_series) panes.push({id: 'atm', h: ATM_H});
     if (d.andean_series) panes.push({id: 'osc', h: OSC_H});
+    if (d.iv_skew_series) panes.push({id: 'iv_skew', h: IV_SKEW_H});
+    if (d.iv_skew_hist) panes.push({id: 'iv_skew_hist', h: IV_SKEW_HIST_H});
 
     // Defensive: collect EVERY priceScaleId referenced by any series so
     // we can guarantee a dedicated pane exists for each indicator scale.
@@ -74,6 +78,8 @@ _HTML_TEMPLATE = """
     collectPaneIds(d.volume_series);
     collectPaneIds(d.atm_series);
     collectPaneIds(d.andean_series);
+    collectPaneIds(d.iv_skew_series);
+    collectPaneIds(d.iv_skew_hist);
 
     const TOTAL_H = panes.reduce(function(s, p) { return s + p.h; }, 0);
 
@@ -118,6 +124,7 @@ _HTML_TEMPLATE = """
         paneSeriesAll[paneId].push(series);
         if (!paneSeries[paneId]) paneSeries[paneId] = series;
     }
+    const _allSeriesByKey = {};
     function addSeries(s) {
         let series = null;
         if (s.type === 'Candlestick') {
@@ -131,6 +138,9 @@ _HTML_TEMPLATE = """
         }
         if (series && s.data) {
             series.setData(s.data);
+        }
+        if (series && s.key) {
+            _allSeriesByKey[s.key] = series;
         }
         // Track every series attached to each sub-pane price scale and on the
         // main 'right' pane (Line overlays like SMA/EMA/Trend/Anchored VWAP/
@@ -162,6 +172,8 @@ _HTML_TEMPLATE = """
     for (const s of d.volume_series || []) { addSeries(s); }
     for (const s of d.atm_series || []) { addSeries(s); }
     for (const s of d.andean_series || []) { addSeries(s); }
+    for (const s of d.iv_skew_series || []) { addSeries(s); }
+    for (const s of d.iv_skew_hist || []) { addSeries(s); }
 
     // ---- Configure ALL price scale margins + Y-axis visibility ---------- //
     // scaleMargins.top  = distance from chart TOP    to price scale TOP    (fraction)
@@ -229,6 +241,8 @@ _HTML_TEMPLATE = """
         }
     }
     applyPanePriceFormat(d.andean_series);
+    applyPanePriceFormat(d.iv_skew_series);
+    applyPanePriceFormat(d.iv_skew_hist);
 
     // ---- Custom y-axis overlay for each indicator pane ------------------- //
     // LWC v4 overlays every price scale on the same right edge, so indicator
@@ -249,7 +263,7 @@ _HTML_TEMPLATE = """
         axisOverlays.push({paneId: p.id, canvas: ov, ctx: ov.getContext('2d'), lastSig: null});
     }
 
-    function formatTick(v, isVolume) {
+    function formatTick(v, isVolume, isPct) {
         if (v == null || isNaN(v)) return '';
         if (isVolume) {
             const a = Math.abs(v);
@@ -258,6 +272,7 @@ _HTML_TEMPLATE = """
             if (a >= 1e3) return (v / 1e3).toFixed(1) + 'K';
             return String(Math.round(v));
         }
+        if (isPct) return (v * 100).toFixed(2) + '%%';
         return v.toFixed(2);
     }
 
@@ -266,6 +281,7 @@ _HTML_TEMPLATE = """
         const edges = paneEdges[ov.paneId];
         if (!series || !edges) return;
         const isVolume = (ov.paneId === 'volume' || ov.paneId === 'atm');
+        const isIVSkew = (ov.paneId === 'iv_skew' || ov.paneId === 'iv_skew_hist');
         // Derive the pane's visible price range from the series mapping at
         // the pane's top/bottom canvas edges.
         let topP, botP;
@@ -328,7 +344,7 @@ _HTML_TEMPLATE = """
             ctx.lineTo(4, localY);
             ctx.stroke();
             ctx.fillStyle = tc;
-            ctx.fillText(formatTick(val, isVolume), stripW - 4, localY);
+            ctx.fillText(formatTick(val, isVolume, isIVSkew), stripW - 4, localY);
         }
     }
 
@@ -909,7 +925,111 @@ _HTML_TEMPLATE = """
         }
         requestAnimationFrame(vpLoop);
     }
+
+    // ---- Store chart references for streaming updates (avoid full redraw) --- //
+    const CHART_KEY = '__lwc_chart_' + ROOT_ID;
+    window[CHART_KEY] = {
+        chart: chart,
+        candleSeries: candleSeries,
+        paneSeries: paneSeries,
+        paneEdges: paneEdges,
+    };
+    // Store each indicator series by key so update script can find+update it
+    for (const sk of Object.keys(_allSeriesByKey)) {
+        window[CHART_KEY + '_' + sk] = _allSeriesByKey[sk];
+    }
 })();
+"""
+
+_UPDATE_TEMPLATE = """
+<script>
+(function() {
+    const ROOT_ID = '%(root_id)s';
+    const DATA = %(json_data)s;
+    const RENDER_KEY = '__lwc_render_' + ROOT_ID;
+    const curVer = (window[RENDER_KEY] || 0) + 1;
+    window[RENDER_KEY] = curVer;
+
+    // Check if chart exists from initial render
+    const CHART_KEY = '__lwc_chart_' + ROOT_ID;
+    const chartRef = window[CHART_KEY];
+    if (!chartRef) return;
+
+    // Update candlestick if new bar provided
+    if (DATA.update && DATA.update.bar) {
+        try { chartRef.candleSeries.update(DATA.update.bar); } catch (_) {}
+    }
+
+    // Update indicators
+    if (DATA.update && DATA.update.indicators) {
+        const ind = DATA.update.indicators;
+        for (const key of Object.keys(ind)) {
+            const sKey = CHART_KEY + '_' + key;
+            const series = window[sKey];
+            if (series) {
+                try { series.update(ind[key]); } catch (_) {}
+            }
+        }
+    }
+
+    // Update IV skew
+    if (DATA.update && DATA.update.iv_skew) {
+        const ivData = DATA.update.iv_skew;
+        if (ivData.iv_skew != null) {
+            const mainKey = CHART_KEY + '_iv_skew_main';
+            const sMain = window[mainKey];
+            if (sMain) {
+                try { sMain.update({time: ivData.time, value: ivData.iv_skew}); } catch (_) {}
+            }
+            const histKey = CHART_KEY + '_iv_skew_hist_series';
+            const sHist = window[histKey];
+            if (sHist) {
+                try { sHist.update({time: ivData.time, value: ivData.iv_skew}); } catch (_) {}
+            }
+            if (ivData.put_iv_25d != null) {
+                const s = window[CHART_KEY + '_iv_skew_put'];
+                if (s) try { s.update({time: ivData.time, value: ivData.put_iv_25d}); } catch (_) {}
+            }
+            if (ivData.call_iv_25d != null) {
+                const s = window[CHART_KEY + '_iv_skew_call'];
+                if (s) try { s.update({time: ivData.time, value: ivData.call_iv_25d}); } catch (_) {}
+            }
+            if (ivData.atm_iv != null) {
+                const s = window[CHART_KEY + '_iv_skew_atm'];
+                if (s) try { s.update({time: ivData.time, value: ivData.atm_iv}); } catch (_) {}
+            }
+        }
+    }
+
+    // Save visible range after update
+    try {
+        const SAVED_KEY = '__lwc_saved_' + ROOT_ID;
+        const ts = chartRef.chart.timeScale();
+        const tr = ts.getVisibleRange();
+        if (tr) {
+            const subPriceRanges = {};
+            // Sample each indicator pane's Y range losslessly
+            for (const pid of Object.keys(chartRef.paneSeries)) {
+                if (pid === 'right') continue;
+                const series = chartRef.paneSeries[pid];
+                if (!series) continue;
+                try {
+                    const topP = series.coordinateToPrice(chartRef.paneEdges[pid].top);
+                    const botP = series.coordinateToPrice(chartRef.paneEdges[pid].bottom);
+                    if (topP != null && botP != null) {
+                        subPriceRanges[pid] = {from: Math.min(topP, botP), to: Math.max(topP, botP)};
+                    }
+                } catch (_) {}
+            }
+            window[SAVED_KEY] = {
+                mainRange: { from: tr.from, to: tr.to },
+                subPriceRanges: subPriceRanges,
+                hasManual: true,
+            };
+        }
+    } catch (_) {}
+})();
+</script>
 """
 
 
@@ -930,6 +1050,7 @@ def build_init_data(
     put_wall: float | None = None,
     is_dark: bool = True,
     last_close: float | None = None,
+    iv_skew_history: list[dict] | None = None,
 ) -> dict:
     from charts import _get_est_offset, _sma, _ema, _trend, _andean_oscillator, _ema50_squeeze, _anchored_vwap, INDICATORS
 
@@ -964,6 +1085,8 @@ def build_init_data(
     andean_series = None
     volume_series = None
     atm_series = None
+    iv_skew_series = None
+    iv_skew_hist = None
     vp_vols = None
 
     candlestick_options = {
@@ -1175,6 +1298,33 @@ def build_init_data(
                         },
                     })
                 continue
+            if name == "IV Skew (25Δ)":
+                iv_points = []
+                put_iv_points = []
+                call_iv_points = []
+                atm_iv_points = []
+                hist_data = []
+                _prev_skew = None
+                for pt in (iv_skew_history or []):
+                    t = _convert_time(pt["datetime"], et_offset)
+                    skew = pt.get("iv_skew")
+                    if skew is None:
+                        continue
+                    iv_points.append({"time": t, "value": float(skew)})
+                    color = "#26a69a" if _prev_skew is not None and float(skew) > _prev_skew else "#ef5350"
+                    hist_data.append({"time": t, "value": float(skew), "color": color})
+                    _prev_skew = float(skew)
+                    put_v = pt.get("put_iv_25d")
+                    if put_v is not None:
+                        put_iv_points.append({"time": t, "value": float(put_v)})
+                    call_v = pt.get("call_iv_25d")
+                    if call_v is not None:
+                        call_iv_points.append({"time": t, "value": float(call_v)})
+                    atm_v = pt.get("atm_iv")
+                    if atm_v is not None:
+                        atm_iv_points.append({"time": t, "value": float(atm_v)})
+                iv_skew_hist = [{"type": "Histogram", "key": "iv_skew_hist_series", "data": hist_data, "options": {"color": "#ffeb3b", "title": "IV Skew", "priceScaleId": "iv_skew_hist"}}]
+                continue
             period = cfg["period"]
             if len(closes) < period: continue
             vals = _ema(closes, period) if name.startswith("EMA") else _sma(closes, period)
@@ -1182,6 +1332,10 @@ def build_init_data(
             series_list.append({"type": "Line", "key": f"ma_{name}", "data": [{"time": cd[i]["time"], "value": vals[i - offset]} for i in range(offset, len(cd))], "options": {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name}})
 
     result = {"isDark": is_dark, "series": series_list}
+    if iv_skew_series is not None:
+        result["iv_skew_series"] = iv_skew_series
+    if iv_skew_hist is not None:
+        result["iv_skew_hist"] = iv_skew_hist
     if volume_series is not None:
         result["volume_series"] = volume_series
     if atm_series is not None:
@@ -1251,6 +1405,7 @@ def compute_latest_indicators(
         if name == "ATM_Option_Flow": continue
         if name == "Volume Profile": continue
         if name == "Anchored VWAP": continue
+        if name == "IV Skew (25Δ)": continue
         if name == "Andean Osc":
             bull, bear, signal = _andean_oscillator(opens, closes, cfg["length"], cfg["sigLength"])
             result["andean"] = {"time": last_t, "bull": round(bull[-1], 2), "bear": round(bear[-1], 2), "signal": round(signal[-1], 2)}
@@ -1268,23 +1423,20 @@ def compute_latest_indicators(
     return result
 
 
-def render_chart(candles, indicators=None, call_wall=None, put_wall=None, is_dark=True, force_reinit=False, last_close=None, status=None, symbol="SPY"):
+def render_chart(candles, indicators=None, call_wall=None, put_wall=None, is_dark=True, force_reinit=False, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
     import time
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
     osc_height = 100 if (indicators and "Andean Osc" in indicators) else 0
-    init_data = build_init_data(candles, indicators, call_wall, put_wall, is_dark, last_close=last_close)
+    iv_skew_height = 120 if (indicators and "IV Skew (25Δ)" in indicators) else 0
+    iv_skew_hist_height = 80 if (indicators and "IV Skew (25Δ)" in indicators) else 0
+    init_data = build_init_data(candles, indicators, call_wall, put_wall, is_dark, last_close=last_close, iv_skew_history=iv_skew_history)
     if status:
         init_data["status"] = status
     payload = {"init": init_data}
-    # Stable DOM id so save/restore of user scroll position survives the
-    # 1-second fragment re-render.  The JS code stores the visible range
-    # keyed by this id in window.__lwc_saved_{root_id}. Using the symbol
-    # ensures different tickers maintain separate chart state, but switching
-    # the same ticker preserves Y-axis if saved range exists.
     root_id = f"lwc_candlestick_{symbol}"
     json_str = json.dumps(payload)
     atm_height = 100 if (indicators and "ATM_Option_Flow" in indicators) else 0
-    total_height = main_height + vol_height + atm_height + osc_height
-    html = _HTML_TEMPLATE % {"root_id": root_id, "main_height": main_height, "vol_height": vol_height, "atm_height": atm_height, "osc_height": osc_height, "total_height": total_height, "lib": _JS_LIB, "json_data": json_str}
+    total_height = main_height + vol_height + atm_height + osc_height + iv_skew_height + iv_skew_hist_height
+    html = _HTML_TEMPLATE % {"root_id": root_id, "main_height": main_height, "vol_height": vol_height, "atm_height": atm_height, "osc_height": osc_height, "iv_skew_height": iv_skew_height, "iv_skew_hist_height": iv_skew_hist_height, "total_height": total_height, "lib": _JS_LIB, "json_data": json_str}
     st.html(html, unsafe_allow_javascript=True)

@@ -128,6 +128,7 @@ _SESSION_DEFAULTS = {
     "iv_rank": None,
     "candlestick_data": pd.DataFrame(),
     "candlestick_label": "",
+    "iv_skew_history": [],
 }
 
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
@@ -241,6 +242,7 @@ def fetch_data(symbol: str) -> bool:
     if symbol != st.session_state.get("symbol"):
         st.session_state.prev_alerts_state = {}
         st.session_state.alerts = []
+        st.session_state.iv_skew_history = []
     st.session_state.data = data
     st.session_state.spot = spot
     st.session_state.symbol = symbol
@@ -251,10 +253,12 @@ def fetch_data(symbol: str) -> bool:
     st.session_state.last_refresh = datetime.now()
     st.session_state.underlying_20d_rv = run_async(get_20d_rv(st.session_state.client, symbol))
     st.session_state.next_earnings_date = run_async(get_next_earnings_date(st.session_state.client, symbol))
-    st.session_state.iv_rank = compute_iv_rank(symbol)
     prefetch_daily_candles(symbol)
     apply_filters()
     compute_state()
+    st.session_state.iv_rank = compute_iv_rank(
+        symbol, atm_iv=st.session_state.analytics.get("atm_iv")
+    )
     check_alerts(st.session_state.analytics, spot)
     return True
 
@@ -323,6 +327,18 @@ def compute_state():
         if e.get("call_oi", 0) + e.get("put_oi", 0) > 0 or e.get("atm_iv", 0) > 0
     ]
     st.session_state.analytics = analytics
+    _iv_skew = analytics.get("iv_skew")
+    _put_iv = analytics.get("put_iv_25d")
+    _call_iv = analytics.get("call_iv_25d")
+    _atm_iv = analytics.get("atm_iv")
+    if _iv_skew is not None:
+        st.session_state.iv_skew_history.append({
+            "datetime": int(pd.Timestamp.now(tz="UTC").value // 1_000_000),
+            "iv_skew": _iv_skew,
+            "put_iv_25d": _put_iv,
+            "call_iv_25d": _call_iv,
+            "atm_iv": _atm_iv,
+        })
     st.session_state.expirations = sorted(set(
         e["expiration"] for e in st.session_state.data
     ))
@@ -531,7 +547,7 @@ def prefetch_daily_candles(symbol: str):
         st.session_state.candle_last_fetch[key] = datetime.now(timezone.utc)
 
 
-def compute_iv_rank(symbol: str) -> float | None:
+def compute_iv_rank(symbol: str, atm_iv: float | None = None) -> float | None:
     df = load_candle_cache(symbol, "1d")
     if df.empty or len(df) < 2:
         try:
@@ -545,14 +561,28 @@ def compute_iv_rank(symbol: str) -> float | None:
         return None
     df = df.sort_values("datetime")
     closes = df["close"].tolist()
-    returns = [(closes[i] / closes[i-1] - 1) * 100 for i in range(1, len(closes))]
-    recent_252 = returns[-252:]
-    latest = recent_252[-1]
+
+    returns = [(closes[i] / closes[i-1] - 1) for i in range(1, len(closes))]
+    rv_values = []
+    for i in range(19, len(returns)):
+        rv_20d = np.std(returns[i-19:i+1]) * (252 ** 0.5)
+        rv_values.append(rv_20d)
+
+    if not rv_values:
+        return None
+
+    recent_252 = rv_values[-252:]
+
+    if atm_iv is not None and atm_iv > 0:
+        current = atm_iv
+    else:
+        current = rv_values[-1]
+
     lo = min(recent_252)
     hi = max(recent_252)
     if hi == lo:
         return 50.0
-    return round((latest - lo) / (hi - lo) * 100, 2)
+    return round((current - lo) / (hi - lo) * 100, 2)
 
 
 def render_sidebar():
@@ -702,7 +732,7 @@ def render_candlesticks_frag():
             timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()), index=0, label_visibility="collapsed", width=100)
         
         with row2:
-            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "ATM_Option_Flow", "Andean Osc"]
+            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "ATM_Option_Flow", "Andean Osc", "IV Skew (25Δ)"]
             selected_indicators = st.multiselect("Indicators", indicator_options, default=[], label_visibility="collapsed")
         
         from client import load_candle_cache
@@ -1126,6 +1156,18 @@ def render_candlesticks_frag():
             _status = {"text": _msg, "level": "warning"}
 
         if candles_payload:
+            _iv_skew_hist = s.get("iv_skew_history") or []
+            if "IV Skew (25Δ)" in selected_indicators and _analytics.get("iv_skew") is not None:
+                _now_ms = int(pd.Timestamp.now(tz="UTC").value // 1_000_000)
+                if not _iv_skew_hist or _iv_skew_hist[-1].get("datetime") != _now_ms:
+                    _iv_skew_hist = list(_iv_skew_hist)
+                    _iv_skew_hist.append({
+                        "datetime": _now_ms,
+                        "iv_skew": _analytics["iv_skew"],
+                        "put_iv_25d": _analytics.get("put_iv_25d"),
+                        "call_iv_25d": _analytics.get("call_iv_25d"),
+                        "atm_iv": _analytics.get("atm_iv"),
+                    })
             render_chart(
                 candles_payload,
                 indicators=selected_indicators,
@@ -1135,6 +1177,7 @@ def render_candlesticks_frag():
                 last_close=last_close,
                 status=_status,
                 symbol=symbol,
+                iv_skew_history=_iv_skew_hist,
             )
         st.caption(f"{s.candlestick_label} bars ({len(s.candlestick_data)})")
 
@@ -1352,11 +1395,13 @@ def render_trade_signals_frag():
         aks = sorted(set(e["strike"] for e in s.filtered_data)); atm_k = min(aks, key=lambda k: abs(k-s.spot)) if aks else s.spot
         sd = [e for e in s.filtered_data if e.get("open_interest",0)>0 and (e.get("mark",0) or 0)>0 and ((e["strike"]==atm_k) or (e["type"]=="CALL" and e["strike"]>s.spot) or (e["type"]=="PUT" and e["strike"]<s.spot))]
         with st.expander("How to read these signals", expanded=False):
-            st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+2% option expensive. &lt;-2% option cheap.\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**Scoring** &mdash; Sell Premium (>= +1), Buy Premium (<= -1), Neutral.\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
-        b, br = assess_market_bias(s.analytics, s.spot)
+            st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+2% option expensive. &lt;-2% option cheap.\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where ATM IV sits in the trailing 1Y range of 20d realized vol. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Scoring** &mdash; Sell Premium (>= +1), Buy Premium (<= -1), Neutral.\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
+        _iv_rank = s.get("iv_rank")
+        b, br = assess_market_bias(s.analytics, s.spot, iv_rank=_iv_rank)
         e = {"Bullish":"🟢","Bearish":"🔴","Neutral":"🟡"}
         st.markdown(f"**Market Bias:** {e.get(b,'')} {b} &mdash; {br}")
         st.markdown(f"**Next Earnings:** {s.get('next_earnings_date') or 'N/A'}")
+        st.markdown(f"**IV Rank:** {_iv_rank:.1f}%" if _iv_rank is not None else "")
         ar = s.get("strikes_atm_range",20)
         if ar>0 and sd and s.spot>0:
             sk = sorted(set(e["strike"] for e in sd)); ak = min(sk, key=lambda k: abs(k-s.spot)); ai = sk.index(ak)
@@ -1366,7 +1411,7 @@ def render_trade_signals_frag():
         with c1:
             pt = st.radio("Premium Type", ["Buy Premium","Sell Premium"], horizontal=True, key="premium_type")
             stg = st.selectbox("Strategy", ["Long Calls","Long Puts","Call Debit Spread","Put Debit Spread","Long Straddles","Long Strangles","Calendar Spread"] if pt=="Buy Premium" else ["Short Calls","Short Puts","Call Credit Spread","Put Credit Spread","Iron Condor","Butterfly","Broken Wing Butterfly","Jade Lizard"])
-        sc = score_options(sd2, s.spot, _rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"))
+        sc = score_options(sd2, s.spot, _rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"), iv_rank=_iv_rank)
         rc = generate_recommendations(sc, s.spot, strategy=stg, all_data=sd, rv=_rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"))
         with c2:
             for r in rc: st.markdown(f"- {r}")

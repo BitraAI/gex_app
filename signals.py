@@ -4,6 +4,7 @@ from typing import Any, Optional
 def assess_market_bias(
     analytics: dict[str, Any],
     spot: float,
+    iv_rank: float | None = None,
 ) -> tuple[str, str]:
     score = 0.0
     reasons = []
@@ -46,6 +47,14 @@ def assess_market_bias(
             score += 0.5
             reasons.append(f"Put wall close below (${put_wall:g})")
 
+    if iv_rank is not None:
+        if iv_rank > 70:
+            score -= 1
+            reasons.append(f"IV Rank high ({iv_rank:.0f}%) — options expensive, favor selling")
+        elif iv_rank < 30:
+            score += 1
+            reasons.append(f"IV Rank low ({iv_rank:.0f}%) — options cheap, favor buying")
+
     if score >= 1:
         bias = "Bullish"
     elif score <= -1:
@@ -63,6 +72,7 @@ def score_options(
     call_wall: Optional[float] = None,
     put_wall: Optional[float] = None,
     iv_skew: Optional[float] = None,
+    iv_rank: float | None = None,
 ) -> list[dict[str, Any]]:
     gex_per_strike: dict[float, float] = {}
     for e in data:
@@ -118,6 +128,14 @@ def score_options(
             elif iv_skew < 0 and opt_type == "PUT":
                 score -= 0.5
                 reasons.append(f"25Δ skew {iv_skew:.1%} → puts cheap")
+
+        if iv_rank is not None:
+            if iv_rank > 70:
+                score += 0.5
+                reasons.append(f"IV Rank high ({iv_rank:.0f}%) → sell premium")
+            elif iv_rank < 30:
+                score -= 0.5
+                reasons.append(f"IV Rank low ({iv_rank:.0f}%) → buy premium")
 
         if score >= 1:
             signal = "Sell Premium"
