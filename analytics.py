@@ -43,7 +43,17 @@ def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool 
     expected_pin = _find_expected_pin(strikes, spot, data_full)
     analytics["expected_pin"] = expected_pin
 
-    analytics["iv_skew"] = _calculate_iv_skew(data, spot)
+    iv_skew_result = _calculate_iv_skew(data, spot)
+    if isinstance(iv_skew_result, dict):
+        analytics["iv_skew"] = iv_skew_result["iv_skew"]
+        analytics["put_iv_25d"] = iv_skew_result["put_iv_25d"]
+        analytics["call_iv_25d"] = iv_skew_result["call_iv_25d"]
+        analytics["atm_iv"] = iv_skew_result["atm_iv"]
+    else:
+        analytics["iv_skew"] = iv_skew_result
+        analytics["put_iv_25d"] = None
+        analytics["call_iv_25d"] = None
+        analytics["atm_iv"] = None
     analytics["expected_move"] = _calculate_expected_move(data, spot)
     analytics["num_strikes"] = len(strikes)
     analytics["num_expirations"] = len(by_exp)
@@ -108,7 +118,7 @@ def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: li
     return best_strike
 
 
-def _calculate_iv_skew(data: list[dict[str, Any]], spot: float) -> Optional[float]:
+def _calculate_iv_skew(data: list[dict[str, Any]], spot: float) -> Optional[dict[str, float]]:
     front = min((e for e in data if e["days_to_exp"] > 0), key=lambda e: e["days_to_exp"], default=None)
     if not front:
         return None
@@ -125,7 +135,20 @@ def _calculate_iv_skew(data: list[dict[str, Any]], spot: float) -> Optional[floa
     put = min(otm_puts, key=lambda e: abs(abs(e["delta"]) - 0.25))
     call = min(otm_calls, key=lambda e: abs(e["delta"] - 0.25))
 
-    return round((put["iv"] - call["iv"]) / 100, 4)
+    atm = min(exp_data, key=lambda e: abs(e["strike"] - spot), default=None)
+    atm_iv = (atm["iv"] / 100 if atm and atm["iv"] > 3 else atm["iv"] if atm else None)
+
+    put_iv_raw = put["iv"]
+    call_iv_raw = call["iv"]
+    put_iv = put_iv_raw / 100 if put_iv_raw > 3 else put_iv_raw
+    call_iv = call_iv_raw / 100 if call_iv_raw > 3 else call_iv_raw
+
+    return {
+        "iv_skew": round(put_iv - call_iv, 4),
+        "put_iv_25d": round(put_iv, 4),
+        "call_iv_25d": round(call_iv, 4),
+        "atm_iv": round(atm_iv, 4) if atm_iv is not None else None,
+    }
 
 
 def _calculate_expected_move(data: list[dict[str, Any]], spot: float) -> Optional[dict[str, float]]:

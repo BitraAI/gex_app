@@ -1260,6 +1260,7 @@ INDICATORS = {
     "EMA 50 Squeeze": {},
     "Volume Profile": {},
     "Anchored VWAP": {"color": "#8b5cf6", "lineWidth": 2},
+    "IV Skew (25Δ)": {},
 }
 
 

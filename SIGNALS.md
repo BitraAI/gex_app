@@ -6,7 +6,7 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 
 ## Market Bias
 
-`assess_market_bias()` in `signals.py:4` computes a directional bias score from four factors:
+`assess_market_bias()` in `signals.py:4` computes a directional bias score from five factors:
 
 | Factor | Bullish contribution | Bearish contribution |
 |---|---|---|
@@ -14,6 +14,7 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 | **Net GEX** | Positive net gamma (+1) | Negative net gamma (-1) |
 | **IV Skew (25Δ)** | Positive skew → calls cheap (+1) | Negative skew → calls expensive (-1) |
 | **Wall Proximity** | Put wall closer than call wall (+0.5) | Call wall closer than put wall (-0.5) |
+| **IV Rank** | Low rank (<30) → options cheap, favor buying (+1) | High rank (>70) → options expensive, favor selling (-1) |
 
 **Thresholds:** ≥ +1 → Bullish, ≤ -1 → Bearish, else Neutral.
 
@@ -32,6 +33,8 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 | **Within 2% of call wall** | -0.5 |
 | **Within 2% of put wall** | -0.5 |
 | **IV Skew skew adjustment** | ±0.5 based on type (call/put) and skew sign |
+| **IV Rank > 70** | +0.5 (high rank → sell premium) |
+| **IV Rank < 30** | -0.5 (low rank → buy premium) |
 
 **Signal thresholds:**
 - **Score ≥ +1** → Sell Premium

@@ -21,7 +21,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - 3D Gamma Surface (strike × expiration × GEX, expandable via slider)
   - Dealer Curve (cumulative GEX/VEX/CEX across strikes, with Spot/Call Wall/Put Wall/Gamma Flip markers in GEX mode, VEX Magnet/Repellent markers in VEX mode)
   - OI/Vol by Strike (grouped bars, toggle OI or Volume)
-  - IV by Strike (bar chart, toggle IV Rank/VRP/VRP Ratio, with Spot/RV lines, expandable via slider)
+   - IV by Strike (bar chart, toggle IV/VRP/VRP Ratio, with Spot/RV lines, expandable via slider)
   - IV by Expiration (bar chart, toggle ATM IV/VRP/VRP Ratio, expandable via slider)
   - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP/VRP Ratio, expandable via slider, x-axis locked)
   - Strategy Signals (scored options with automated trade recommendations)
@@ -31,10 +31,10 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Max +GEX, Max -GEX
   - Dealer Position (Long/Short Gamma)
   - IV Skew (25-delta), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
-  - IV Rank — Percentile rank of the latest daily return within the 252-day range of daily returns (0–100)
+   - IV Rank — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
 - **Strategy Signals:**
-  - Per-option scoring (VRP + Dealer Gamma + Wall Proximity)
-  - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance)
+  - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank)
+  - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
   - Strategy recommendations: Sell/Buy Premium, Call/Put Credit Spreads, Iron Condor, Butterfly, Broken Wing Butterfly, Straddle, Strangle, Calendar Spread
   - All strategies use same-expiration legs where applicable
   - Iron Condor uses ATM range boundaries for short legs with protection legs from full data
@@ -336,7 +336,7 @@ Where:
 - **VRP Ratio** — Per strike: `VRP Ratio = IV / RV`. The ratio form of VRP, where values above 1 indicate options price more volatility than realized (expensive) and below 1 indicates the opposite (cheap).
 - **VEX Magnet** — Strike with highest positive net VEX (most positive vanna exposure). As IV rises, dealer hedging creates buying pressure that attracts price toward this level.
 - **VEX Repellent** — Strike with most negative net VEX. As IV rises, dealer hedging creates selling pressure that pushes price away from this level.
-- **IV Rank** — Percentile rank of the latest daily return within the trailing 252-day range of daily returns. Formula: `round((latest_return - min_return_252d) / (max_return_252d - min_return_252d) × 100, 2)`. A value of 50 means the current daily return is at the median of the 1-year range. Values above 50 indicate a larger-than-median daily move (high volatility regime), and values below 50 indicate a smaller-than-median move (low volatility regime).
+- **IV Rank** — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. The 20-day RV for each trailing day is computed as `σ × √252` where `σ` is the population standard deviation of the 20 most recent daily log returns. The current ATM IV (from the front-month option chain) is then ranked against the 252 trailing RV values. If ATM IV is unavailable, the latest 20-day RV is used as a fallback. Formula: `round((current - min_rv_252d) / (max_rv_252d - min_rv_252d) × 100, 2)`. Values >70 indicate options are expensive relative to history (favor selling premium), values <30 indicate options are cheap (favor buying premium).
 
 **Dealer Curve:**
 Plots cumulative net GEX, VEX, or CEX across a continuum of hypothetical spot prices (toggleable). At each price level:
