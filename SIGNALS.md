@@ -13,8 +13,10 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 | **Gamma Flip** | Spot below flip → dealers long gamma (+1) | Spot above flip → dealers short gamma (-1) |
 | **Net GEX** | Positive net gamma (+1) | Negative net gamma (-1) |
 | **IV Skew (25Δ)** | Positive skew → calls cheap (+1) | Negative skew → puts cheap (-1) |
-| **Wall Proximity** | Put wall closer than call wall (+0.5) | Call wall closer than put wall (-0.5) |
+| **Wall Proximity** | Call wall closer than put wall (+0.5) | Put wall closer than call wall (-0.5) |
 | **IV Rank** | Low rank (<30) → options cheap, favor buying (+1) | High rank (>70) → options expensive, favor selling (-1) |
+
+**Wall Proximity detail:** Compares distances from spot to each wall. Call wall closer → +0.5 (sell premium against resistance). Put wall closer → -0.5 (risky for short puts; lean buy premium).
 
 **Thresholds:** ≥ +1 → Bullish, ≤ -1 → Bearish, else Neutral.
 

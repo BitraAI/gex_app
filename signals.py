@@ -40,12 +40,12 @@ def assess_market_bias(
     if call_wall and put_wall and spot > 0:
         dist_above = call_wall - spot
         dist_below = spot - put_wall
-        if dist_above < dist_below * 0.5:
-            score -= 0.5
-            reasons.append(f"Call wall close above (${call_wall:g})")
-        elif dist_below < dist_above * 0.5:
+        if dist_above < dist_below:
             score += 0.5
-            reasons.append(f"Put wall close below (${put_wall:g})")
+            reasons.append(f"Call wall closer than put wall (${call_wall:g}) — resistance near")
+        elif dist_below < dist_above:
+            score -= 0.5
+            reasons.append(f"Put wall closer than call wall (${put_wall:g}) — support near")
 
     if iv_rank is not None:
         if iv_rank > 70:
