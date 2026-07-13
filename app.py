@@ -710,8 +710,7 @@ def _build_candlestick_df(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return resampled.reset_index().rename(columns={"index": "datetime"})
 
 
-@st.fragment(run_every=1)
-def render_candlesticks_frag():
+def render_candlesticks():
     s = st.session_state
     if not s.get("client"):
         st.info("Initialize authentication to load data")
@@ -1201,7 +1200,6 @@ def render_metrics_frag():
         render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=s.get("iv_rank"))
 
 
-@st.fragment(run_every=10)
 def render_market_structure_frag():
     s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
     if not s.get("strikes"):
@@ -1234,7 +1232,6 @@ def render_market_structure_frag():
             st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="dealer_curve_chart")
 
 
-@st.fragment(run_every=30)
 def render_positioning_frag():
     s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
     if not s.get("strikes"):
@@ -1282,7 +1279,6 @@ def render_positioning_frag():
             )
 
 
-@st.fragment(run_every=15)
 def render_volatility_frag():
     s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
     if not s.get("strikes"):
@@ -1333,7 +1329,6 @@ def render_volatility_frag():
             else: st.info("No RV data")
 
 
-@st.fragment(run_every=20)
 def render_heatmaps_frag():
     s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
     if not s.get("strikes"):
@@ -1378,7 +1373,6 @@ def render_heatmaps_frag():
                 st.info("No RV data")
 
 
-@st.fragment(run_every=10)
 def render_trade_signals_frag():
     s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
 
@@ -1417,7 +1411,6 @@ def render_trade_signals_frag():
             for r in rc: st.markdown(f"- {r}")
 
 
-@st.fragment(run_every=10)
 def render_options_data_frag():
     if not st.session_state.get("data"): return
     render_analytics_panel()
@@ -1566,6 +1559,21 @@ def render_table():
     st.dataframe(styled, width='stretch', height=400)
 
 
+@st.fragment(run_every=10)
+def render_tabs_frag():
+    s = st.session_state
+    if not s.get("data"):
+        return
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks"])
+    with tab1: render_market_structure_frag()
+    with tab2: render_positioning_frag()
+    with tab3: render_volatility_frag()
+    with tab4: render_heatmaps_frag()
+    with tab5: render_trade_signals_frag()
+    with tab6: render_candlesticks()
+    with st.container(): render_options_data_frag()
+
+
 def main():
     render_sidebar()
 
@@ -1577,14 +1585,7 @@ def main():
 
         if st.session_state.get("data"):
             render_metrics_frag()
-            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks"])
-            with tab1: render_market_structure_frag()
-            with tab2: render_positioning_frag()
-            with tab3: render_volatility_frag()
-            with tab4: render_heatmaps_frag()
-            with tab5: render_trade_signals_frag()
-            with tab6: render_candlesticks_frag()
-            with st.container(): render_options_data_frag()
+            render_tabs_frag()
         else:
             st.info("Enter a stock ticker in the sidebar and click Refresh to begin analysis")
             st.markdown(r"""
