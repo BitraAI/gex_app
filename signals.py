@@ -33,7 +33,7 @@ def assess_market_bias(
             reasons.append(f"IV Skew (25Δ) positive ({iv_skew:+.2%}) — calls cheap (bullish)")
         elif iv_skew < 0:
             score -= 1
-            reasons.append(f"IV Skew (25Δ) negative ({iv_skew:+.2%}) — calls expensive (bearish)")
+            reasons.append(f"IV Skew (25Δ) negative ({iv_skew:+.2%}) — puts cheap (bearish)")
 
     call_wall = analytics.get("call_wall")
     put_wall = analytics.get("put_wall")

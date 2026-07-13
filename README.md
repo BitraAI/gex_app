@@ -31,7 +31,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Max +GEX, Max -GEX
   - Dealer Position (Long/Short Gamma)
   - IV Skew (25-delta), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
-   - IV Rank — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
+  - IV Rank — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
