@@ -109,7 +109,7 @@ def score_options(
             reasons.append("Dealer resistance above")
 
         if dist_to_call_wall is not None and 0 < dist_to_call_wall < spot * 0.02:
-            score -= 0.5
+            score += 0.5
             reasons.append("Near call wall")
         if dist_to_put_wall is not None and 0 < dist_to_put_wall < spot * 0.02:
             score -= 0.5

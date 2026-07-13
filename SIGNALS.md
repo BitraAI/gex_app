@@ -30,8 +30,8 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 | **VRP < -2%** | -1 (option cheap → buy) |
 | **Positive net GEX below spot** | -0.5 (dealer support below) |
 | **Negative net GEX above spot** | +0.5 (dealer resistance above) |
-| **Within 2% of call wall** | -0.5 |
-| **Within 2% of put wall** | -0.5 |
+| **Within 2% of call wall** | +0.5 | Resisting above → sell premium against resistance |
+| **Within 2% of put wall** | -0.5 | Supporting below → risky for short puts; lean buy premium |
 | **IV Skew skew adjustment** | ±0.5 — see detail below |
 | **IV Rank > 70** | +0.5 (high rank → sell premium) |
 | **IV Rank < 30** | -0.5 (low rank → buy premium) |
