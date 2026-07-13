@@ -32,9 +32,14 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 | **Negative net GEX above spot** | +0.5 (dealer resistance above) |
 | **Within 2% of call wall** | -0.5 |
 | **Within 2% of put wall** | -0.5 |
-| **IV Skew skew adjustment** | ±0.5 based on type (call/put) and skew sign |
+| **IV Skew skew adjustment** | ±0.5 — see detail below |
 | **IV Rank > 70** | +0.5 (high rank → sell premium) |
 | **IV Rank < 30** | -0.5 (low rank → buy premium) |
+
+**IV Skew adjustment detail** (`iv_skew = put_iv_25d - call_iv_25d`):
+
+- IV Skew > 0 (put skew) → calls cheap → **-0.5**
+- IV Skew < 0 (call skew) → puts cheap → **+0.5**
 
 **Signal thresholds:**
 - **Score ≥ +1** → Sell Premium

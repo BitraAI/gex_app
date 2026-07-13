@@ -119,14 +119,8 @@ def score_options(
             if iv_skew > 0 and opt_type == "CALL":
                 score -= 0.5
                 reasons.append(f"25Δ skew +{iv_skew:.1%} → calls cheap")
-            elif iv_skew > 0 and opt_type == "PUT":
-                score += 0.5
-                reasons.append(f"25Δ skew +{iv_skew:.1%} → puts rich")
-            elif iv_skew < 0 and opt_type == "CALL":
-                score += 0.5
-                reasons.append(f"25Δ skew {iv_skew:.1%} → calls rich")
             elif iv_skew < 0 and opt_type == "PUT":
-                score -= 0.5
+                score += 0.5
                 reasons.append(f"25Δ skew {iv_skew:.1%} → puts cheap")
 
         if iv_rank is not None:
