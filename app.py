@@ -52,6 +52,7 @@ from charts import (
     TEMPLATE,
     _get_style,
     _get_css,
+    set_dark,
     INDICATORS,
     _sma,
     _ema,
@@ -77,6 +78,7 @@ st.set_page_config(
 )
 
 _initial_d = st.session_state.get("theme", "light") == "dark"
+set_dark(_initial_d)
 st.markdown(_get_style(_initial_d), unsafe_allow_html=True)
 
 st.markdown("""
@@ -1351,7 +1353,7 @@ def render_heatmaps_frag():
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
             otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
-            fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", spot=s.spot)
+            fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_oi_chart")
 
     elif om == "Volume":
@@ -1361,7 +1363,7 @@ def render_heatmaps_frag():
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
             otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
-            fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot)
+            fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_v_chart")
 
     elif om in ("VRP", "VRP Ratio"):

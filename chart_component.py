@@ -29,9 +29,9 @@ _HTML_TEMPLATE = """
     window[SAVED_KEY] = null;
 
     const d = DATA.init;
-    const bg = '#ffffff';
-    const tc = '#1e293b';
-    const gc = '#e9eef3';
+    const bg = '%(bg)s';
+    const tc = '%(tc)s';
+    const gc = '%(gc)s';
 
     // -------- Single chart with multiple price scales (shared x-axis) ----- //
     // All series (candlesticks, volume, ATM, oscillator) live in one chart
@@ -1437,5 +1437,10 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, force_
     json_str = json.dumps(payload)
     atm_height = 100 if (indicators and "ATM_Option_Flow" in indicators) else 0
     total_height = main_height + vol_height + atm_height + osc_height + iv_skew_height + iv_skew_hist_height
-    html = _HTML_TEMPLATE % {"root_id": root_id, "main_height": main_height, "vol_height": vol_height, "atm_height": atm_height, "osc_height": osc_height, "iv_skew_height": iv_skew_height, "iv_skew_hist_height": iv_skew_hist_height, "total_height": total_height, "lib": _JS_LIB, "json_data": json_str}
+    from charts import _IS_DARK
+    if _IS_DARK:
+        _bg, _tc, _gc = "#dbeafe", "#1e293b", "#bfdbfe"
+    else:
+        _bg, _tc, _gc = "#ffffff", "#1e293b", "#e9eef3"
+    html = _HTML_TEMPLATE % {"root_id": root_id, "main_height": main_height, "vol_height": vol_height, "atm_height": atm_height, "osc_height": osc_height, "iv_skew_height": iv_skew_height, "iv_skew_hist_height": iv_skew_hist_height, "total_height": total_height, "lib": _JS_LIB, "json_data": json_str, "bg": _bg, "tc": _tc, "gc": _gc}
     st.html(html, unsafe_allow_javascript=True)
