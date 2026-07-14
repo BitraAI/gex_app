@@ -50,8 +50,8 @@ from signals import score_options, generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import (
     TEMPLATE,
-    CSS,
-    STYLE,
+    _get_style,
+    _get_css,
     INDICATORS,
     _sma,
     _ema,
@@ -76,7 +76,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(STYLE, unsafe_allow_html=True)
+_initial_d = st.session_state.get("theme", "light") == "dark"
+st.markdown(_get_style(_initial_d), unsafe_allow_html=True)
 
 st.markdown("""
 <style>
@@ -153,7 +154,7 @@ for k, v in _SESSION_DEFAULTS.items():
 if not st.session_state.ticker_history:
     st.session_state.ticker_history = _load_ticker_history()
 
-st.markdown(CSS, unsafe_allow_html=True)
+st.markdown(_get_css(_initial_d), unsafe_allow_html=True)
 
 # Replace streaming service if it was created with old code (no shared loop)
 if st.session_state.get("client") is not None:
@@ -588,6 +589,13 @@ def compute_iv_rank(symbol: str, atm_iv: float | None = None) -> float | None:
 def render_sidebar():
     with st.sidebar:
         st.markdown("## GammaEx")
+
+        _is_dark = st.session_state.get("theme", "light") == "dark"
+        if st.toggle("Dark theme", value=_is_dark, key="theme_toggle"):
+            st.session_state.theme = "dark"
+        else:
+            st.session_state.theme = "light"
+
         st.markdown("---")
 
         ticker_history = st.session_state.get("ticker_history", [])
@@ -673,15 +681,6 @@ def render_sidebar():
         st.session_state.show_puts = st.checkbox("Show Puts", value=True)
         st.session_state.show_itm = st.checkbox("Show ITM", True)
         st.session_state.show_otm = st.checkbox("Show OTM", True)
-
-        st.markdown("### Theme")
-        apply_filters()
-        compute_state()
-        st.selectbox(
-            "Theme", ["light"],
-            index=0,
-            label_visibility="collapsed",
-        )
 
 
 def render_indicators_panel():
@@ -1570,6 +1569,35 @@ def render_tabs_frag():
     s = st.session_state
     if not s.get("data"):
         return
+    if st.session_state.get("theme", "light") == "dark":
+        st.markdown("""
+<style>
+div[data-testid="stTabs"] [role="tab"] { color: #ffffff !important; background-color: transparent !important; }
+div[data-testid="stTabs"] [role="tab"] span { color: #ffffff !important; }
+div[data-testid="stTabs"] [role="tab"] div { color: #ffffff !important; }
+div[data-testid="stTabs"] [role="tab"] p { color: #ffffff !important; }
+div[data-testid="stTabs"] [role="tab"] * { color: #ffffff !important; }
+div[data-testid="stTabs"] [role="tab"][aria-selected="true"] { color: #ffffff !important; }
+div[data-testid="stTabs"] [role="tab"][aria-selected="true"] * { color: #ffffff !important; }
+div[data-testid="stTabs"] [role="tab-highlight"] { background-color: #60a5fa !important; }
+</style>
+<script>
+function fixTabColors() {
+    document.querySelectorAll('div[data-testid="stTabs"] [role="tab"]').forEach(function(el) {
+        el.style.color = '#ffffff';
+        el.style.setProperty('color', '#ffffff', 'important');
+        el.querySelectorAll('*').forEach(function(child) {
+            child.style.color = '#ffffff';
+            child.style.setProperty('color', '#ffffff', 'important');
+        });
+    });
+}
+fixTabColors();
+setTimeout(fixTabColors, 500);
+setTimeout(fixTabColors, 1500);
+window.addEventListener('load', fixTabColors);
+</script>
+""", unsafe_allow_html=True)
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks"])
     with tab1: render_market_structure_frag()
     with tab2: render_positioning_frag()
