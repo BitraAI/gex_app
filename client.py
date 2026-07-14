@@ -9,7 +9,6 @@ from schwab.client import AsyncClient
 
 from config import (
     APP_NAME,
-    BASE_URL,
     CALLBACK_URL,
     CLIENT_ID,
     CLIENT_SECRET,
@@ -48,7 +47,6 @@ def create_client() -> AsyncClient:
         _token_writer,
         asyncio=True,
         enforce_enums=False,
-        base_url=BASE_URL,
     )
     return client
 

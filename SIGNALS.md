@@ -6,7 +6,8 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 
 ## Market Bias
 
-`assess_market_bias()` in `signals.py:4` computes a directional bias score from five factors:
+`assess_market_bias()` in `signals.py:4` computes a directional bias score from five factors.
+The IV skew factor **prefers the SSVI-smoothed skew** (`ssvi_skew.iv_skew`) over the raw market `iv_skew` when the surface is available, giving a cleaner, less noisy signal.
 
 | Factor | Bullish contribution | Bearish contribution |
 |---|---|---|
@@ -24,7 +25,11 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 
 ## Option Scoring
 
-`score_options()` in `signals.py:59` assigns each OTM/ATM option a numeric score. The same factors used for bias are applied per option to produce a score and signal:
+`score_options()` in `signals.py:68` assigns each OTM/ATM option a numeric score. The same factors used for bias are applied per option to produce a score and signal.
+
+When an `ssvi_surface` is provided, two improvements activate:
+- **Smoothed IV**: the SSVI model IV replaces raw market IV for VRP calculation, filtering out price noise
+- **SSVI skew**: the front-month SSVI-smoothed 25Δ skew replaces the raw market skew for per-option adjustment
 
 | Factor | Contribution |
 |---|---|
@@ -52,7 +57,9 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 
 ## Strategy Recommendations
 
-`generate_recommendations()` in `signals.py:145` produces structured trade recommendations from the scored options. The user selects Premium Type ("Buy Premium" or "Sell Premium") and a specific strategy from the dropdown.
+`generate_recommendations()` in `signals.py:157` produces structured trade recommendations from the scored options. The user selects Premium Type ("Buy Premium" or "Sell Premium") and a specific strategy from the dropdown.
+
+When an `ssvi_surface` is provided, the Iron Condor strategy uses SSVI-smoothed 25Δ put/call strikes (with 10Δ protection) instead of the raw market walls, giving more consistent risk/reward across different volatility regimes.
 
 ### Buy Premium strategies
 
@@ -74,7 +81,7 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 | **Short Puts** | Best put (highest VRP) below spot when 25Δ skew positive (puts rich) |
 | **Call Credit Spread** | Sell lowest OTM call / Buy higher OTM call, same expiration; picks the pair with the highest avg score |
 | **Put Credit Spread** | Sell highest OTM put / Buy lower OTM put, same expiration; picks the pair with the highest avg score |
-| **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes (or highest-scored OTM strikes), with long protection legs beyond them. Falls back to symmetric wings if walls unavailable |
+| **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes (or SSVI 25Δ strikes when surface is available, falling back to highest-scored OTM strikes), with long protection legs beyond them (~10Δ when using SSVI). Falls back to symmetric wings if walls unavailable |
 | **Butterfly** | Buy one OTM put + one OTM call, sell 2× ATM body |
 | **Broken Wing Butterfly (Calls)** | Buy lowest OTM call / Sell 2× middle call / Buy highest OTM call, where the upper wing is wider than the lower |
 | **Jade Lizard** | Sell OTM put + Sell OTM call + Buy higher OTM call (protection), same expiration; picks the combo with the highest avg score |
@@ -89,6 +96,6 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 
 ## Code reference
 
-- `signals.py` — Scoring, bias, and recommendation logic
-- `app.py:1339` — `render_trade_signals_frag()` renders the UI
-- `app.py:1354` — In-app "How to read these signals" expander
+- `signals.py` — Scoring, bias, and recommendation logic (SSVI-smoothed IV/Skew/Iron Condor strikes when surface is available, trading-day TTE for CEX/SSVI precision)
+- `app.py:1385` — `render_trade_signals_frag()` renders the UI
+- `app.py:1400` — In-app "How to read these signals" expander

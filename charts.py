@@ -5,23 +5,12 @@ from plotly.subplots import make_subplots
 from typing import Any, Optional
 
 
-DARK_TEMPLATE = {
-    "plot_bgcolor": "#0e1117",
-    "paper_bgcolor": "#0e1117",
-    "font_color": "#fafafa",
-    "grid_color": "#262730",
-}
-
-LIGHT_TEMPLATE = {
+TEMPLATE = {
     "plot_bgcolor": "#ffffff",
     "paper_bgcolor": "#ffffff",
     "font_color": "#1e293b",
     "grid_color": "#e9eef3",
 }
-
-
-def _t(is_dark: bool) -> dict:
-    return DARK_TEMPLATE if is_dark else LIGHT_TEMPLATE
 
 
 def create_gex_histogram(
@@ -30,9 +19,8 @@ def create_gex_histogram(
     call_wall: Optional[float] = None,
     put_wall: Optional[float] = None,
     gamma_flip: Optional[float] = None,
-    is_dark: bool = True,
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -140,12 +128,11 @@ def create_gex_histogram(
 
 def create_gex_by_expiration(
     by_exp: list[dict[str, Any]],
-    is_dark: bool = True,
     max_exps: Optional[int] = None,
 ) -> go.Figure:
     from datetime import datetime
 
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     weekdays = [e for e in by_exp if datetime.strptime(e["expiration"], "%Y-%m-%d").weekday() < 5]
@@ -203,9 +190,8 @@ def create_oi_by_strike(
     strikes: list[dict[str, Any]],
     spot: float,
     mode: str = "oi",
-    is_dark: bool = True,
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -291,10 +277,9 @@ def create_vrp_by_strike(
     strikes: list[dict[str, Any]],
     spot: float,
     rv: float,
-    is_dark: bool = True,
     mode: str = "vrp",
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -382,10 +367,9 @@ def create_heatmap(
     data: list[dict[str, Any]],
     value_field: str,
     title: str,
-    is_dark: bool = True,
     spot: float | None = None,
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
 
     from datetime import datetime
     active_exps = set(e["expiration"] for e in data if e.get("open_interest", 0) > 0)
@@ -460,9 +444,8 @@ def create_heatmap(
 
 def create_gamma_surface(
     data: list[dict[str, Any]],
-    is_dark: bool = True,
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
 
     from datetime import datetime
     expirations = sorted(set(e["expiration"] for e in data))
@@ -520,9 +503,8 @@ def create_gamma_surface(
 
 def create_vol_surface(
     data: list[dict[str, Any]],
-    is_dark: bool = True,
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
 
     from datetime import datetime
     expirations = sorted(set(e["expiration"] for e in data))
@@ -583,10 +565,9 @@ def create_vol_surface_2d(
     strike_min: float,
     strike_max: float,
     spot: float,
-    is_dark: bool = True,
     mode: str = "vrp",
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
 
     from datetime import datetime
     filtered = [e for e in data if strike_min <= e["strike"] <= strike_max]
@@ -691,13 +672,12 @@ def create_dealer_gamma_curve(
     spot: float,
     mode: str = "gex",
     gamma_flip: Optional[float] = None,
-    is_dark: bool = True,
     call_wall: Optional[float] = None,
     put_wall: Optional[float] = None,
     vex_magnet: Optional[float] = None,
     vex_repellent: Optional[float] = None,
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -869,7 +849,6 @@ def create_dealer_gamma_curve(
 
 def create_atm_iv_histogram(
     by_exp: list[dict[str, Any]],
-    is_dark: bool = True,
     rv: float = 0.0,
 ) -> go.Figure:
     """Create a bar chart of ATM IV by expiration date.
@@ -879,7 +858,7 @@ def create_atm_iv_histogram(
     """
     from datetime import datetime
 
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     # Filter to entries that have expiration dates (weekdays)
@@ -975,10 +954,10 @@ def create_atm_iv_histogram(
         fig.add_hline(
             y=rv,
             line_dash="dash",
-            line_color="#ab63fa" if is_dark else "#636efa",
+            line_color="#636efa",
             annotation_text=f"RV: {rv*100:.2f}%",
             annotation_position="bottom right",
-            annotation_font_color="#ab63fa" if is_dark else "#636efa",
+            annotation_font_color="#636efa",
         )
 
     fig.update_layout(
@@ -1016,12 +995,11 @@ def create_atm_iv_histogram(
 def create_vrp_chart(
     by_exp: list[dict[str, Any]],
     rv: float,
-    is_dark: bool = True,
     mode: str = "vrp",
 ) -> go.Figure:
     from datetime import datetime
 
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     weekdays = []
@@ -1127,11 +1105,12 @@ def create_vrp_chart(
 def create_iv_by_strike(
     strikes: list[dict[str, Any]],
     spot: float,
-    is_dark: bool = True,
     rv: float = 0.0,
     iv_rank: float | None = None,
+    ssvi_surface: Any = None,
+    ssvi_tte: float | None = None,
 ) -> go.Figure:
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -1203,6 +1182,24 @@ def create_iv_by_strike(
         hovertext=hovertext,
         hoverinfo="text",
     ))
+
+    # SSVI fitted smile overlay — arbitrage-free parametric IV surface
+    # evaluated at the visible strikes and the tenor's TTE (in years).
+    # Drawn across the visible strike range only (matches the bar x-axis),
+    # per README: "SSVI model overlay on IV-by-Strike chart".
+    if ssvi_surface is not None and ssvi_tte is not None and ssvi_tte > 0 and x:
+        ssvi_curve = [ssvi_surface.iv(float(k), float(ssvi_tte)) for k in x]
+        if any(v and v > 0 for v in ssvi_curve):
+            fig.add_trace(go.Scatter(
+                x=x,
+                y=ssvi_curve,
+                name="SSVI fit",
+                mode="lines+markers",
+                line=dict(color="#FFD700", width=2.5, dash="solid"),
+                marker=dict(size=5, color="#FFD700",
+                            line=dict(color="#fff", width=1)),
+                hovertemplate="<b>Strike: %{x:g}</b><br>SSVI IV: %{y:.2%}<extra></extra>",
+            ))
 
     # Spot / ATM vertical reference line
     if atm_strike is not None:
@@ -1462,7 +1459,6 @@ def _ema50_squeeze(
 
 def create_candlestick_chart(
     candles: list[dict],
-    is_dark: bool = True,
     title: str = "Price History",
     indicators: list[str] | None = None,
     call_wall: float | None = None,
@@ -1472,7 +1468,7 @@ def create_candlestick_chart(
     """Build a lightweight-charts chart dict for 1-min OHLCV."""
     if max_candles > 0 and len(candles) > max_candles:
         candles = candles[-max_candles:]
-    tmpl = _t(is_dark)
+    tmpl = TEMPLATE
     bg = tmpl["plot_bgcolor"]
     tc = tmpl["font_color"]
     grid_col = tmpl["grid_color"]
@@ -1778,34 +1774,7 @@ STYLE = """
 </style>
 """
 
-DARK_CSS = """
-<style>
-    .gex-metric {
-        background: #1e1e2e;
-        border-radius: 8px;
-        padding: 12px 16px;
-        border: 1px solid #313244;
-        text-align: center;
-    }
-    .gex-metric .label {
-        font-size: 0.75rem;
-        color: #a6adc8;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-bottom: 4px;
-    }
-    .gex-metric .value {
-        font-size: 1.25rem;
-        font-weight: 700;
-        font-variant-numeric: tabular-nums;
-    }
-    .gex-metric .value.positive { color: #00cc96; }
-    .gex-metric .value.negative { color: #ef553b; }
-    .gex-metric .value.neutral { color: #fafafa; }
-</style>
-"""
-
-LIGHT_CSS = """
+CSS = """
 <style>
     .gex-metric {
         background: #f8fafc;

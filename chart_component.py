@@ -29,9 +29,9 @@ _HTML_TEMPLATE = """
     window[SAVED_KEY] = null;
 
     const d = DATA.init;
-    const bg = d.isDark ? '#0e1117' : '#ffffff';
-    const tc = d.isDark ? '#fafafa' : '#1e293b';
-    const gc = d.isDark ? '#262730' : '#e9eef3';
+    const bg = '#ffffff';
+    const tc = '#1e293b';
+    const gc = '#e9eef3';
 
     // -------- Single chart with multiple price scales (shared x-axis) ----- //
     // All series (candlesticks, volume, ATM, oscillator) live in one chart
@@ -1048,7 +1048,6 @@ def build_init_data(
     indicators: list[str] | None = None,
     call_wall: float | None = None,
     put_wall: float | None = None,
-    is_dark: bool = True,
     last_close: float | None = None,
     iv_skew_history: list[dict] | None = None,
 ) -> dict:
@@ -1331,7 +1330,7 @@ def build_init_data(
             offset = period - 1
             series_list.append({"type": "Line", "key": f"ma_{name}", "data": [{"time": cd[i]["time"], "value": vals[i - offset]} for i in range(offset, len(cd))], "options": {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name}})
 
-    result = {"isDark": is_dark, "series": series_list}
+    result = {"isDark": False, "series": series_list}
     if iv_skew_series is not None:
         result["iv_skew_series"] = iv_skew_series
     if iv_skew_hist is not None:
@@ -1423,14 +1422,14 @@ def compute_latest_indicators(
     return result
 
 
-def render_chart(candles, indicators=None, call_wall=None, put_wall=None, is_dark=True, force_reinit=False, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
+def render_chart(candles, indicators=None, call_wall=None, put_wall=None, force_reinit=False, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
     import time
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
     osc_height = 100 if (indicators and "Andean Osc" in indicators) else 0
     iv_skew_height = 120 if (indicators and "IV Skew (25Δ)" in indicators) else 0
     iv_skew_hist_height = 80 if (indicators and "IV Skew (25Δ)" in indicators) else 0
-    init_data = build_init_data(candles, indicators, call_wall, put_wall, is_dark, last_close=last_close, iv_skew_history=iv_skew_history)
+    init_data = build_init_data(candles, indicators, call_wall, put_wall, last_close=last_close, iv_skew_history=iv_skew_history)
     if status:
         init_data["status"] = status
     payload = {"init": init_data}
