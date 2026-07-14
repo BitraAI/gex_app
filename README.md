@@ -15,14 +15,15 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - The Y range is **persistent across the 1-second streaming fragment re-renders**: user-set Y-zoom (via body drag, axis-label drag, or autoscaleInfoProvider pin) is saved losslessly on gesture end and restored on each re-render, so streaming ticks do not snap the chart back to the auto-fit range and the Y range doesn't drift over time. X-axis range persistence works the same way.
   - Each pane (main candlesticks / Volume / ATM / Andean Osc) pans its own Y range independently when dragged in its own vertical band.
 - **3 Calculations** — GEX (Gamma), VEX (Vanna), CEX (Charm) Exposure
+- **Arbitrage-Free SSVI Volatility Surface** — Fits a parametric (Raw SVI per-tenor → SSVI surface) smoothed IV surface for cleaner skew / IV estimates. Used for the SSVI model overlay on IV-by-Strike and ATM IV-by-Expiration charts, and `ssvi_skew` analytics.
 - **10 Interactive Charts:**
   - GEX by Strike (bar chart with Call/Put Wall, Gamma Flip overlays)
   - GEX by Expiration (stacked bar by expiration cycle, expandable via slider)
   - 3D Gamma Surface (strike × expiration × GEX, expandable via slider)
   - Dealer Curve (cumulative GEX/VEX/CEX across strikes, with Spot/Call Wall/Put Wall/Gamma Flip markers in GEX mode, VEX Magnet/Repellent markers in VEX mode)
   - OI/Vol by Strike (grouped bars, toggle OI or Volume)
-   - IV by Strike (bar chart, toggle IV/VRP/VRP Ratio, with Spot/RV lines, expandable via slider)
-  - IV by Expiration (bar chart, toggle ATM IV/VRP/VRP Ratio, expandable via slider)
+   - IV by Strike (bar chart, toggle IV Rank/VRP/VRP Ratio, with Spot/RV/SSVI model overlay lines — SSVI fitted surface drawn in IV Rank and IV modes, expandable via slider)
+   - IV by Expiration (bar chart, toggle ATM IV/VRP/VRP Ratio, with RV/SSVI model overlay lines, expandable via slider)
   - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP/VRP Ratio, expandable via slider, x-axis locked)
   - Strategy Signals (scored options with automated trade recommendations)
 - **Analytics Panel:**
@@ -30,7 +31,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Gamma Flip (cumulative net GEX zero-crossing with 1% threshold), Max Pain
   - Max +GEX, Max -GEX
   - Dealer Position (Long/Short Gamma)
-  - IV Skew (25-delta), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
+   - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
   - IV Rank — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank)
@@ -53,7 +54,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - **RV** — 20-day annualized realized volatility of the underlying (population std of log returns, × √(252 × n/(n−1)))
   - **VRP** — Volatility Risk Premium = IV - RV
   - **VRP Ratio** — Volatility Risk Premium Ratio = IV / RV
-- **Dark/Light Theme** — Toggleable theme
+- **Light Theme** — Clean light-themed UI
 - **Telegram Alerts** — Pushes an alert to a Telegram chat when key GEX events fire: gamma flip / call wall / put wall changes, dealer gamma flips (Long↔Short), and spot price crossings of the walls. Two delivery paths:
   - **In-app:** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
   - **Automatic multi-ticker:** `telegram_alerts.py` polls every symbol in the saved ticker history list once per run and sends alerts on detected transitions — schedule it on cron for hands-off monitoring during market hours.
@@ -214,7 +215,7 @@ You can then open the app in your local browser.
 2. Click **Refresh** to load the option chain (the app works best during regular US market trading hours)
 3. Explore 10 chart tabs with GEX visualizations and analytics
 4. Use the sidebar expiration selector to filter the Options Data table (charts use sliders to control expiration count)
-5. Toggle dark/light theme in the sidebar
+5. Light theme indicator in the sidebar
 6. Use sliders in GEX by Expiration, IV by Strike, IV by Expiration, Heatmaps, and Gamma Surface tabs to control expiration count
 7. In the **Candlesticks** tab:
    - Click and **drag in the chart body** to pan both axes (vertical drag pans the price range; horizontal drag pans time).
@@ -241,6 +242,7 @@ gex_app/
 ├── signals.py             # Strategy signals engine (scoring, recommendations, bias)
 ├── telegram_notifier.py   # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
 ├── telegram_alerts.py     # Standalone cron runner — multi-ticker alerts from ticker_history.json (RTH-guarded)
+├── svi.py                 # SSVI volatility surface (Raw SVI + SSVI surface calibration)
 ├── schwab_data.py         # Standalone Schwab price history fetcher
 ├── test_calculations.py   # Unit tests for calculations
 ├── test_streaming.py      # Unit tests for streaming service
@@ -289,7 +291,7 @@ Where:
 - **d₁ = (ln(S/K) + (r - q + σ²/2)T) / (σ√T)** — Black-Scholes d₁
 - **r** — Risk-free rate (5% assumed)
 - **q** — Dividend yield (0% assumed)
-- **T** — Time to expiration in years (DTE/365)
+- **T** — Time to expiration in years: `T = (DTE + secondsLeft / 23400) / 365` where `secondsLeft = 23400 - max(0, min(now_ET_seconds_since_0930, 23400))`. Uses the remaining fraction of the 6.5-hour US equity trading day (09:30–16:00 ET) for greater precision than whole-day DTE
 - **σ** — Implied volatility from the Schwab API
 - **K** — Option strike price
 - CEX measures delta decay — how dealer delta changes as time passes
@@ -336,7 +338,11 @@ Where:
 - **VRP Ratio** — Per strike: `VRP Ratio = IV / RV`. The ratio form of VRP, where values above 1 indicate options price more volatility than realized (expensive) and below 1 indicates the opposite (cheap).
 - **VEX Magnet** — Strike with highest positive net VEX (most positive vanna exposure). As IV rises, dealer hedging creates buying pressure that attracts price toward this level.
 - **VEX Repellent** — Strike with most negative net VEX. As IV rises, dealer hedging creates selling pressure that pushes price away from this level.
-- **IV Rank** — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. The 20-day RV for each trailing day is computed as `σ × √252` where `σ` is the population standard deviation of the 20 most recent daily log returns. The current ATM IV (from the front-month option chain) is then ranked against the 252 trailing RV values. If ATM IV is unavailable, the latest 20-day RV is used as a fallback. Formula: `round((current - min_rv_252d) / (max_rv_252d - min_rv_252d) × 100, 2)`. Values >70 indicate options are expensive relative to history (favor selling premium), values <30 indicate options are cheap (favor buying premium).
+- **SSVI Volatility Surface** — A parametric implied volatility surface fit using the Surface Stochastic Volatility Inspired (SSVI) framework. Two-stage calibration:
+  1. **Raw SVI**: Per-expiration fit of total variance as a function of log-moneyness: `w(k) = a + b(ρ(k - m) + √((k - m)² + σ²))`. TTE uses the trading-day-aware formula `(DTE + secsLeft/23400)/365`.
+  2. **SSVI surface**: Across-expiration fit of ATM total variance `θ(t) = w(0, t)`, then surface-wide `ρ` (average skew), `η` (skew-smile decay), and `γ` (power-law exponent) parameters, giving a fully arbitrage-free surface.
+- **SSVI IV / Skew** — Once calibrated, the surface provides cleaner `iv(strike, tte)` queries and a model-based 25Δ skew via root-finding on Black-Scholes delta. Stored as `ssvi_surface` and `ssvi_skew` in analytics.
+- **IV Rank** — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. The 20-day RV for each trailing day is computed as `σ × √252` where `σ` is the population standard deviation of the 20 most recent daily log returns. The current ATM IV (from the front-month option chain) is then ranked against the 252 trailing RV values. If ATM IV is unavailable, the latest 20-day RV is used as a fallback. Formula: `round((current - min_rv_252d) / (max_rv_252d - min_rv_252d) × 100, 2)`. Values >70 indicate options are expensive relative to history (favor selling premium), values <30 indicate options are cheap (favor buying premium). The IV by Strike chart's IV Rank view overlays the SSVI fitted surface (green line+markers) on the same strikes at the front-month tenor.
 
 **Dealer Curve:**
 Plots cumulative net GEX, VEX, or CEX across a continuum of hypothetical spot prices (toggleable). At each price level:

@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Any, Optional
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 
 STRIKE_SPACING_MAP: dict[float, float] = {
     0.0: 0.5,
@@ -48,7 +49,12 @@ def calculate_cex(
 ) -> float:
     if open_interest <= 0 or spot <= 0 or days_to_exp <= 0 or iv <= 0:
         return 0.0
-    T = days_to_exp / 365.0
+    _ny = ZoneInfo("America/New_York")
+    _ny_now = datetime.now(_ny)
+    _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
+    _secs_since_930 = max(0, min(_secs_since_930, 23400))
+    _secs_left = 23400 - _secs_since_930
+    T = (days_to_exp + _secs_left / 23400) / 365.0
     sigma = iv
     d1 = (np.log(spot / strike) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     npd1 = np.exp(-d1 ** 2 / 2) / np.sqrt(2 * np.pi)

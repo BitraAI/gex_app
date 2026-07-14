@@ -4,6 +4,7 @@ from calculations import (
     aggregate_by_expiration,
     compute_totals,
 )
+from svi import calibrate as calibrate_ssvi
 
 
 def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool = True, show_puts: bool = True, data_full: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -54,6 +55,20 @@ def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool 
         analytics["put_iv_25d"] = None
         analytics["call_iv_25d"] = None
         analytics["atm_iv"] = None
+
+    # SSVI arbitrage-free volatility surface (Raw SVI per tenor -> SSVI).
+    # Calibrated on the unfiltered chain (``data_full``) when available,
+    # so the surface sees as many OTM quotes as possible across expirations.
+    try:
+        ssvi_res = calibrate_ssvi(data_full if data_full else data, spot)
+        analytics["ssvi_surface"] = ssvi_res["surface"]
+        analytics["ssvi_skew"] = ssvi_res["skew"]
+        if analytics.get("atm_iv") is None and ssvi_res["atm_iv"] is not None:
+            analytics["atm_iv"] = round(ssvi_res["atm_iv"], 4)
+    except Exception:
+        analytics["ssvi_surface"] = None
+        analytics["ssvi_skew"] = None
+
     analytics["expected_move"] = _calculate_expected_move(data, spot)
     analytics["num_strikes"] = len(strikes)
     analytics["num_expirations"] = len(by_exp)

@@ -49,10 +49,8 @@ from analytics import compute_analytics
 from signals import score_options, generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import (
-    DARK_TEMPLATE,
-    LIGHT_TEMPLATE,
-    DARK_CSS,
-    LIGHT_CSS,
+    TEMPLATE,
+    CSS,
     STYLE,
     INDICATORS,
     _sma,
@@ -93,7 +91,7 @@ input[value="Sell Premium"]:checked + div > div {
 """, unsafe_allow_html=True)
 
 _SESSION_DEFAULTS = {
-    "theme": "dark",
+    "theme": "light",
     "data": [],
     "spot": 0.0,
     "analytics": {},
@@ -155,7 +153,7 @@ for k, v in _SESSION_DEFAULTS.items():
 if not st.session_state.ticker_history:
     st.session_state.ticker_history = _load_ticker_history()
 
-st.markdown(DARK_CSS if st.session_state.theme == "dark" else LIGHT_CSS, unsafe_allow_html=True)
+st.markdown(CSS, unsafe_allow_html=True)
 
 # Replace streaming service if it was created with old code (no shared loop)
 if st.session_state.get("client") is not None:
@@ -177,7 +175,9 @@ async def _create_client_async():
 
 def init_client():
     loop = _ensure_async_loop()
-    if st.session_state.get("client") is None:
+    loop_changed = st.session_state.get("_async_loop_id") is not None and st.session_state._async_loop_id is not loop
+    st.session_state._async_loop_id = loop
+    if st.session_state.get("client") is None or loop_changed:
         try:
             fut = asyncio.run_coroutine_threadsafe(
                 _create_client_async(), loop,
@@ -187,12 +187,12 @@ def init_client():
             st.error(f"Failed to create Schwab client: {e}")
             return False
     old = st.session_state.get("streaming_service")
-    if old is None or getattr(old, '_loop', None) is None:
+    if old is None or getattr(old, '_loop', None) is None or getattr(old, '_loop', None) is not loop:
         if old is not None:
             old.stop()
         st.session_state.streaming_service = StreamingService(st.session_state.client, loop)
     atm_opt = st.session_state.get("atm_option_service")
-    if atm_opt is None or getattr(atm_opt, '_loop', None) is None:
+    if atm_opt is None or getattr(atm_opt, '_loop', None) is None or getattr(atm_opt, '_loop', None) is not loop:
         if atm_opt is not None:
             atm_opt.stop()
         st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
@@ -677,12 +677,11 @@ def render_sidebar():
         st.markdown("### Theme")
         apply_filters()
         compute_state()
-        theme = st.selectbox(
-            "Theme", ["dark", "light"],
-            index=0 if st.session_state.theme == "dark" else 1,
+        st.selectbox(
+            "Theme", ["light"],
+            index=0,
             label_visibility="collapsed",
         )
-        st.session_state.theme = theme
 
 
 def render_indicators_panel():
@@ -1080,7 +1079,7 @@ def render_candlesticks():
         s.candlestick_label = chart_label
 
         # --- Render lightweight-charts streaming candlestick ---
-        is_dark = getattr(s, 'theme', 'dark') == 'dark'
+        d = False
         df = s.candlestick_data
 
         # Build the candle list for chart_component.render_chart. Keep datetime as
@@ -1172,7 +1171,6 @@ def render_candlesticks():
                 indicators=selected_indicators,
                 call_wall=_cw,
                 put_wall=_pw,
-                is_dark=is_dark,
                 last_close=last_close,
                 status=_status,
                 symbol=symbol,
@@ -1201,7 +1199,7 @@ def render_metrics_frag():
 
 
 def render_market_structure_frag():
-    s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
+    s = st.session_state; d = False
     if not s.get("strikes"):
         return
 
@@ -1218,22 +1216,22 @@ def render_market_structure_frag():
     gex_container = st.container()
     with gex_container:
         if ms_view == "GEX by Strike":
-            fig = create_gex_histogram(strikes, s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), gamma_flip=s.analytics.get("gamma_flip"), is_dark=d)
+            fig = create_gex_histogram(strikes, s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), gamma_flip=s.analytics.get("gamma_flip"), )
             fig.update_layout(dragmode="zoom"); st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="gex_histogram")
         elif ms_view == "GEX by Expiration":
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="gex_exp_slider")
-            fig = create_gex_by_expiration(s.by_exp_all, max_exps=mx, is_dark=d); fig.update_layout(dragmode="zoom")
+            fig = create_gex_by_expiration(s.by_exp_all, max_exps=mx, ); fig.update_layout(dragmode="zoom")
             st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="gex_by_exp")
         elif ms_view == "Gamma Surface":
-            fig = create_gamma_surface(s.filtered_data, is_dark=d); st.plotly_chart(fig, width='stretch', key="gamma_surface")
+            fig = create_gamma_surface(s.filtered_data, ); st.plotly_chart(fig, width='stretch', key="gamma_surface")
         else:
             dm = st.radio("Select", ["GEX", "VEX", "CEX"], horizontal=True, label_visibility="collapsed")
-            fig = create_dealer_gamma_curve(strikes, s.spot, mode=dm.lower(), gamma_flip=s.analytics.get("gamma_flip"), is_dark=d, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), vex_magnet=s.analytics.get("vex_magnet"), vex_repellent=s.analytics.get("vex_repellent"))
+            fig = create_dealer_gamma_curve(strikes, s.spot, mode=dm.lower(), gamma_flip=s.analytics.get("gamma_flip"), call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), vex_magnet=s.analytics.get("vex_magnet"), vex_repellent=s.analytics.get("vex_repellent"))
             st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="dealer_curve_chart")
 
 
 def render_positioning_frag():
-    s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
+    s = st.session_state; d = False
     if not s.get("strikes"):
         return
 
@@ -1262,7 +1260,7 @@ def render_positioning_frag():
     if selected_view_type == "Open Interest":
         with st.container():
             fig = create_oi_by_strike(
-                positioning_data, s.spot, mode="oi", is_dark=d
+                positioning_data, s.spot, mode="oi", 
             )
             fig.update_layout(dragmode="zoom")
             st.plotly_chart(
@@ -1271,7 +1269,7 @@ def render_positioning_frag():
     elif selected_view_type == "Volume":
         with st.container():
             fig = create_oi_by_strike(
-                positioning_data, s.spot, mode="volume", is_dark=d
+                positioning_data, s.spot, mode="volume", 
             )
             fig.update_layout(dragmode="zoom")
             st.plotly_chart(
@@ -1280,7 +1278,7 @@ def render_positioning_frag():
 
 
 def render_volatility_frag():
-    s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
+    s = st.session_state; d = False
     if not s.get("strikes"):
         return
 
@@ -1307,30 +1305,39 @@ def render_volatility_frag():
             if not s.get("show_itm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
             if not s.get("show_otm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
             vk = aggregate_by_strike(raw, s.spot, show_calls=s.show_calls, show_puts=s.show_puts)
-            if tm == "IV":
-                if vk: st.plotly_chart(create_iv_by_strike(vk, s.spot, is_dark=d, rv=_rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike_tab6")
-                else: st.info("No strike data")
-            elif tm == "IV Rank":
-                _iv_rank = s.get("iv_rank")
+            _iv_rank = s.get("iv_rank")
+            _ssvi_surf = s.analytics.get("ssvi_surface") if s.get("analytics") else None
+            _ssvi_tte = None
+            if _ssvi_surf is not None and s.get("by_exp_all"):
+                _valid_dtes = [e.get("dte", 0) for e in s.by_exp_all if e.get("dte", 0) > 0]
+                if _valid_dtes:
+                    from zoneinfo import ZoneInfo
+                    _ny = ZoneInfo("America/New_York")
+                    _ny_now = datetime.now(_ny)
+                    _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
+                    _secs_since_930 = max(0, min(_secs_since_930, 23400))
+                    _secs_left = 23400 - _secs_since_930
+                    _ssvi_tte = (min(_valid_dtes) + _secs_left / 23400) / 365.0
+            if tm == "IV Rank":
                 if vk and _iv_rank is not None:
-                    st.plotly_chart(create_iv_by_strike(vk, s.spot, is_dark=d, rv=_rv, iv_rank=_iv_rank).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_rank_by_strike")
+                    st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=_iv_rank, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_rank_by_strike")
                 elif vk:
                     st.info("IV Rank not available yet")
                 else:
                     st.info("No strike data")
             elif _rv > 0 and vk:
-                st.plotly_chart(create_vrp_by_strike(vk, s.spot, _rv, is_dark=d, mode="vrp" if tm=="VRP" else "vrp_ratio").update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_by_strike")
+                st.plotly_chart(create_vrp_by_strike(vk, s.spot, _rv, mode="vrp" if tm=="VRP" else "vrp_ratio").update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_by_strike")
             else: st.info("No RV data")
         else:
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="iv_exp_slider")
             ivd = s.by_exp_all[:mx]
-            if mo == "ATM IV": st.plotly_chart(create_atm_iv_histogram(ivd, is_dark=d, rv=_rv), config={"scrollZoom": True}, width='stretch', key="atm_iv_chart")
-            elif _rv > 0: st.plotly_chart(create_vrp_chart(ivd, _rv, is_dark=d, mode="vrp_ratio" if mo=="VRP Ratio" else "vrp"), config={"scrollZoom": True}, width='stretch', key="vrp_chart")
+            if mo == "ATM IV": st.plotly_chart(create_atm_iv_histogram(ivd, rv=_rv), config={"scrollZoom": True}, width='stretch', key="atm_iv_chart")
+            elif _rv > 0: st.plotly_chart(create_vrp_chart(ivd, _rv, mode="vrp_ratio" if mo=="VRP Ratio" else "vrp"), config={"scrollZoom": True}, width='stretch', key="vrp_chart")
             else: st.info("No RV data")
 
 
 def render_heatmaps_frag():
-    s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
+    s = st.session_state; d = False
     if not s.get("strikes"):
         return
 
@@ -1345,7 +1352,7 @@ def render_heatmaps_frag():
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
             otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
-            fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", d, spot=s.spot)
+            fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", spot=s.spot)
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_oi_chart")
 
     elif om == "Volume":
@@ -1355,7 +1362,7 @@ def render_heatmaps_frag():
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
             otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
-            fig = create_heatmap(otm, "volume", "Volume Heatmap", d, spot=s.spot)
+            fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot)
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_v_chart")
 
     elif om in ("VRP", "VRP Ratio"):
@@ -1367,14 +1374,14 @@ def render_heatmaps_frag():
             smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
             _rv = s.get("underlying_20d_rv", 0.0)
             if _rv > 0:
-                fig = create_vol_surface_2d(vd, _rv, smi, sma, s.spot, is_dark=d, mode="vrp" if om=="VRP" else "vrp_ratio")
+                fig = create_vol_surface_2d(vd, _rv, smi, sma, s.spot, mode="vrp" if om=="VRP" else "vrp_ratio")
                 st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_vrp_chart")
             else:
                 st.info("No RV data")
 
 
 def render_trade_signals_frag():
-    s = st.session_state; d = getattr(s, 'theme', 'dark') == "dark"
+    s = st.session_state; d = False
 
     st.subheader("Trade Signals")
 
@@ -1499,11 +1506,10 @@ def render_table():
     put_wall = st.session_state.analytics.get("put_wall")
     put_wall_idx = df[df["Strike"] == put_wall].index.tolist()
 
-    is_dark = st.session_state.theme == "dark"
-    atm_bg = "#555555" if is_dark else "#e0e0e0"
-    max_pain_bg = "#8b1a1a" if is_dark else "#ffcccc"
-    call_wall_bg = "#ef553b" if is_dark else "#ffcccc"
-    put_wall_bg = "#00cc96" if is_dark else "#ccffcc"
+    atm_bg = "#e0e0e0"
+    max_pain_bg = "#ffcccc"
+    call_wall_bg = "#ffcccc"
+    put_wall_bg = "#ccffcc"
 
     def highlight_atm(row):
         is_atm = abs(row["Strike"] - spot) == min(
