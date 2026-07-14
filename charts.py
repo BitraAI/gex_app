@@ -12,6 +12,24 @@ TEMPLATE = {
     "grid_color": "#e9eef3",
 }
 
+DARK_TEMPLATE = {
+    "plot_bgcolor": "#dbeafe",
+    "paper_bgcolor": "#dbeafe",
+    "font_color": "#1e293b",
+    "grid_color": "#bfdbfe",
+}
+
+_IS_DARK = False
+
+
+def set_dark(is_dark: bool):
+    global _IS_DARK
+    _IS_DARK = is_dark
+
+
+def _get_template():
+    return DARK_TEMPLATE if _IS_DARK else TEMPLATE
+
 
 def create_gex_histogram(
     strikes: list[dict[str, Any]],
@@ -20,7 +38,7 @@ def create_gex_histogram(
     put_wall: Optional[float] = None,
     gamma_flip: Optional[float] = None,
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -132,7 +150,7 @@ def create_gex_by_expiration(
 ) -> go.Figure:
     from datetime import datetime
 
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     fig = go.Figure()
 
     weekdays = [e for e in by_exp if datetime.strptime(e["expiration"], "%Y-%m-%d").weekday() < 5]
@@ -191,7 +209,7 @@ def create_oi_by_strike(
     spot: float,
     mode: str = "oi",
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -276,10 +294,11 @@ def create_oi_by_strike(
 def create_vrp_by_strike(
     strikes: list[dict[str, Any]],
     spot: float,
-    rv: float,
+    rv: float = 0.0,
     mode: str = "vrp",
+    iv_rank: float | None = None,
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -368,8 +387,10 @@ def create_heatmap(
     value_field: str,
     title: str,
     spot: float | None = None,
+    call_wall: float | None = None,
+    put_wall: float | None = None,
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
 
     from datetime import datetime
     active_exps = set(e["expiration"] for e in data if e.get("open_interest", 0) > 0)
@@ -439,13 +460,43 @@ def create_heatmap(
             font_color="#ffa15a",
         )
 
+    if call_wall is not None:
+        fig.add_hline(
+            y=call_wall,
+            line_dash="dot",
+            line_color="#ef553b",
+        )
+        fig.add_annotation(
+            x=1, y=call_wall, xref="paper", yref="y",
+            text=f"Call Wall<br>${call_wall:.2f}",
+            showarrow=False,
+            xanchor="left",
+            font_size=11,
+            font_color="#ef553b",
+        )
+
+    if put_wall is not None:
+        fig.add_hline(
+            y=put_wall,
+            line_dash="dot",
+            line_color="#00cc96",
+        )
+        fig.add_annotation(
+            x=1, y=put_wall, xref="paper", yref="y",
+            text=f"Put Wall<br>${put_wall:.2f}",
+            showarrow=False,
+            xanchor="left",
+            font_size=11,
+            font_color="#00cc96",
+        )
+
     return fig
 
 
 def create_gamma_surface(
     data: list[dict[str, Any]],
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
 
     from datetime import datetime
     expirations = sorted(set(e["expiration"] for e in data))
@@ -504,7 +555,7 @@ def create_gamma_surface(
 def create_vol_surface(
     data: list[dict[str, Any]],
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
 
     from datetime import datetime
     expirations = sorted(set(e["expiration"] for e in data))
@@ -567,7 +618,7 @@ def create_vol_surface_2d(
     spot: float,
     mode: str = "vrp",
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
 
     from datetime import datetime
     filtered = [e for e in data if strike_min <= e["strike"] <= strike_max]
@@ -677,7 +728,7 @@ def create_dealer_gamma_curve(
     vex_magnet: Optional[float] = None,
     vex_repellent: Optional[float] = None,
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -858,7 +909,7 @@ def create_atm_iv_histogram(
     """
     from datetime import datetime
 
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     fig = go.Figure()
 
     # Filter to entries that have expiration dates (weekdays)
@@ -999,7 +1050,7 @@ def create_vrp_chart(
 ) -> go.Figure:
     from datetime import datetime
 
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     fig = go.Figure()
 
     weekdays = []
@@ -1110,7 +1161,7 @@ def create_iv_by_strike(
     ssvi_surface: Any = None,
     ssvi_tte: float | None = None,
 ) -> go.Figure:
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -1468,7 +1519,7 @@ def create_candlestick_chart(
     """Build a lightweight-charts chart dict for 1-min OHLCV."""
     if max_candles > 0 and len(candles) > max_candles:
         candles = candles[-max_candles:]
-    tmpl = TEMPLATE
+    tmpl = _get_template()
     bg = tmpl["plot_bgcolor"]
     tc = tmpl["font_color"]
     grid_col = tmpl["grid_color"]
