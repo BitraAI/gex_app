@@ -1308,7 +1308,6 @@ INDICATORS = {
     "EMA 50 Squeeze": {},
     "Volume Profile": {},
     "Anchored VWAP": {"color": "#8b5cf6", "lineWidth": 2},
-    "IV Skew (25Δ)": {},
 }
 
 
@@ -1681,16 +1680,7 @@ def create_candlestick_chart(
             if name == "Volume":
                 volume_added = True
                 continue
-            if name in ("Andean Osc", "EMA 50 Squeeze"):
-                continue
-            if name == "Trend":
-                alpha_length = cfg["alphaLength"]
-                mid_vals = _trend(opens, closes, alpha_length)
-                series.append({
-                    "type": "Line",
-                    "data": [{"time": cd[i]["time"], "value": mid_vals[i]} for i in range(len(cd))],
-                    "options": {"color": "#ffa15a", "lineWidth": 2, "title": "Trend"},
-                })
+            if name in ("Andean Osc", "EMA 50 Squeeze", "Trend"):
                 continue
             period = cfg["period"]
             if len(closes) < period:
@@ -1700,10 +1690,14 @@ def create_candlestick_chart(
             else:
                 vals = _sma(closes, period)
             offset = period - 1
+            if name in ("EMA 200", "EMA 20"):
+                opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False}
+            else:
+                opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name}
             series.append({
                 "type": "Line",
                 "data": [{"time": cd[i]["time"], "value": vals[i-offset]} for i in range(offset, len(cd))],
-                "options": {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name},
+                "options": opts,
             })
 
     if "EMA 50 Squeeze" in (indicators or []):
@@ -1712,6 +1706,15 @@ def create_candlestick_chart(
         _add_sqz_series(series, cd, sqz_red, "#ef553b")
         _add_sqz_series(series, cd, sqz_black, "#000000")
         _add_sqz_series(series, cd, sqz_orange, "#ffa500")
+
+    if "Trend" in (indicators or []):
+        alpha_length = 50
+        mid_vals = _trend(opens, closes, alpha_length)
+        series.append({
+            "type": "Line",
+            "data": [{"time": cd[i]["time"], "value": mid_vals[i]} for i in range(len(cd))],
+            "options": {"color": "#ffa15a", "lineWidth": 2, "title": "Trend", "lastValueVisible": False},
+        })
 
     charts = []
     
@@ -1756,7 +1759,7 @@ def create_candlestick_chart(
             "options": {
                 "color": "#26a69a",
                 "priceFormat": {"type": "volume"},
-                "title": "Buy Vol",
+                "lastValueVisible": False,
             },
         }, {
             "type": "Histogram",
@@ -1764,7 +1767,7 @@ def create_candlestick_chart(
             "options": {
                 "color": "#ef5350",
                 "priceFormat": {"type": "volume"},
-                "title": "Sell Vol",
+                "lastValueVisible": False,
             },
         }]
         charts.append({"chart": volume_chart, "series": volume_series})
