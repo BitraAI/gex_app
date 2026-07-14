@@ -1304,7 +1304,7 @@ def build_init_data(
             if len(closes) < period: continue
             vals = _ema(closes, period) if name.startswith("EMA") else _sma(closes, period)
             offset = period - 1
-            if name in ("EMA 200", "EMA 20"):
+            if name in ("EMA 200", "EMA 20", "SMA 50", "SMA 20"):
                 opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False}
             else:
                 opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name}
