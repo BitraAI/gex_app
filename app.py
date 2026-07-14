@@ -347,7 +347,7 @@ def compute_state():
     ))
 
 
-def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime], rv: float = 0.0, iv_rank: float | None = None):
+def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime], rv: float = 0.0, iv_rank: float | None = None, iv_skew: float | None = None):
     col1, col2, col3, col4 = st.columns(4)
     col1.markdown(
         f'<div class="gex-metric"><div class="label">Current Price</div>'
@@ -731,7 +731,7 @@ def render_candlesticks():
             timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()), index=0, label_visibility="collapsed", width=100)
         
         with row2:
-            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "ATM_Option_Flow", "Andean Osc", "IV Skew (25Δ)"]
+            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "ATM_Option_Flow", "Andean Osc"]
             selected_indicators = st.multiselect("Indicators", indicator_options, default=[], label_visibility="collapsed")
         
         from client import load_candle_cache
@@ -1155,8 +1155,9 @@ def render_candlesticks():
             _status = {"text": _msg, "level": "warning"}
 
         if candles_payload:
+            iv_skew_indicator_enabled = any(ind in selected_indicators for ind in ["IV Skew (25Δ)"])
             _iv_skew_hist = s.get("iv_skew_history") or []
-            if "IV Skew (25Δ)" in selected_indicators and _analytics.get("iv_skew") is not None:
+            if iv_skew_indicator_enabled and _analytics.get("iv_skew") is not None:
                 _now_ms = int(pd.Timestamp.now(tz="UTC").value // 1_000_000)
                 if not _iv_skew_hist or _iv_skew_hist[-1].get("datetime") != _now_ms:
                     _iv_skew_hist = list(_iv_skew_hist)
@@ -1175,7 +1176,7 @@ def render_candlesticks():
                 last_close=last_close,
                 status=_status,
                 symbol=symbol,
-                iv_skew_history=_iv_skew_hist,
+                iv_skew_history=_iv_skew_hist if iv_skew_indicator_enabled else [],
             )
         st.caption(f"{s.candlestick_label} bars ({len(s.candlestick_data)})")
 
@@ -1196,7 +1197,9 @@ def render_metrics_frag():
     spot = live if (live and live > 0) else s.spot
     metrics_container = st.container()
     with metrics_container:
-        render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=s.get("iv_rank"))
+        iv_rank = s.get("iv_rank")
+        iv_skew = s.analytics.get('iv_skew')
+        render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=iv_rank, iv_skew=iv_skew)
 
 
 def render_market_structure_frag():

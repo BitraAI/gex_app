@@ -1049,7 +1049,6 @@ def build_init_data(
     call_wall: float | None = None,
     put_wall: float | None = None,
     last_close: float | None = None,
-    iv_skew_history: list[dict] | None = None,
 ) -> dict:
     from charts import _get_est_offset, _sma, _ema, _trend, _andean_oscillator, _ema50_squeeze, _anchored_vwap, INDICATORS
 
@@ -1163,8 +1162,8 @@ def build_init_data(
                 # Volume series use a separate price scale ('volume') on the
                 # single shared chart, surfaced via result["volume_series"].
                 volume_series = [
-                    {"type": "Histogram", "key": "buy_vol", "data": buy_vol, "options": {"color": "#26a69a", "priceFormat": {"type": "volume"}, "title": "Buy Vol", "priceScaleId": "volume"}},
-                    {"type": "Histogram", "key": "sell_vol", "data": sell_vol, "options": {"color": "#ef5350", "priceFormat": {"type": "volume"}, "title": "Sell Vol", "priceScaleId": "volume"}},
+                    {"type": "Histogram", "key": "buy_vol", "data": buy_vol, "options": {"color": "#26a69a", "priceFormat": {"type": "volume"}, "priceScaleId": "volume", "lastValueVisible": False}},
+                    {"type": "Histogram", "key": "sell_vol", "data": sell_vol, "options": {"color": "#ef5350", "priceFormat": {"type": "volume"}, "priceScaleId": "volume", "lastValueVisible": False}},
                 ]
                 continue
             if name == "Andean Osc":
@@ -1180,7 +1179,7 @@ def build_init_data(
                 ema50, sqz_red, sqz_black, sqz_orange = _ema50_squeeze(highs, lows, closes)
                 ema50_data = [{"time": cd[i]["time"], "value": ema50[i]} for i in range(len(cd)) if ema50[i] is not None]
                 if ema50_data:
-                    series_list.append({"type": "Line", "key": "ema50", "data": ema50_data, "options": {"color": "#00cc96", "lineWidth": 2, "title": "EMA 50"}})
+                    series_list.append({"type": "Line", "key": "ema50", "data": ema50_data,                 "options": {"color": cfg.get("color", "#2196f3"), "lineWidth": 2, "lastValueVisible": False, "priceLineVisible": False}})
                 def _emit_sqz(sqz_list, color):
                     pts = [(i, v) for i, v in enumerate(sqz_list) if v is not None]
                     if not pts: return
@@ -1192,14 +1191,10 @@ def build_init_data(
                             segs.append(seg); seg = [pts[j]]
                     segs.append(seg)
                     for seg in segs:
-                        series_list.append({"type": "Line", "data": [{"time": cd[i]["time"], "value": v} for i, v in seg], "options": {"color": color, "lineWidth": 3, "priceLineVisible": False}})
+                        series_list.append({"type": "Line", "data": [{"time": cd[i]["time"], "value": v} for i, v in seg], "options": {"color": color, "lineWidth": 3, "priceLineVisible": False, "lastValueVisible": False}})
                 _emit_sqz(sqz_red, "#ef553b")
                 _emit_sqz(sqz_black, "#000000")
                 _emit_sqz(sqz_orange, "#ffa500")
-                continue
-            if name == "Trend":
-                mv = _trend(opens, closes, cfg["alphaLength"])
-                series_list.append({"type": "Line", "key": "trend", "data": [{"time": cd[i]["time"], "value": mv[i]} for i in range(len(cd))], "options": {"color": "#ffa15a", "lineWidth": 2, "title": "Trend"}})
                 continue
             if name == "ATM_Option_Flow":
                 atm_buy_map = {}
@@ -1292,49 +1287,30 @@ def build_init_data(
                             "color": cfg.get("color", "#ff9800"),
                             "lineWidth": cfg.get("lineWidth", 2),
                             "lineStyle": 0,  # solid
-                            "title": "Anchored VWAP",
                             "priceLineVisible": False,
+                            "lastValueVisible": False,
                         },
                     })
                 continue
-            if name == "IV Skew (25Δ)":
-                iv_points = []
-                put_iv_points = []
-                call_iv_points = []
-                atm_iv_points = []
-                hist_data = []
-                _prev_skew = None
-                for pt in (iv_skew_history or []):
-                    t = _convert_time(pt["datetime"], et_offset)
-                    skew = pt.get("iv_skew")
-                    if skew is None:
-                        continue
-                    iv_points.append({"time": t, "value": float(skew)})
-                    color = "#26a69a" if _prev_skew is not None and float(skew) > _prev_skew else "#ef5350"
-                    hist_data.append({"time": t, "value": float(skew), "color": color})
-                    _prev_skew = float(skew)
-                    put_v = pt.get("put_iv_25d")
-                    if put_v is not None:
-                        put_iv_points.append({"time": t, "value": float(put_v)})
-                    call_v = pt.get("call_iv_25d")
-                    if call_v is not None:
-                        call_iv_points.append({"time": t, "value": float(call_v)})
-                    atm_v = pt.get("atm_iv")
-                    if atm_v is not None:
-                        atm_iv_points.append({"time": t, "value": float(atm_v)})
-                iv_skew_hist = [{"type": "Histogram", "key": "iv_skew_hist_series", "data": hist_data, "options": {"color": "#ffeb3b", "title": "IV Skew", "priceScaleId": "iv_skew_hist"}}]
+            if name == "Trend":
+                mv = _trend(opens, closes, cfg["alphaLength"])
+                series_list.append({
+                    "type": "Line", "key": "trend",
+                    "data": [{"time": cd[i]["time"], "value": mv[i]} for i in range(len(cd))],
+                    "options": {"color": cfg.get("color", "#ffa15a"), "lineWidth": cfg.get("lineWidth", 2), "priceLineVisible": False, "lastValueVisible": False},
+                })
                 continue
             period = cfg["period"]
             if len(closes) < period: continue
             vals = _ema(closes, period) if name.startswith("EMA") else _sma(closes, period)
             offset = period - 1
-            series_list.append({"type": "Line", "key": f"ma_{name}", "data": [{"time": cd[i]["time"], "value": vals[i - offset]} for i in range(offset, len(cd))], "options": {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name}})
+            if name in ("EMA 200", "EMA 20"):
+                opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False}
+            else:
+                opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name}
+            series_list.append({"type": "Line", "key": f"ma_{name}", "data": [{"time": cd[i]["time"], "value": vals[i - offset]} for i in range(offset, len(cd))], "options": opts})
 
     result = {"isDark": False, "series": series_list}
-    if iv_skew_series is not None:
-        result["iv_skew_series"] = iv_skew_series
-    if iv_skew_hist is not None:
-        result["iv_skew_hist"] = iv_skew_hist
     if volume_series is not None:
         result["volume_series"] = volume_series
     if atm_series is not None:
@@ -1404,7 +1380,6 @@ def compute_latest_indicators(
         if name == "ATM_Option_Flow": continue
         if name == "Volume Profile": continue
         if name == "Anchored VWAP": continue
-        if name == "IV Skew (25Δ)": continue
         if name == "Andean Osc":
             bull, bear, signal = _andean_oscillator(opens, closes, cfg["length"], cfg["sigLength"])
             result["andean"] = {"time": last_t, "bull": round(bull[-1], 2), "bear": round(bear[-1], 2), "signal": round(signal[-1], 2)}
@@ -1427,9 +1402,10 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, force_
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
     osc_height = 100 if (indicators and "Andean Osc" in indicators) else 0
-    iv_skew_height = 120 if (indicators and "IV Skew (25Δ)" in indicators) else 0
-    iv_skew_hist_height = 80 if (indicators and "IV Skew (25Δ)" in indicators) else 0
-    init_data = build_init_data(candles, indicators, call_wall, put_wall, last_close=last_close, iv_skew_history=iv_skew_history)
+    atm_height = 100 if (indicators and "ATM_Option_Flow" in indicators) else 0
+    iv_skew_height = 100 if (indicators and "IV Skew (25Δ)" in indicators) and iv_skew_history and len(iv_skew_history) > 0 else 0
+    iv_skew_hist_height = 50 if (indicators and "IV Skew (25Δ)" in indicators) and iv_skew_history and len(iv_skew_history) > 0 else 0
+    init_data = build_init_data(candles, indicators, call_wall, put_wall, last_close=last_close)
     if status:
         init_data["status"] = status
     payload = {"init": init_data}
