@@ -901,11 +901,15 @@ def create_dealer_gamma_curve(
 def create_atm_iv_histogram(
     by_exp: list[dict[str, Any]],
     rv: float = 0.0,
+    ssvi_surface: Any = None,
+    spot: float = 0.0,
 ) -> go.Figure:
     """Create a bar chart of ATM IV by expiration date.
 
     Bars are colored by IV magnitude using a color scale.
     A horizontal line at RV is included.
+    When ``ssvi_surface`` and ``spot`` are provided, a SSVI ATM IV line is
+    overlaid.
     """
     from datetime import datetime
 
@@ -999,6 +1003,24 @@ def create_atm_iv_histogram(
         customdata=customdata_arr,
         showlegend=False,
     ))
+
+    # SSVI ATM IV line overlay
+    if ssvi_surface is not None and spot > 0:
+        ssvi_ivs = []
+        for e in weekdays:
+            d = e.get("dte", 0) or 0
+            tte = d / 365.0
+            iv = ssvi_surface.iv(float(spot), tte) if d > 0 else 0.0
+            ssvi_ivs.append(iv)
+        fig.add_trace(go.Scatter(
+            x=labels,
+            y=ssvi_ivs,
+            name="SSVI ATM IV",
+            mode="lines+markers",
+            line=dict(color="#FFD700", width=2.5),
+            marker=dict(size=6, color="#FFD700", line=dict(color="#fff", width=1)),
+            hovertemplate="<b>%{x}</b><br>SSVI ATM IV: %{y:.2%}<extra></extra>",
+        ))
 
     # Add horizontal line at RV
     if rv > 0:
@@ -1153,6 +1175,96 @@ def create_vrp_chart(
     return fig
 
 
+def create_iv_richness_pct_by_expiration(
+    by_exp: list[dict[str, Any]],
+    spot: float,
+    ssvi_surface: Any,
+) -> go.Figure:
+    from datetime import datetime
+
+    tmpl = _get_template()
+    fig = go.Figure()
+
+    weekdays = []
+    for e in by_exp:
+        try:
+            dt = datetime.strptime(e["expiration"], "%Y-%m-%d")
+            if dt.weekday() < 5:
+                weekdays.append(e)
+        except (ValueError, TypeError):
+            weekdays.append(e)
+
+    if not weekdays:
+        fig.add_annotation(
+            text="No expiration data available",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+        )
+        fig.update_layout(
+            title="IV Richness (%) by Expiration",
+            plot_bgcolor=tmpl["plot_bgcolor"],
+            paper_bgcolor=tmpl["paper_bgcolor"],
+            font_color=tmpl["font_color"],
+        )
+        return fig
+
+    weekdays.sort(key=lambda e: e["expiration"])
+
+    labels = []
+    for e in weekdays:
+        try:
+            dt = datetime.strptime(e["expiration"], "%Y-%m-%d")
+            labels.append(dt.strftime("%m/%d"))
+        except (ValueError, TypeError):
+            labels.append(e["expiration"])
+
+    atm_ivs = [e.get("atm_iv", 0.0) or 0.0 for e in weekdays]
+    dtes = [e.get("dte", 0) or 0 for e in weekdays]
+    ssvi_ivs = []
+    for e in weekdays:
+        d = e.get("dte", 0) or 0
+        tte = d / 365.0
+        iv = ssvi_surface.iv(float(spot), tte) if d > 0 else 0.0
+        ssvi_ivs.append(iv)
+
+    richness_pct = []
+    for m, s in zip(atm_ivs, ssvi_ivs):
+        if s and s > 0:
+            richness_pct.append((m - s) / s * 100)
+        else:
+            richness_pct.append(0.0)
+
+    colors = ["#ef553b" if v > 0 else "#00cc96" for v in richness_pct]
+
+    hovertext = [
+        f"{lb}<br>ATM IV: {m:.2%}<br>SSVI IV: {s:.2%}<br>Richness: {r:+.2f}%"
+        for lb, m, s, r in zip(labels, atm_ivs, ssvi_ivs, richness_pct)
+    ]
+
+    fig.add_trace(go.Bar(
+        x=labels, y=richness_pct, name="IV Richness (%)",
+        marker_color=colors,
+        hovertext=hovertext,
+        hoverinfo="text",
+    ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="#ab63fa")
+
+    fig.update_layout(
+        title="IV Richness (%) by Expiration",
+        xaxis_title="Expiration",
+        yaxis_title="IV Richness (%)",
+        hovermode="x unified",
+        plot_bgcolor=tmpl["plot_bgcolor"],
+        paper_bgcolor=tmpl["paper_bgcolor"],
+        font_color=tmpl["font_color"],
+        xaxis=dict(gridcolor=tmpl["grid_color"], type="category"),
+        yaxis=dict(gridcolor=tmpl["grid_color"], zeroline=True, zerolinecolor=tmpl["grid_color"]),
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
+    return fig
+
+
 def create_iv_by_strike(
     strikes: list[dict[str, Any]],
     spot: float,
@@ -1244,13 +1356,23 @@ def create_iv_by_strike(
             fig.add_trace(go.Scatter(
                 x=x,
                 y=ssvi_curve,
-                name="SSVI fit",
+                name="SSVI",
                 mode="lines+markers",
                 line=dict(color="#FFD700", width=2.5, dash="solid"),
                 marker=dict(size=5, color="#FFD700",
                             line=dict(color="#fff", width=1)),
                 hovertemplate="<b>Strike: %{x:g}</b><br>SSVI IV: %{y:.2%}<extra></extra>",
             ))
+            lidx = min(i for i, v in enumerate(ssvi_curve) if v and v > 0)
+            fig.add_annotation(
+                x=x[lidx], y=ssvi_curve[lidx],
+                text="SSVI",
+                font=dict(size=11, color="#FFD700"),
+                showarrow=False,
+                xanchor="right",
+                yanchor="middle",
+                xshift=-8,
+            )
 
     # Spot / ATM vertical reference line
     if atm_strike is not None:

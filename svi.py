@@ -35,8 +35,11 @@ Public API:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -356,7 +359,7 @@ def _fit_ssvi_surface(
     # Sort by tte ascending for monotonic interpolation.
     fits = sorted(per_tenor, key=lambda f: f.tte)
     tte_arr = np.array([f.tte for f in fits], dtype=float)
-    theta_arr = np.array([f.theta for f in fits], dtype=float)
+    theta_arr = np.array([max(f.theta, 1e-4) for f in fits], dtype=float)
 
     # Surface-wide rho = mean of per-tenor rhos (clamped to no-arb region).
     rho_surf = float(np.clip(np.mean([f.rho for f in fits]), -0.999, 0.999))
@@ -445,11 +448,12 @@ def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float 
     """
     spot_f = float(spot)
     if not data or spot_f <= 0.0:
+        logger.warning("SSVI: no data or spot=%s", spot_f)
         return {"surface": None, "skew": None, "atm_iv": None}
 
     grouped = _group_otm_quotes(data, spot_f, r=r, q=q)
     if not grouped:
-        return {"surface": None, "skew": None, "atm_iv": None}
+        logger.warning("SSVI: _group_otm_quotes returned empty (no OTM options with OI>0)")
         return {"surface": None, "skew": None, "atm_iv": None}
 
     per_tenor: list[RawSVIFit] = []
@@ -459,10 +463,12 @@ def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float 
             per_tenor.append(fit)
 
     if not per_tenor:
+        logger.warning("SSVI: no valid per-tenor fits (%d groups)", len(grouped))
         return {"surface": None, "skew": None, "atm_iv": None}
 
     surface = _fit_ssvi_surface(per_tenor, spot_f, r=r, q=q)
     if surface is None:
+        logger.warning("SSVI: _fit_ssvi_surface returned None (%d tenors)", len(per_tenor))
         return {"surface": None, "skew": None, "atm_iv": None}
 
     # ATM IV = sqrt(theta_front / tte_front) for the front-month tenor.

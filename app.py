@@ -69,6 +69,7 @@ from charts import (
     create_vrp_by_strike,
     create_iv_by_strike,
     create_iv_richness_by_strike,
+    create_iv_richness_pct_by_expiration,
 )
 from chart_component import render_chart
 
@@ -1301,11 +1302,12 @@ def render_volatility_frag():
         )
 
         if vol_view == "IV by Strike":
-            tm = st.radio("View", ["IV", "IV Richness", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
+            tm = st.radio("View", ["IV", "IV Richness (pp)", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
         else:
-            mo = st.radio("View", ["ATM IV", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
+            mo = st.radio("View", ["ATM IV", "IV Richness (%)", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
 
         _rv = s.get("underlying_20d_rv", 0.0)
+        _ssvi_surf = s.analytics.get("ssvi_surface") if s.get("analytics") else None
         if vol_view == "IV by Strike":
             se = s.get("selected_expiration", []); se = [] if isinstance(se, str) else se
             raw = [e for e in s.data if e["expiration"] in se] if se else list(s.data)
@@ -1313,7 +1315,6 @@ def render_volatility_frag():
             if not s.get("show_otm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
             vk = aggregate_by_strike(raw, s.spot, show_calls=s.show_calls, show_puts=s.show_puts)
             _iv_rank = s.get("iv_rank")
-            _ssvi_surf = s.analytics.get("ssvi_surface") if s.get("analytics") else None
             _ssvi_tte = None
             if _ssvi_surf is not None and s.get("by_exp_all"):
                 _valid_dtes = [e.get("dte", 0) for e in s.by_exp_all if e.get("dte", 0) > 0]
@@ -1330,7 +1331,7 @@ def render_volatility_frag():
                     st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=_iv_rank, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
                 else:
                     st.info("No strike data")
-            elif tm == "IV Richness":
+            elif tm == "IV Richness (pp)":
                 if vk and _ssvi_surf is not None and _ssvi_tte is not None:
                     st.plotly_chart(create_iv_richness_by_strike(vk, s.spot, _ssvi_surf, _ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_by_strike")
                 elif not vk:
@@ -1343,7 +1344,12 @@ def render_volatility_frag():
         else:
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="iv_exp_slider")
             ivd = s.by_exp_all[:mx]
-            if mo == "ATM IV": st.plotly_chart(create_atm_iv_histogram(ivd, rv=_rv), config={"scrollZoom": True}, width='stretch', key="atm_iv_chart")
+            if mo == "ATM IV": st.plotly_chart(create_atm_iv_histogram(ivd, rv=_rv, ssvi_surface=_ssvi_surf, spot=s.spot).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="atm_iv_chart")
+            elif mo == "IV Richness (%)":
+                if _ssvi_surf is not None and ivd:
+                    st.plotly_chart(create_iv_richness_pct_by_expiration(ivd, s.spot, _ssvi_surf).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_pct_exp")
+                else:
+                    st.info("SSVI surface not calibrated yet")
             elif _rv > 0: st.plotly_chart(create_vrp_chart(ivd, _rv, mode="vrp_ratio" if mo=="VRP Ratio" else "vrp"), config={"scrollZoom": True}, width='stretch', key="vrp_chart")
             else: st.info("No RV data")
 
