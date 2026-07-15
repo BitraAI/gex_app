@@ -68,6 +68,7 @@ from charts import (
     create_vol_surface_2d,
     create_vrp_by_strike,
     create_iv_by_strike,
+    create_iv_richness_by_strike,
 )
 from chart_component import render_chart
 
@@ -238,6 +239,8 @@ def fetch_data(symbol: str) -> bool:
             pass
 
     data, spot = parse_option_chain(raw, r=r, q=q, fallback_greeks=fallback_greeks)
+    st.session_state.r = r
+    st.session_state.q = q
     if not data:
         st.warning(f"No option data found for {symbol}")
         return False
@@ -321,7 +324,7 @@ def compute_state():
         e for e in aggregate_by_expiration(data, show_calls, show_puts, spot)
         if e.get("call_oi", 0) + e.get("put_oi", 0) > 0 or e.get("atm_iv", 0) > 0
     ]
-    analytics = compute_analytics(data, spot, show_calls, show_puts, data_full=st.session_state.data)
+    analytics = compute_analytics(data, spot, show_calls, show_puts, data_full=st.session_state.data, r=st.session_state.get("r", 0.0), q=st.session_state.get("q", 0.0))
 
     st.session_state.strikes = strikes
     st.session_state.by_exp = by_exp
@@ -732,7 +735,7 @@ def render_candlesticks():
         
         with row2:
             indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "ATM_Option_Flow", "Andean Osc"]
-            selected_indicators = st.multiselect("Indicators", indicator_options, default=[], label_visibility="collapsed")
+            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Osc", "EMA 50 Squeeze", "Trend"], label_visibility="collapsed")
         
         from client import load_candle_cache
 
@@ -1298,7 +1301,7 @@ def render_volatility_frag():
         )
 
         if vol_view == "IV by Strike":
-            tm = st.radio("View", ["IV Rank", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
+            tm = st.radio("View", ["IV", "IV Richness", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
         else:
             mo = st.radio("View", ["ATM IV", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
 
@@ -1322,13 +1325,18 @@ def render_volatility_frag():
                     _secs_since_930 = max(0, min(_secs_since_930, 23400))
                     _secs_left = 23400 - _secs_since_930
                     _ssvi_tte = (min(_valid_dtes) + _secs_left / 23400) / 365.0
-            if tm == "IV Rank":
-                if vk and _iv_rank is not None:
-                    st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=_iv_rank, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_rank_by_strike")
-                elif vk:
-                    st.info("IV Rank not available yet")
+            if tm == "IV":
+                if vk:
+                    st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=_iv_rank, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
                 else:
                     st.info("No strike data")
+            elif tm == "IV Richness":
+                if vk and _ssvi_surf is not None and _ssvi_tte is not None:
+                    st.plotly_chart(create_iv_richness_by_strike(vk, s.spot, _ssvi_surf, _ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_by_strike")
+                elif not vk:
+                    st.info("No strike data")
+                else:
+                    st.info("SSVI surface not calibrated yet")
             elif _rv > 0 and vk:
                 st.plotly_chart(create_vrp_by_strike(vk, s.spot, _rv, mode="vrp" if tm=="VRP" else "vrp_ratio").update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_by_strike")
             else: st.info("No RV data")

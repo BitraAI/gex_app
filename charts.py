@@ -1268,11 +1268,6 @@ def create_iv_by_strike(
                       annotation_text=f"RV: {rv*100:.2f}%",
                       annotation_font_color="#ab63fa")
 
-    if iv_rank is not None:
-        rank_val = iv_rank / 100.0
-        fig.add_hline(y=rank_val, line_dash="dot", line_color="#00cc96",
-                      annotation_text=f"IV Rank: {iv_rank:.2f}%",
-                      annotation_font_color="#00cc96")
 
     fig.update_layout(
         title="Implied Volatility by Strike",
@@ -1288,6 +1283,88 @@ def create_iv_by_strike(
         margin=dict(l=40, r=40, t=60, b=40),
     )
     return fig
+
+
+def create_iv_richness_by_strike(
+    strikes: list[dict[str, Any]],
+    spot: float,
+    ssvi_surface: Any,
+    ssvi_tte: float,
+) -> go.Figure:
+    tmpl = _get_template()
+    fig = go.Figure()
+
+    strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
+    x = [s["strike"] for s in strikes_sorted]
+    market_iv = [
+        s.get("put_iv", 0) if s["strike"] < spot else s.get("call_iv", 0)
+        for s in strikes_sorted
+    ]
+    ssvi_iv = [ssvi_surface.iv(float(k), float(ssvi_tte)) for k in x]
+    richness = [m - s for m, s in zip(market_iv, ssvi_iv)]
+
+    colors = ["#ef553b" if v > 0 else "#00cc96" for v in richness]
+
+    ATM_EDGE = "#ffffff"
+    OTM_CALL_EDGE = "#1f77b4"
+    OTM_PUT_EDGE = "#ff7f0e"
+    edge_colors = []
+    moneyness = []
+    spot_f = float(spot)
+    atm_strike = min(x, key=lambda k: abs(k - spot_f)) if x else None
+    for s in strikes_sorted:
+        sk = s["strike"]
+        if atm_strike is not None and sk == atm_strike:
+            moneyness.append("ATM")
+            edge_colors.append(ATM_EDGE)
+        elif sk > spot_f:
+            moneyness.append("OTM Call")
+            edge_colors.append(OTM_CALL_EDGE)
+        else:
+            moneyness.append("OTM Put")
+            edge_colors.append(OTM_PUT_EDGE)
+
+    hovertext = [
+        f"Strike: {sk:g}<br>IV: {m:.2%}<br>SSVI: {s:.2%}<br>Richness: {r:+.2%}<br>{mn}"
+        for sk, m, s, r, mn in zip(x, market_iv, ssvi_iv, richness, moneyness)
+    ]
+
+    fig.add_trace(go.Bar(
+        x=x, y=richness, name="IV Richness",
+        marker_color=colors,
+        marker_line_color=edge_colors,
+        marker_line_width=[2.5 if m == "ATM" else 1 for m in moneyness],
+        hovertext=hovertext,
+        hoverinfo="text",
+    ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="#ab63fa")
+
+    if atm_strike is not None:
+        fig.add_vline(
+            x=atm_strike,
+            line_dash="dash",
+            line_color="#ffa15a",
+            annotation_text=f"Spot/ATM: ${spot_f:.2f}",
+            annotation_position="top",
+            annotation_font_color="#ffa15a",
+        )
+
+    fig.update_layout(
+        title="IV Richness by Strike",
+        xaxis_title="Strike",
+        yaxis_title="IV Richness (IV - SSVI IV)",
+        hovermode="x unified",
+        plot_bgcolor=tmpl["plot_bgcolor"],
+        paper_bgcolor=tmpl["paper_bgcolor"],
+        font_color=tmpl["font_color"],
+        xaxis=dict(gridcolor=tmpl["grid_color"]),
+        yaxis=dict(gridcolor=tmpl["grid_color"], tickformat=".0%"),
+        showlegend=False,
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
+    return fig
+
 
 def _get_est_offset() -> int:
     from zoneinfo import ZoneInfo
@@ -1443,20 +1520,11 @@ def _add_sqz_series(series: list, cd: list, sqz_data: list, color: str):
     pts = [(i, v) for i, v in enumerate(sqz_data) if v is not None]
     if not pts:
         return
-    segments = []
-    seg = [pts[0]]
-    for j in range(1, len(pts)):
-        if pts[j][0] == pts[j-1][0] + 1:
-            seg.append(pts[j])
-        else:
-            segments.append(seg)
-            seg = [pts[j]]
-    segments.append(seg)
-    for seg in segments:
+    for i, v in pts:
         series.append({
             "type": "Line",
-            "data": [{"time": cd[i]["time"], "value": v} for i, v in seg],
-            "options": {"color": color, "lineWidth": 3, "title": color, "priceLineVisible": False},
+            "data": [{"time": cd[i]["time"], "value": v}],
+            "options": {"color": color, "lineWidth": 4, "priceLineVisible": False, "lastValueVisible": False},
         })
 
 

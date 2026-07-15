@@ -1179,19 +1179,12 @@ def build_init_data(
                 ema50, sqz_red, sqz_black, sqz_orange = _ema50_squeeze(highs, lows, closes)
                 ema50_data = [{"time": cd[i]["time"], "value": ema50[i]} for i in range(len(cd)) if ema50[i] is not None]
                 if ema50_data:
-                    series_list.append({"type": "Line", "key": "ema50", "data": ema50_data,                 "options": {"color": cfg.get("color", "#2196f3"), "lineWidth": 2, "lastValueVisible": False, "priceLineVisible": False}})
+                    series_list.append({"type": "Line", "key": "ema50", "data": ema50_data,                 "options": {"color": cfg.get("color", "#00cc96"), "lineWidth": 2, "lastValueVisible": False, "priceLineVisible": False}})
                 def _emit_sqz(sqz_list, color):
                     pts = [(i, v) for i, v in enumerate(sqz_list) if v is not None]
                     if not pts: return
-                    segs, seg = [], [pts[0]]
-                    for j in range(1, len(pts)):
-                        if pts[j][0] == pts[j-1][0] + 1:
-                            seg.append(pts[j])
-                        else:
-                            segs.append(seg); seg = [pts[j]]
-                    segs.append(seg)
-                    for seg in segs:
-                        series_list.append({"type": "Line", "data": [{"time": cd[i]["time"], "value": v} for i, v in seg], "options": {"color": color, "lineWidth": 3, "priceLineVisible": False, "lastValueVisible": False}})
+                    for i, v in pts:
+                        series_list.append({"type": "Line", "data": [{"time": cd[i]["time"], "value": v}], "options": {"color": color, "lineWidth": 4, "priceLineVisible": False, "lastValueVisible": False}})
                 _emit_sqz(sqz_red, "#ef553b")
                 _emit_sqz(sqz_black, "#000000")
                 _emit_sqz(sqz_orange, "#ffa500")

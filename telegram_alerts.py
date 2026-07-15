@@ -161,7 +161,7 @@ async def _compute_for_symbol(client, symbol: str) -> Optional[dict[str, Any]]:
         logger.warning("no option data for %s (spot=%s)", symbol, spot)
         return None
 
-    analytics = compute_analytics(data, spot)
+    analytics = compute_analytics(data, spot, r=r, q=q)
     return {"analytics": analytics, "spot": spot}
 
 

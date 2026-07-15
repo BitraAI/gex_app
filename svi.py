@@ -7,7 +7,7 @@ Two-stage calibration following the README:
 
        w(k) = a + b * (rho * (k - m) + sqrt((k - m)^2 + sigma^2))
 
-   where ``k = ln(K / S)`` and ``m`` is a free location shift that lets
+    where ``k = ln(K / F)``, ``F = spot * exp((risk_free - dividend_yield) * T)`` is the forward price, and ``m`` is a free location shift that lets
    the smile's vertex sit off k=0 (Schwab OTM puts/calls rarely pin k=0
    exactly). The five parameters ``(a, b, rho, m, sigma)`` are fit with
    bounded least squares; constraints enforce the no-calendar-spread and
@@ -188,6 +188,8 @@ class SSVISurface:
     tte_arr: np.ndarray       # sorted ascending DTEs (years)
     theta_arr: np.ndarray      # corresponding ATM total variances w(0,t)
     spot: float
+    r: float  # risk-free rate (decimal)
+    q: float  # dividend yield (decimal)
 
     # ---- public query API --------------------------------------------------
 
@@ -236,7 +238,8 @@ class SSVISurface:
         s = float(ref_spot) if ref_spot is not None and ref_spot > 0 else self.spot
         if s <= 0.0 or float(strike) <= 0.0 or float(tte) <= 0.0:
             return 0.0
-        k = math.log(float(strike) / s)
+        F = s * math.exp((self.r - self.q) * float(tte))
+        k = math.log(float(strike) / F)
         w = self.total_variance(k, float(tte))
         if w <= 0.0:
             return 0.0
@@ -250,6 +253,7 @@ class SSVISurface:
 
 def _group_otm_quotes(
     data: list[dict[str, Any]], spot: float,
+    r: float = 0.0, q: float = 0.0,
 ) -> dict[str, dict[str, Any]]:
     """Group OTM-call + OTM-put IV quotes per expiration into SVI inputs.
 
@@ -303,7 +307,8 @@ def _group_otm_quotes(
         _secs_since_930 = max(0, min(_secs_since_930, 23400))
         _secs_left = 23400 - _secs_since_930
         tte = (dte + _secs_left / 23400) / 365.0
-        k = math.log(strike / spot)
+        F = spot * math.exp((r - q) * tte)
+        k = math.log(strike / F)
         w = (iv * iv) * tte
 
         if exp not in grouped:
@@ -328,6 +333,7 @@ def _group_otm_quotes(
 
 def _fit_ssvi_surface(
     per_tenor: list[RawSVIFit], spot: float,
+    r: float = 0.0, q: float = 0.0,
 ) -> Optional[SSVISurface]:
     """Stage-2 fit: surface-wide rho, eta, gamma on the per-tenor thetas."""
     if len(per_tenor) < 2:
@@ -343,7 +349,7 @@ def _fit_ssvi_surface(
                 eta=float(eta), gamma=0.0, rho=float(fit.rho),
                 tte_arr=np.array([fit.tte]),
                 theta_arr=np.array([theta]),
-                spot=spot,
+                spot=spot, r=r, q=q,
             )
         return None
 
@@ -367,6 +373,7 @@ def _fit_ssvi_surface(
         return SSVISurface(
             eta=0.4, gamma=0.5, rho=rho_surf,
             tte_arr=tte_arr, theta_arr=theta_arr, spot=spot,
+            r=r, q=q,
         )
 
     log_b = np.log(b_arr[valid] * 2.0)
@@ -381,6 +388,7 @@ def _fit_ssvi_surface(
     return SSVISurface(
         eta=eta, gamma=gamma, rho=rho_surf,
         tte_arr=tte_arr, theta_arr=theta_arr, spot=spot,
+        r=r, q=q,
     )
 
 
@@ -422,12 +430,14 @@ def _implied_vol_for_delta(
     return surface.iv(k, tte, ref_spot=s)
 
 
-def calibrate(data: list[dict[str, Any]], spot: float) -> dict[str, Any]:
+def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float = 0.0) -> dict[str, Any]:
     """Calibrate the SSVI surface from an option chain.
 
     Args:
         data: list of normalized option entries (``calculations`` shape).
         spot: spot price used as the log-moneyness anchor.
+        r: risk-free interest rate (decimal, default 0.0).
+        q: dividend yield (decimal, default 0.0).
 
     Returns:
         ``{"surface": SSVISurface|None, "skew": float|None,
@@ -437,8 +447,9 @@ def calibrate(data: list[dict[str, Any]], spot: float) -> dict[str, Any]:
     if not data or spot_f <= 0.0:
         return {"surface": None, "skew": None, "atm_iv": None}
 
-    grouped = _group_otm_quotes(data, spot_f)
+    grouped = _group_otm_quotes(data, spot_f, r=r, q=q)
     if not grouped:
+        return {"surface": None, "skew": None, "atm_iv": None}
         return {"surface": None, "skew": None, "atm_iv": None}
 
     per_tenor: list[RawSVIFit] = []
@@ -450,7 +461,7 @@ def calibrate(data: list[dict[str, Any]], spot: float) -> dict[str, Any]:
     if not per_tenor:
         return {"surface": None, "skew": None, "atm_iv": None}
 
-    surface = _fit_ssvi_surface(per_tenor, spot_f)
+    surface = _fit_ssvi_surface(per_tenor, spot_f, r=r, q=q)
     if surface is None:
         return {"surface": None, "skew": None, "atm_iv": None}
 
