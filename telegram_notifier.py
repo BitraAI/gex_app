@@ -179,15 +179,14 @@ def diff_alerts(
 
     prev_spot = prev.get("spot")
     if prev_spot is not None:
+        _BUFFER = 0.0002  # 0.02 %
         if cw is not None:
-            if prev_spot <= cw and spot > cw:
-                new_alerts.append(f"Price crossed above Call Wall (${cw:.2f})")
-            elif prev_spot >= cw and spot < cw:
-                new_alerts.append(f"Price crossed below Call Wall (${cw:.2f})")
+            cw_buf = abs(cw) * _BUFFER
+            if prev_spot < cw and spot >= cw - cw_buf:
+                new_alerts.append(f"Price approaching Call Wall (${cw:.2f})")
         if pw is not None:
-            if prev_spot <= pw and spot > pw:
-                new_alerts.append(f"Price crossed above Put Wall (${pw:.2f})")
-            elif prev_spot >= pw and spot < pw:
-                new_alerts.append(f"Price crossed below Put Wall (${pw:.2f})")
+            pw_buf = abs(pw) * _BUFFER
+            if prev_spot <= pw + pw_buf and spot > pw:
+                new_alerts.append(f"Price approaching Put Wall (${pw:.2f})")
 
     return new_alerts, cur

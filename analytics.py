@@ -7,7 +7,7 @@ from calculations import (
 from svi import calibrate as calibrate_ssvi
 
 
-def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool = True, show_puts: bool = True, data_full: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool = True, show_puts: bool = True, data_full: list[dict[str, Any]] | None = None, r: float = 0.0, q: float = 0.0) -> dict[str, Any]:
     strikes = aggregate_by_strike(data, spot, show_calls=show_calls, show_puts=show_puts)
     by_exp = aggregate_by_expiration(data, show_calls=show_calls, show_puts=show_puts)
     totals = compute_totals(data)
@@ -60,7 +60,7 @@ def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool 
     # Calibrated on the unfiltered chain (``data_full``) when available,
     # so the surface sees as many OTM quotes as possible across expirations.
     try:
-        ssvi_res = calibrate_ssvi(data_full if data_full else data, spot)
+        ssvi_res = calibrate_ssvi(data_full if data_full else data, spot, r=r, q=q)
         analytics["ssvi_surface"] = ssvi_res["surface"]
         analytics["ssvi_skew"] = ssvi_res["skew"]
         if analytics.get("atm_iv") is None and ssvi_res["atm_iv"] is not None:

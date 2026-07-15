@@ -160,7 +160,7 @@ Flags:
 Example `crontab -e` entry — every 5 minutes during RTH (the script self-guards off-hours):
 
 ```cron
-30/5 9-16 * * * cd ~/gex_app && /path/to/python telegram_alerts.py >> /tmp/gex_alerts.log 2>&1
+*/5 9-15 * * * cd ~/gex_app && ~/gex_venv/bin/python telegram_alerts.py >> /tmp/gex_alerts.log 2>&1
 ```
 
 The alert types fired are identical to the in-app `check_alerts` flow — both paths share the same pure `diff_alerts(analytics, spot)` implementation in `telegram_notifier.py`.
