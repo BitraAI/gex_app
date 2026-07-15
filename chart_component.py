@@ -1293,7 +1293,8 @@ def build_init_data(
                     "options": {"color": cfg.get("color", "#ffa15a"), "lineWidth": cfg.get("lineWidth", 2), "priceLineVisible": False, "lastValueVisible": False},
                 })
                 continue
-            period = cfg["period"]
+            period = cfg.get("period")
+            if period is None: continue
             if len(closes) < period: continue
             vals = _ema(closes, period) if name.startswith("EMA") else _sma(closes, period)
             offset = period - 1

@@ -1418,9 +1418,8 @@ def render_trade_signals_frag():
         _iv_rank = s.get("iv_rank")
         b, br = assess_market_bias(s.analytics, s.spot, iv_rank=_iv_rank)
         e = {"Bullish":"🟢","Bearish":"🔴","Neutral":"🟡"}
-        st.markdown(f"**Market Bias:** {e.get(b,'')} {b} &mdash; {br}")
+        st.markdown(f"**Market Bias:** {e.get(b,'')} {b} - {br}")
         st.markdown(f"**Next Earnings:** {s.get('next_earnings_date') or 'N/A'}")
-        st.markdown(f"**IV Rank:** {_iv_rank:.1f}%" if _iv_rank is not None else "")
         ar = s.get("strikes_atm_range",20)
         if ar>0 and sd and s.spot>0:
             sk = sorted(set(e["strike"] for e in sd)); ak = min(sk, key=lambda k: abs(k-s.spot)); ai = sk.index(ak)
