@@ -1234,7 +1234,8 @@ def render_market_structure_frag():
             fig = create_gamma_surface(s.filtered_data, ); st.plotly_chart(fig, width='stretch', key="gamma_surface")
         else:
             dm = st.radio("Select", ["GEX", "VEX", "CEX"], horizontal=True, label_visibility="collapsed")
-            fig = create_dealer_gamma_curve(strikes, s.spot, mode=dm.lower(), gamma_flip=s.analytics.get("gamma_flip"), call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), vex_magnet=s.analytics.get("vex_magnet"), vex_repellent=s.analytics.get("vex_repellent"))
+            _dc_strikes = _filter_strikes_near_atm(strikes, s.spot)
+            fig = create_dealer_gamma_curve(_dc_strikes, s.spot, mode=dm.lower(), gamma_flip=s.analytics.get("gamma_flip"), call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), vex_magnet=s.analytics.get("vex_magnet"), vex_repellent=s.analytics.get("vex_repellent"))
             st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="dealer_curve_chart")
 
 
@@ -1259,6 +1260,7 @@ def render_positioning_frag():
     if not s.get("show_otm", True):
         raw_data = [e for e in raw_data if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
     
+    raw_data = _filter_strikes_near_atm(raw_data, s.spot)
     positioning_data = aggregate_by_strike(
         raw_data, s.spot, show_calls=s.show_calls, show_puts=s.show_puts
     )
@@ -1313,6 +1315,7 @@ def render_volatility_frag():
             raw = [e for e in s.data if e["expiration"] in se] if se else list(s.data)
             if not s.get("show_itm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
             if not s.get("show_otm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
+            raw = _filter_strikes_near_atm(raw, s.spot)
             vk = aggregate_by_strike(raw, s.spot, show_calls=s.show_calls, show_puts=s.show_puts)
             _iv_rank = s.get("iv_rank")
             _ssvi_tte = _compute_ssvi_tte([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
@@ -1359,6 +1362,7 @@ def render_heatmaps_frag():
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_oi_slider")
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
+            fl = _filter_strikes_near_atm(fl, s.spot)
             otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
             fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_oi_chart")
@@ -1369,6 +1373,7 @@ def render_heatmaps_frag():
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_v_slider")
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
+            fl = _filter_strikes_near_atm(fl, s.spot)
             otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
             fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_v_chart")
@@ -1379,6 +1384,7 @@ def render_heatmaps_frag():
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_ir_slider")
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             vd = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
+            vd = _filter_strikes_near_atm(vd, s.spot)
             smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
             _ssvi = None
             try:
@@ -1398,6 +1404,7 @@ def render_heatmaps_frag():
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_vrp_slider")
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             vd = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
+            vd = _filter_strikes_near_atm(vd, s.spot)
             smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
             _rv = s.get("underlying_20d_rv", 0.0)
             if _rv > 0:
@@ -1479,6 +1486,13 @@ def render_analytics_panel():
                 st.markdown(f"- **VEX Magnet:** ${vex_m:.2f} ({a.get('vex_magnet_value', 0):,.0f})")
             if vex_r:
                 st.markdown(f"- **VEX Repellent:** ${vex_r:.2f} ({a.get('vex_repellent_value', 0):,.0f})")
+
+def _filter_strikes_near_atm(data: list[dict], spot: float, n: int = 20) -> list[dict]:
+    strikes = sorted(set(e["strike"] for e in data))
+    atm = min(strikes, key=lambda k: abs(k - spot)) if strikes else 0
+    ai = strikes.index(atm) if atm in strikes else 0
+    kr = set(strikes[max(0, ai - n):ai + n + 1])
+    return [e for e in data if e["strike"] in kr]
 
 def _compute_ssvi_tte(dtes: list[int]) -> float | None:
     valid = [d for d in dtes if d > 0]
