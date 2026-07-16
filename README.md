@@ -34,28 +34,35 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
   - IV Rank — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
 - **Strategy Signals:**
-  - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank)
+  - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
   - Strategy recommendations: Sell/Buy Premium, Call/Put Credit Spreads, Iron Condor, Butterfly, Broken Wing Butterfly, Straddle, Strangle, Calendar Spread
   - All strategies use same-expiration legs where applicable
   - Iron Condor uses ATM range boundaries for short legs with protection legs from full data
   - Sell Premium includes Calendar Spread, Butterfly, Broken Wing Butterfly, Jade Lizard
-  - Buy Premium includes Calendar Spread
+  - Buy Premium includes Calendar Spread, Long LEAPS
+  - **Per-strategy filters** (applied before scoring):
+    - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 20–45
+    - **Long LEAPS:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
+    - **Sell Premium:** delta 0.10–0.20, VRP > 0.05, IV Richness > 0, DTE 30–45
 - **Automatic Data Filtering:**
-  - **20 strikes above/below ATM** inclusive
+  - **±20 strikes around ATM** applied across all heatmaps (OI, Volume, IV Richness, VRP), positioning charts (OI, Volume), dealer curve (GEX, VEX, CEX), and volatility charts (IV, IV Richness, VRP)
   - **Nearest 4 active expirations** (excludes expirations with zero OI/volume)
   - Charts have sliders to control expiration count and are unaffected by sidebar expiration selection
-- **Options Data** — Sortable grid filtered by sidebar expiration selection, with highlighted cells and CSV export (columns: Strike, Call/Put GEX, Net GEX, Call/Put OI, Call/Put Vol, Call/Put Gamma, Call/Put IV, VRP, VRP Ratio, Call/Put Price, Rel IV, Expirations):
+- **Options Data** — Sortable grid filtered by sidebar expiration selection, with highlighted cells and CSV export (columns: Strike, Call/Put GEX, Net GEX, Call/Put OI, Call/Put Vol, Call/Put Gamma, Call/Put IV, VRP, SSVI IV, IV (pp), Call/Put Price, Expirations):
   - **Gray row** — ATM strike (closest to spot)
   - **Red OI cells** — Max Pain strike OI columns
   - **Orange Call GEX cell** — Call Wall strike Call GEX
   - **Green Put GEX cell** — Put Wall strike Put GEX
-  - **Rel IV** — Strike IV divided by ATM IV, highlighting elevated IV
   - **RV** — 20-day annualized realized volatility of the underlying (population std of log returns, × √(252 × n/(n−1)))
   - **VRP** — Volatility Risk Premium = IV - RV
-  - **VRP Ratio** — Volatility Risk Premium Ratio = IV / RV
+  - **SSVI IV** — Model IV from the SSVI volatility surface at the front-month TTE
+  - **IV (pp)** — IV Richness in percentage points = IV - SSVI IV
 - **Light Theme** — Clean light-themed UI
-- **Telegram Alerts** — Pushes an alert to a Telegram chat when key GEX events fire: gamma flip / call wall / put wall changes, dealer gamma flips (Long↔Short), and spot price crossings of the walls. Two delivery paths:
+- **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
+  - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
+  - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
+  Two delivery paths:
   - **In-app:** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
   - **Automatic multi-ticker:** `telegram_alerts.py` polls every symbol in the saved ticker history list once per run and sends alerts on detected transitions — schedule it on cron for hands-off monitoring during market hours.
   All alerts are Markdown-formatted with the symbol header and current spot. Reads `BOT_TOKEN` / `CHAT_ID` from the `[telegram]` section of `config.toml` (overridable via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars). Set `enabled = false` to mute alerts without removing secrets. Alerts are delivered silently by default so they don't buzz the recipient's device on every refresh.
