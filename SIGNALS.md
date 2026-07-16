@@ -43,8 +43,8 @@ These filters apply to all strategies within each premium type.
 
 | Factor | Contribution |
 |---|---|
-| **VRP > +2%** | +1 (option expensive → sell) |
-| **VRP < -2%** | -1 (option cheap → buy) |
+| **VRP > 5pp** | +1 (option expensive → sell) |
+| **VRP < 0** | -1 (option cheap → buy) |
 | **Positive net GEX below spot** | -0.5 (dealer support below) |
 | **Negative net GEX above spot** | +0.5 (dealer resistance above) |
 | **Within 2% of call wall** | +0.5 | Resisting above → sell premium against resistance |
