@@ -1340,7 +1340,7 @@ def render_volatility_frag():
                     st.plotly_chart(create_iv_richness_pct_by_expiration(ivd, s.spot, _ssvi_surf).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_pct_exp")
                 else:
                     st.info("SSVI surface not calibrated yet")
-            elif _rv > 0: st.plotly_chart(create_vrp_chart(ivd, _rv, mode="vrp"), config={"scrollZoom": True}, width='stretch', key="vrp_chart")
+            elif _rv > 0: st.plotly_chart(create_vrp_chart(ivd, _rv), config={"scrollZoom": True}, width='stretch', key="vrp_chart")
             else: st.info("No RV data")
 
 
@@ -1351,7 +1351,7 @@ def render_heatmaps_frag():
 
     st.subheader("Heatmaps")
 
-    om = st.radio("Select", ["Open Interest", "Volume", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="hm_oi_vol_radio")
+    om = st.radio("Select", ["Open Interest", "Volume", "VRP", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="hm_oi_vol_radio")
 
     if om == "Open Interest":
         oi_container = st.container()
@@ -1373,7 +1373,26 @@ def render_heatmaps_frag():
             fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_v_chart")
 
-    elif om in ("VRP", "VRP Ratio"):
+    elif om == "IV Richness (pp)":
+        ir_container = st.container()
+        with ir_container:
+            mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_ir_slider")
+            ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
+            vd = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
+            smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
+            _ssvi = None
+            try:
+                _ssvi = s.analytics.get("ssvi_surface")
+            except Exception:
+                pass
+            _ssvi_tte = _compute_ssvi_tte([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi is not None and s.get("by_exp_all") else None
+            if _ssvi is not None and _ssvi_tte is not None:
+                fig = create_vol_surface_2d(vd, 0, smi, sma, s.spot, mode="iv_richness", ssvi_surface=_ssvi, ssvi_tte=_ssvi_tte)
+                st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_ir_chart")
+            else:
+                st.info("SSVI surface not calibrated yet")
+
+    elif om == "VRP":
         vrp_container = st.container()
         with vrp_container:
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_vrp_slider")
@@ -1382,7 +1401,7 @@ def render_heatmaps_frag():
             smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
             _rv = s.get("underlying_20d_rv", 0.0)
             if _rv > 0:
-                fig = create_vol_surface_2d(vd, _rv, smi, sma, s.spot, mode="vrp" if om=="VRP" else "vrp_ratio")
+                fig = create_vol_surface_2d(vd, _rv, smi, sma, s.spot)
                 st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_vrp_chart")
             else:
                 st.info("No RV data")
