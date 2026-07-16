@@ -295,7 +295,6 @@ def create_vrp_by_strike(
     strikes: list[dict[str, Any]],
     spot: float,
     rv: float = 0.0,
-    mode: str = "vrp",
     iv_rank: float | None = None,
 ) -> go.Figure:
     tmpl = _get_template()
@@ -307,20 +306,12 @@ def create_vrp_by_strike(
         s.get("call_iv", 0) if s["strike"] >= spot else s.get("put_iv", 0)
         for s in strikes_sorted
     ]
-    if mode == "vrp":
-        values = [iv - rv for iv in ivs]
-        title = "VRP by Strike"
-        yaxis_title = "VRP (IV - RV)"
-        hovertemplate = "Strike: %{x}<br>VRP: %{y:.2%}<extra></extra>"
-        tickformat = ".0%"
-        ref_line = 0
-    else:
-        values = [iv / rv if rv > 0 else 0 for iv in ivs]
-        title = "VRP Ratio by Strike"
-        yaxis_title = "VRP Ratio (IV / RV)"
-        hovertemplate = "Strike: %{x}<br>VRP Ratio: %{y:.2f}<extra></extra>"
-        tickformat = ".2f"
-        ref_line = 1
+    values = [iv - rv for iv in ivs]
+    title = "VRP by Strike"
+    yaxis_title = "VRP (IV - RV)"
+    hovertemplate = "Strike: %{x}<br>VRP: %{y:.2%}<extra></extra>"
+    tickformat = ".0%"
+    ref_line = 0
 
     min_v = min(values) if values else 0
     max_v = max(values) if values else 1
@@ -617,6 +608,8 @@ def create_vol_surface_2d(
     strike_max: float,
     spot: float,
     mode: str = "vrp",
+    ssvi_surface: Any = None,
+    ssvi_tte: float | None = None,
 ) -> go.Figure:
     tmpl = _get_template()
 
@@ -642,20 +635,39 @@ def create_vol_surface_2d(
     strike_to_idx = {s: i for i, s in enumerate(strikes)}
     exp_to_idx = {e: i for i, e in enumerate(expirations)}
 
-    z = np.full((len(strikes), len(expirations)), np.nan)
-    for entry in filtered:
-        s_idx = strike_to_idx.get(entry["strike"])
-        e_idx = exp_to_idx.get(entry["expiration"])
-        if s_idx is not None and e_idx is not None:
-            iv = entry.get("iv", 0) or 0
-            if iv > 3:
-                iv = iv / 100
-            if mode == "vrp":
+    if mode == "iv_richness":
+        z = np.full((len(strikes), len(expirations)), np.nan)
+        for entry in filtered:
+            s_idx = strike_to_idx.get(entry["strike"])
+            e_idx = exp_to_idx.get(entry["expiration"])
+            if s_idx is not None and e_idx is not None:
+                iv = entry.get("iv", 0) or 0
+                if iv > 3:
+                    iv = iv / 100
+                if ssvi_surface is not None and ssvi_tte is not None and ssvi_tte > 0:
+                    ssvi_iv = ssvi_surface.iv(float(entry["strike"]), float(ssvi_tte))
+                    z[s_idx, e_idx] = iv - ssvi_iv
+        title = "Volatility Surface (IV Richness)"
+        colorbar_title = "IV Richness (pp)"
+        text = np.where(np.isnan(z), "", np.round(z * 100, 1).astype(str))
+        texttemplate = "%{text}%"
+        tickformat = ".0%"
+        hovertemplate = (
+            "Expiration: %{x}<br>"
+            "Strike: %{y}<br>"
+            "IV Richness: %{z:.2%}<br>"
+            "<extra></extra>"
+        )
+    else:
+        z = np.full((len(strikes), len(expirations)), np.nan)
+        for entry in filtered:
+            s_idx = strike_to_idx.get(entry["strike"])
+            e_idx = exp_to_idx.get(entry["expiration"])
+            if s_idx is not None and e_idx is not None:
+                iv = entry.get("iv", 0) or 0
+                if iv > 3:
+                    iv = iv / 100
                 z[s_idx, e_idx] = iv - rv
-            else:
-                z[s_idx, e_idx] = iv / rv if rv > 0 else 0
-
-    if mode == "vrp":
         title = "Volatility Surface (VRP)"
         colorbar_title = "VRP"
         text = np.where(np.isnan(z), "", np.round(z * 100, 1).astype(str))
@@ -665,18 +677,6 @@ def create_vol_surface_2d(
             "Expiration: %{x}<br>"
             "Strike: %{y}<br>"
             "VRP: %{z:.2%}<br>"
-            "<extra></extra>"
-        )
-    else:
-        title = "Volatility Surface (VRP Ratio)"
-        colorbar_title = "VRP Ratio"
-        text = np.where(np.isnan(z), "", np.round(z, 2).astype(str))
-        texttemplate = "%{text}"
-        tickformat = ".2f"
-        hovertemplate = (
-            "Expiration: %{x}<br>"
-            "Strike: %{y}<br>"
-            "VRP Ratio: %{z:.2f}<br>"
             "<extra></extra>"
         )
 
@@ -1068,7 +1068,6 @@ def create_atm_iv_histogram(
 def create_vrp_chart(
     by_exp: list[dict[str, Any]],
     rv: float,
-    mode: str = "vrp",
 ) -> go.Figure:
     from datetime import datetime
 
@@ -1108,22 +1107,13 @@ def create_vrp_chart(
             labels.append(e["expiration"])
 
     atm_ivs = [e.get("atm_iv", 0.0) or 0.0 for e in weekdays]
-    if mode == "vrp_ratio":
-        vals = [iv / rv if rv > 0 else 0 for iv in atm_ivs]
-        title = "VRP Ratio by Expiration"
-        yaxis_title = "VRP Ratio (ATM IV / RV)"
-        hover_label = "VRP Ratio"
-        hover_fmt = "%{y:.2f}"
-        tick_fmt = ".2f"
-        ref_val = 1
-    else:
-        vals = [iv - rv for iv in atm_ivs]
-        title = "VRP by Expiration"
-        yaxis_title = "VRP (ATM IV - RV)"
-        hover_label = "VRP"
-        hover_fmt = "%{y:.2%}"
-        tick_fmt = ".0%"
-        ref_val = 0
+    vals = [iv - rv for iv in atm_ivs]
+    title = "VRP by Expiration"
+    yaxis_title = "VRP (ATM IV - RV)"
+    hover_label = "VRP"
+    hover_fmt = "%{y:.2%}"
+    tick_fmt = ".0%"
+    ref_val = 0
 
     min_v = min(vals) if vals else 0
     max_v = max(vals) if vals else 1
