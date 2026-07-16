@@ -31,6 +31,16 @@ When an `ssvi_surface` is provided, two improvements activate:
 - **Smoothed IV**: the SSVI model IV replaces raw market IV for VRP calculation, filtering out price noise
 - **SSVI skew**: the front-month SSVI-smoothed 25Δ skew replaces the raw market skew for per-option adjustment
 
+### Per-strategy pre-filters
+
+Before scoring, the data is filtered by strategy type:
+
+- **Buy Premium:** options with `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0 (SSVI IV), DTE 20–45
+- **Long LEAPS:** same as Buy Premium but DTE 90–365
+- **Sell Premium:** options with `|Δ|` 0.10–0.20, VRP > 5pp, IV Richness > 0 (SSVI IV), DTE 30–45
+
+These filters apply to all strategies within each premium type.
+
 | Factor | Contribution |
 |---|---|
 | **VRP > +2%** | +1 (option expensive → sell) |
@@ -63,39 +73,45 @@ When an `ssvi_surface` is provided, the Iron Condor strategy uses SSVI-smoothed 
 
 ### Buy Premium strategies
 
-| Strategy | Logic |
-|---|---|
-| **Long Calls** | Best call (lowest VRP) above spot when 25Δ skew positive (calls cheap) |
-| **Long Puts** | Best put (lowest VRP) below spot when 25Δ skew negative (puts cheap) |
-| **Call Debit Spread** | Buy lowest-strike call (score ≤ -0.5) / Sell highest-strike call, same expiration |
-| **Put Debit Spread** | Buy highest-strike put (score ≤ -0.5) / Sell lowest-strike put, same expiration |
-| **Long Straddles** | ATM call + put at same strike; buys if avg VRP negative (cheap), sells if avg VRP positive (rich) |
-| **Long Strangles** | OTM call + put from the same expiration; buys if avg VRP negative, sells if positive |
-| **Calendar Spread** | Sell front expiration / Buy back expiration at the same strike; selects the pair with the largest score difference |
+| Strategy | Logic | Pre-filters |
+|---|---|---|
+| **Long Calls** | Best call (lowest VRP) above spot when 25Δ skew positive (calls cheap) | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Long Puts** | Best put (lowest VRP) below spot when 25Δ skew negative (puts cheap) | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Long LEAPS** | Same as Long Calls, but filtered to long-dated expirations | delta 0.35–0.55, VRP<0, IR<0, DTE 90–365 |
+| **Call Debit Spread** | Buy lowest-strike call (score ≤ -0.5) / Sell highest-strike call, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Put Debit Spread** | Buy highest-strike put (score ≤ -0.5) / Sell lowest-strike put, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Long Straddles** | ATM call + put at same strike; buys if avg VRP negative (cheap), sells if avg VRP positive (rich) | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Long Strangles** | OTM call + put from the same expiration; buys if avg VRP negative, sells if positive | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Calendar Spread** | Sell front expiration / Buy back expiration at the same strike; selects the pair with the largest score difference | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
 
 ### Sell Premium strategies
 
-| Strategy | Logic |
-|---|---|
-| **Short Calls** | Best call (highest VRP) above spot when 25Δ skew negative (calls rich) |
-| **Short Puts** | Best put (highest VRP) below spot when 25Δ skew positive (puts rich) |
-| **Call Credit Spread** | Sell lowest OTM call / Buy higher OTM call, same expiration; picks the pair with the highest avg score |
-| **Put Credit Spread** | Sell highest OTM put / Buy lower OTM put, same expiration; picks the pair with the highest avg score |
-| **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes (or SSVI 25Δ strikes when surface is available, falling back to highest-scored OTM strikes), with long protection legs beyond them (~10Δ when using SSVI). Falls back to symmetric wings if walls unavailable |
-| **Butterfly** | Buy one OTM put + one OTM call, sell 2× ATM body |
-| **Broken Wing Butterfly (Calls)** | Buy lowest OTM call / Sell 2× middle call / Buy highest OTM call, where the upper wing is wider than the lower |
-| **Jade Lizard** | Sell OTM put + Sell OTM call + Buy higher OTM call (protection), same expiration; picks the combo with the highest avg score |
+| Strategy | Logic | Pre-filters |
+|---|---|---|
+| **Short Calls** | Best call (highest VRP) above spot when 25Δ skew negative (calls rich) | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Short Puts** | Best put (highest VRP) below spot when 25Δ skew positive (puts rich) | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Call Credit Spread** | Sell lowest OTM call / Buy higher OTM call, same expiration; picks the pair with the highest avg score | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Put Credit Spread** | Sell highest OTM put / Buy lower OTM put, same expiration; picks the pair with the highest avg score | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes (or SSVI 25Δ strikes when surface is available, falling back to highest-scored OTM strikes), with long protection legs beyond them (~10Δ when using SSVI). Falls back to symmetric wings if walls unavailable | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Butterfly** | Buy one OTM put + one OTM call, sell 2× ATM body | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Broken Wing Butterfly (Calls)** | Buy lowest OTM call / Sell 2× middle call / Buy highest OTM call, where the upper wing is wider than the lower | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Jade Lizard** | Sell OTM put + Sell OTM call + Buy higher OTM call (protection), same expiration; picks the combo with the highest avg score | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
 
 ### Data filtering
 
 - Only **OTM + ATM** options with positive open interest and positive mark price are scored.
 - The strike range is limited by the sidebar's "Strikes around ATM" setting (default ±20 strikes).
 - All recommendations use same-expiration legs where applicable.
+- **Per-strategy pre-filters** (applied before scoring, removed from `sd2`):
+  - **Buy Premium:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 20–45
+  - **Long LEAPS:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
+  - **Sell Premium:** delta `|Δ|` 0.10–0.20, VRP > 0.05 (>5pp), IV Richness > 0, DTE 30–45
 
 ---
 
 ## Code reference
 
 - `signals.py` — Scoring, bias, and recommendation logic (SSVI-smoothed IV/Skew/Iron Condor strikes when surface is available, trading-day TTE for CEX/SSVI precision)
-- `app.py:1385` — `render_trade_signals_frag()` renders the UI
-- `app.py:1400` — In-app "How to read these signals" expander
+- `app.py:1430` — `render_trade_signals_frag()` renders the UI, applies per-strategy pre-filters (delta/VRP/IV Richness/DTE), and calls `score_options` + `generate_recommendations`
+- `telegram_alerts.py:148` — `_build_strategy_alerts()` replicates the same filtering logic for standalone Telegram alert generation
+- `app.py:483` — `_build_strategy_alerts()` in-app variant triggered by `check_alerts()` on data refresh
