@@ -54,9 +54,11 @@ from calculations import build_greeks_lookup, parse_option_chain
 from client import (
     create_client,
     fetch_option_chain,
+    get_20d_rv,
     get_interest_rate,
     get_yield,
 )
+from signals import generate_recommendations, score_options
 from telegram_notifier import diff_alerts, notify_alerts
 
 logger = logging.getLogger("telegram_alerts")
@@ -127,6 +129,76 @@ def within_rth(now: Optional[datetime] = None) -> bool:
 # Per-ticker analytics
 # ---------------------------------------------------------------------------
 
+def _tte_from_dtes(dtes: list[int]) -> float | None:
+    valid = [d for d in dtes if d > 0]
+    if not valid:
+        return None
+    now = datetime.now(_NY_TZ)
+    secs_since_930 = now.hour * 3600 + now.minute * 60 + now.second - 34200
+    secs_since_930 = max(0, min(secs_since_930, 23400))
+    secs_left = 23400 - secs_since_930
+    return (min(valid) + secs_left / 23400) / 365.0
+
+
+def _filter_strikes_near_atm(data: list[dict], spot: float, n: int = 20) -> list[dict]:
+    strikes = sorted(set(e["strike"] for e in data))
+    atm = min(strikes, key=lambda k: abs(k - spot)) if strikes else 0
+    ai = strikes.index(atm) if atm in strikes else 0
+    kr = set(strikes[max(0, ai - n):ai + n + 1])
+    return [e for e in data if e["strike"] in kr]
+
+
+def _build_strategy_alerts(
+    data: list[dict], analytics: dict, spot: float, rv: float,
+) -> list[str]:
+    alerts: list[str] = []
+
+    aks = sorted(set(e["strike"] for e in data))
+    atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
+    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
+
+    sd2 = _filter_strikes_near_atm(sd, spot)
+
+    ssvi_surf = analytics.get("ssvi_surface")
+    dtes = [e.get("dte", 0) for e in _build_by_exp_all(data, spot)]
+    ir_tte = _tte_from_dtes(dtes) if ssvi_surf else None
+
+    buy_sd = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55]
+    buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - rv < 0]
+    buy_sd = [e for e in buy_sd if 20 <= (e.get("days_to_exp", 0) or 0) <= 45]
+    if ssvi_surf and ir_tte:
+        buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
+
+    sell_sd = [e for e in sd2 if 0.10 <= abs(e.get("delta", 0) or 0) <= 0.20]
+    sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - rv > 0.05]
+    sell_sd = [e for e in sell_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
+    if ssvi_surf and ir_tte:
+        sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) > 0]
+
+    if buy_sd:
+        sc = score_options(buy_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
+        buy_recs = [r for r in generate_recommendations(sc, spot, strategy="Long Calls", all_data=buy_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew")) if "No strong" not in r]
+        if buy_recs:
+            alerts.append("Buy Premium:")
+            for r in buy_recs[:3]:
+                alerts.append(f"  • {r}")
+
+    if sell_sd:
+        sc = score_options(sell_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
+        sell_recs = [r for r in generate_recommendations(sc, spot, strategy="Short Calls", all_data=sell_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew")) if "No strong" not in r]
+        if sell_recs:
+            alerts.append("Sell Premium:")
+            for r in sell_recs[:3]:
+                alerts.append(f"  • {r}")
+
+    return alerts
+
+
+def _build_by_exp_all(data: list[dict], spot: float = 0.0) -> list[dict]:
+    from calculations import aggregate_by_expiration
+    return aggregate_by_expiration(data, spot=spot)
+
+
 async def _compute_for_symbol(client, symbol: str) -> Optional[dict[str, Any]]:
     """Fetch the chain and compute analytics for one symbol."""
     try:
@@ -162,7 +234,15 @@ async def _compute_for_symbol(client, symbol: str) -> Optional[dict[str, Any]]:
         return None
 
     analytics = compute_analytics(data, spot, r=r, q=q)
-    return {"analytics": analytics, "spot": spot}
+
+    rv = 0.0
+    try:
+        rv = await get_20d_rv(client, symbol)
+    except Exception as exc:
+        logger.warning("failed to fetch 20d RV for %s: %s", symbol, exc)
+
+    strat_alerts = _build_strategy_alerts(data, analytics, spot, rv)
+    return {"analytics": analytics, "spot": spot, "strategy_alerts": strat_alerts}
 
 
 async def _run_once(*, dry_run: bool, outside_rth: bool) -> int:
@@ -200,10 +280,14 @@ async def _run_once(*, dry_run: bool, outside_rth: bool) -> int:
             new_alerts, next_sym_state = diff_alerts(prev, analytics, spot)
             new_state[sym] = next_sym_state
 
-            if new_alerts:
-                logger.info("[%s] %d alert(s): %s", sym, len(new_alerts), new_alerts)
+            strat_alerts = result.get("strategy_alerts", [])
+            new_alerts = [a for a in new_alerts if "Wall changed" not in a]
+            all_alerts = new_alerts + strat_alerts
+
+            if all_alerts:
+                logger.info("[%s] %d alert(s): %s", sym, len(all_alerts), all_alerts)
                 if not dry_run:
-                    notify_alerts(new_alerts, symbol=sym, spot=spot)
+                    notify_alerts(all_alerts, symbol=sym, spot=spot)
             else:
                 logger.debug("[%s] no change", sym)
     finally:

@@ -480,18 +480,63 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
     )
 
 
+def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]:
+    data = st.session_state.get("data", [])
+    if not data or rv <= 0:
+        return []
+    aks = sorted(set(e["strike"] for e in data))
+    atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
+    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
+    sd2 = _filter_strikes_near_atm(sd, spot)
+    ssvi_surf = analytics.get("ssvi_surface")
+    dtes = [e.get("dte", 0) for e in st.session_state.get("by_exp_all", [])]
+    ir_tte = _compute_ssvi_tte(dtes) if ssvi_surf and dtes else None
+    alerts = []
+    buy_sd = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55]
+    buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - rv < 0]
+    buy_sd = [e for e in buy_sd if 20 <= (e.get("days_to_exp", 0) or 0) <= 45]
+    if ssvi_surf and ir_tte:
+        buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
+    if buy_sd:
+        sc = score_options(buy_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
+        buy_recs = [r for r in generate_recommendations(sc, spot, strategy="Long Calls", all_data=buy_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew")) if "No strong" not in r]
+        if buy_recs:
+            alerts.append("Buy Premium:")
+            for r in buy_recs[:3]:
+                alerts.append(f"  • {r}")
+    sell_sd = [e for e in sd2 if 0.10 <= abs(e.get("delta", 0) or 0) <= 0.20]
+    sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - rv > 0.05]
+    sell_sd = [e for e in sell_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
+    if ssvi_surf and ir_tte:
+        sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) > 0]
+    if sell_sd:
+        sc = score_options(sell_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
+        sell_recs = [r for r in generate_recommendations(sc, spot, strategy="Short Calls", all_data=sell_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew")) if "No strong" not in r]
+        if sell_recs:
+            alerts.append("Sell Premium:")
+            for r in sell_recs[:3]:
+                alerts.append(f"  • {r}")
+    return alerts
+
+
 def check_alerts(analytics: dict, spot: float):
     prev = st.session_state.prev_alerts_state
     new_alerts, next_state = diff_alerts(prev, analytics, spot)
     st.session_state.prev_alerts_state = next_state
 
-    if new_alerts:
-        st.session_state.alerts = new_alerts + st.session_state.alerts[:20]
-        notify_alerts(
-            new_alerts,
-            symbol=st.session_state.get("symbol"),
-            spot=spot,
-        )
+    rv = st.session_state.get("underlying_20d_rv", 0.0)
+    strat_alerts = _build_strategy_alerts(analytics, spot, rv) if rv > 0 else []
+    all_alerts = new_alerts + strat_alerts
+
+    if all_alerts:
+        st.session_state.alerts = all_alerts + st.session_state.alerts[:20]
+        tg_alerts = [a for a in all_alerts if "Wall changed" not in a]
+        if tg_alerts:
+            notify_alerts(
+                tg_alerts,
+                symbol=st.session_state.get("symbol"),
+                spot=spot,
+            )
 
 
 CANDLE_TTL_SECS = 600  # 10 minutes
@@ -1444,9 +1489,32 @@ def render_trade_signals_frag():
         c1,c2 = st.columns([1,2])
         with c1:
             pt = st.radio("Premium Type", ["Buy Premium","Sell Premium"], horizontal=True, key="premium_type")
-            stg = st.selectbox("Strategy", ["Long Calls","Long Puts","Call Debit Spread","Put Debit Spread","Long Straddles","Long Strangles","Calendar Spread"] if pt=="Buy Premium" else ["Short Calls","Short Puts","Call Credit Spread","Put Credit Spread","Iron Condor","Butterfly","Broken Wing Butterfly","Jade Lizard"])
+            stg = st.selectbox("Strategy", ["Long Calls","Long Puts","Call Debit Spread","Put Debit Spread","Long LEAPS","Long Straddles","Long Strangles","Calendar Spread"] if pt=="Buy Premium" else ["Short Calls","Short Puts","Call Credit Spread","Put Credit Spread","Iron Condor","Butterfly","Broken Wing Butterfly","Jade Lizard"])
+        _rec_stg = stg
+        if stg == "Long LEAPS":
+            sd2 = [e for e in sd2 if 90 <= (e.get("days_to_exp", 0) or 0) <= 365]
+            _rec_stg = "Long Calls"
+        _ssvi_surf = None
+        try:
+            _ssvi_surf = s.analytics.get("ssvi_surface")
+        except Exception:
+            pass
+        _ir_tte = _compute_ssvi_tte([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
+        if pt == "Buy Premium":
+            sd2 = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0)) <= 0.55]
+            sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _rv < 0]
+            if _ssvi_surf is not None and _ir_tte is not None:
+                sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) < 0]
+            if stg != "Long LEAPS":
+                sd2 = [e for e in sd2 if 20 <= (e.get("days_to_exp", 0) or 0) <= 45]
+        else:
+            sd2 = [e for e in sd2 if 0.10 <= abs(e.get("delta", 0)) <= 0.20]
+            sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _rv > 0.05]
+            if _ssvi_surf is not None and _ir_tte is not None:
+                sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) > 0]
+            sd2 = [e for e in sd2 if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
         sc = score_options(sd2, s.spot, _rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"), iv_rank=_iv_rank)
-        rc = generate_recommendations(sc, s.spot, strategy=stg, all_data=sd, rv=_rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"))
+        rc = generate_recommendations(sc, s.spot, strategy=_rec_stg, all_data=sd, rv=_rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"))
         with c2:
             for r in rc: st.markdown(f"- {r}")
 
