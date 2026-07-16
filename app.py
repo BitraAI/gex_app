@@ -1302,9 +1302,9 @@ def render_volatility_frag():
         )
 
         if vol_view == "IV by Strike":
-            tm = st.radio("View", ["IV", "IV Richness (pp)", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
+            tm = st.radio("View", ["IV", "IV Richness (pp)", "VRP"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
         else:
-            mo = st.radio("View", ["ATM IV", "IV Richness (%)", "VRP", "VRP Ratio"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
+            mo = st.radio("View", ["ATM IV", "IV Richness (%)", "VRP"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
 
         _rv = s.get("underlying_20d_rv", 0.0)
         _ssvi_surf = s.analytics.get("ssvi_surface") if s.get("analytics") else None
@@ -1315,17 +1315,7 @@ def render_volatility_frag():
             if not s.get("show_otm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
             vk = aggregate_by_strike(raw, s.spot, show_calls=s.show_calls, show_puts=s.show_puts)
             _iv_rank = s.get("iv_rank")
-            _ssvi_tte = None
-            if _ssvi_surf is not None and s.get("by_exp_all"):
-                _valid_dtes = [e.get("dte", 0) for e in s.by_exp_all if e.get("dte", 0) > 0]
-                if _valid_dtes:
-                    from zoneinfo import ZoneInfo
-                    _ny = ZoneInfo("America/New_York")
-                    _ny_now = datetime.now(_ny)
-                    _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
-                    _secs_since_930 = max(0, min(_secs_since_930, 23400))
-                    _secs_left = 23400 - _secs_since_930
-                    _ssvi_tte = (min(_valid_dtes) + _secs_left / 23400) / 365.0
+            _ssvi_tte = _compute_ssvi_tte([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
             if tm == "IV":
                 if vk:
                     st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=_iv_rank, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
@@ -1339,7 +1329,7 @@ def render_volatility_frag():
                 else:
                     st.info("SSVI surface not calibrated yet")
             elif _rv > 0 and vk:
-                st.plotly_chart(create_vrp_by_strike(vk, s.spot, _rv, mode="vrp" if tm=="VRP" else "vrp_ratio").update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_by_strike")
+                st.plotly_chart(create_vrp_by_strike(vk, s.spot, _rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_by_strike")
             else: st.info("No RV data")
         else:
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="iv_exp_slider")
@@ -1350,7 +1340,7 @@ def render_volatility_frag():
                     st.plotly_chart(create_iv_richness_pct_by_expiration(ivd, s.spot, _ssvi_surf).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_pct_exp")
                 else:
                     st.info("SSVI surface not calibrated yet")
-            elif _rv > 0: st.plotly_chart(create_vrp_chart(ivd, _rv, mode="vrp_ratio" if mo=="VRP Ratio" else "vrp"), config={"scrollZoom": True}, width='stretch', key="vrp_chart")
+            elif _rv > 0: st.plotly_chart(create_vrp_chart(ivd, _rv, mode="vrp"), config={"scrollZoom": True}, width='stretch', key="vrp_chart")
             else: st.info("No RV data")
 
 
@@ -1471,6 +1461,18 @@ def render_analytics_panel():
             if vex_r:
                 st.markdown(f"- **VEX Repellent:** ${vex_r:.2f} ({a.get('vex_repellent_value', 0):,.0f})")
 
+def _compute_ssvi_tte(dtes: list[int]) -> float | None:
+    valid = [d for d in dtes if d > 0]
+    if not valid:
+        return None
+    from zoneinfo import ZoneInfo
+    _ny = ZoneInfo("America/New_York")
+    _ny_now = datetime.now(_ny)
+    _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
+    _secs_since_930 = max(0, min(_secs_since_930, 23400))
+    _secs_left = 23400 - _secs_since_930
+    return (min(valid) + _secs_left / 23400) / 365.0
+
 def render_table():
     st.markdown("#### Options Data")
     sel_exp = st.session_state.get("selected_expiration", [])
@@ -1505,17 +1507,30 @@ def render_table():
 
     df = pd.DataFrame(rows)
     spot = st.session_state.spot
-    atm_strike = min(strikes, key=lambda s: abs(s["strike"] - spot))
-    atm_iv = (atm_strike.get("call_iv", 0) + atm_strike.get("put_iv", 0)) / 2
-    df["Rel IV"] = df["IV"] / atm_iv if atm_iv > 0 else 0.0
+
+    ssvi_surf = None
+    try:
+        ssvi_surf = st.session_state.analytics.get("ssvi_surface")
+    except Exception:
+        pass
+    tte = None
+    if ssvi_surf is not None and st.session_state.get("by_exp_all"):
+        dtes = [e.get("dte", 0) for e in st.session_state.by_exp_all if e.get("dte", 0) > 0]
+        tte = _compute_ssvi_tte(dtes)
+    if ssvi_surf is not None and tte is not None:
+        df["SSVI IV"] = [ssvi_surf.iv(float(k), float(tte)) for k in df["Strike"]]
+        df["IV (pp)"] = df["IV"] - df["SSVI IV"]
+    else:
+        df["SSVI IV"] = 0.0
+        df["IV (pp)"] = 0.0
 
     rv = st.session_state.get("underlying_20d_rv", 0.0)
     if rv > 0:
         df["VRP"] = df["IV"] - rv
-        df["VRP Ratio"] = df["IV"] / rv
     else:
         df["VRP"] = 0.0
-        df["VRP Ratio"] = 0.0
+
+    df = df[["Strike","Call GEX","Put GEX","Net GEX","Call Gamma","Put Gamma","Call OI","Put OI","Call Vol","Put Vol","Call Price","Put Price","Expirations","IV","VRP","SSVI IV","IV (pp)"]]
 
     max_pin_idx = (df["Call OI"] + df["Put OI"]).idxmax()
     call_wall = st.session_state.analytics.get("call_wall")
@@ -1552,7 +1567,6 @@ def render_table():
     styled = df.style.apply(highlight_atm, axis=1).format({
         "Strike": "${:.2f}",
         "VRP": "{:.2%}",
-        "VRP Ratio": "{:.2f}",
         "Call GEX": "${:,.0f}",
         "Put GEX": "${:,.0f}",
         "Net GEX": "${:,.0f}",
@@ -1563,9 +1577,10 @@ def render_table():
         "Call Gamma": "{:.4f}",
         "Put Gamma": "{:.4f}",
         "IV": "{:.2%}",
+        "SSVI IV": "{:.2%}",
+        "IV (pp)": "{:.2%}",
         "Call Price": "${:.2f}",
         "Put Price": "${:.2f}",
-        "Rel IV": "{:.2f}",
     })
 
     col1, col2 = st.columns([6, 1])
@@ -1579,7 +1594,13 @@ def render_table():
                 width='stretch',
             )
 
-    st.dataframe(styled, width='stretch', height=400)
+    st.markdown("""
+<style>
+div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
+div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
+</style>
+""", unsafe_allow_html=True)
+    st.dataframe(styled, height=400)
 
 
 @st.fragment(run_every=10)
