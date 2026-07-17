@@ -428,7 +428,6 @@ def generate_recommendations(
                     )
 
     if strategy in ("Calendar Spread",):
-        from datetime import datetime
         best = None
         groups = {}
         for s in scored:

@@ -39,7 +39,6 @@ _HTML_TEMPLATE = """
     // its own price scale (a vertical pane) via priceScaleId on the series.
     const MAIN_H = %(main_height)d;
     const VOL_H = %(vol_height)d;
-    const ATM_H = %(atm_height)d;
     const OSC_H = %(osc_height)d;
     const IV_SKEW_H = %(iv_skew_height)d;
     const IV_SKEW_HIST_H = %(iv_skew_hist_height)d;
@@ -49,7 +48,6 @@ _HTML_TEMPLATE = """
     // no indicators are shown.
     const panes = [{id: 'right', h: MAIN_H}];
     if (d.volume_series) panes.push({id: 'volume', h: VOL_H});
-    if (d.atm_series) panes.push({id: 'atm', h: ATM_H});
     if (d.andean_series) panes.push({id: 'osc', h: OSC_H});
     if (d.iv_skew_series) panes.push({id: 'iv_skew', h: IV_SKEW_H});
     if (d.iv_skew_hist) panes.push({id: 'iv_skew_hist', h: IV_SKEW_HIST_H});
@@ -76,7 +74,6 @@ _HTML_TEMPLATE = """
     }
     collectPaneIds(d.series);
     collectPaneIds(d.volume_series);
-    collectPaneIds(d.atm_series);
     collectPaneIds(d.andean_series);
     collectPaneIds(d.iv_skew_series);
     collectPaneIds(d.iv_skew_hist);
@@ -170,7 +167,6 @@ _HTML_TEMPLATE = """
     // in their options so they render on their own price scale.
     for (const s of d.series || []) { addSeries(s); }
     for (const s of d.volume_series || []) { addSeries(s); }
-    for (const s of d.atm_series || []) { addSeries(s); }
     for (const s of d.andean_series || []) { addSeries(s); }
     for (const s of d.iv_skew_series || []) { addSeries(s); }
     for (const s of d.iv_skew_hist || []) { addSeries(s); }
@@ -280,7 +276,7 @@ _HTML_TEMPLATE = """
         const series = paneSeries[ov.paneId];
         const edges = paneEdges[ov.paneId];
         if (!series || !edges) return;
-        const isVolume = (ov.paneId === 'volume' || ov.paneId === 'atm');
+        const isVolume = (ov.paneId === 'volume');
         const isIVSkew = (ov.paneId === 'iv_skew' || ov.paneId === 'iv_skew_hist');
         // Derive the pane's visible price range from the series mapping at
         // the pane's top/bottom canvas edges.
@@ -1123,7 +1119,7 @@ def build_init_data(
     if indicators:
         for name in indicators:
             cfg = INDICATORS.get(name)
-            # NB: some indicators (Volume, ATM_Option_Flow, EMA 50 Squeeze) use an
+            # NB: some indicators (Volume, EMA 50 Squeeze) use an
             # empty cfg dict on purpose — only skip if the name is unknown entirely.
             if cfg is None:
                 continue
@@ -1188,24 +1184,6 @@ def build_init_data(
                 _emit_sqz(sqz_red, "#ef553b")
                 _emit_sqz(sqz_black, "#000000")
                 _emit_sqz(sqz_orange, "#ffa500")
-                continue
-            if name == "ATM_Option_Flow":
-                atm_buy_map = {}
-                atm_sell_map = {}
-                for c in candles:
-                    t = _convert_time(c["datetime"], et_offset)
-                    atm_buy_map[t] = int(c.get("total_buy_vol", 0) or 0)
-                    atm_sell_map[t] = int(c.get("total_sell_vol", 0) or 0)
-                atm_buy = []
-                atm_sell = []
-                for c in cd:
-                    t = c["time"]
-                    atm_buy.append({"time": t, "value": atm_buy_map.get(t, 0), "color": "#26a69a"})
-                    atm_sell.append({"time": t, "value": atm_sell_map.get(t, 0), "color": "#ef5350"})
-                atm_series = [
-                    {"type": "Histogram", "key": "atm_buy", "data": atm_buy, "options": {"color": "#26a69a", "priceFormat": {"type": "volume"}, "title": "ATM Buy", "priceScaleId": "atm"}},
-                    {"type": "Histogram", "key": "atm_sell", "data": atm_sell, "options": {"color": "#ef5350", "priceFormat": {"type": "volume"}, "title": "ATM Sell", "priceScaleId": "atm"}},
-                ]
                 continue
             if name == "Volume Profile":
                 # VPVR (Volume Profile Visible Range) — bins bar volume at
@@ -1371,7 +1349,6 @@ def compute_latest_indicators(
         cfg = INDICATORS.get(name)
         if not cfg: continue
         if name == "Volume": continue
-        if name == "ATM_Option_Flow": continue
         if name == "Volume Profile": continue
         if name == "Anchored VWAP": continue
         if name == "Andean Osc":
@@ -1396,7 +1373,6 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, force_
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
     osc_height = 100 if (indicators and "Andean Osc" in indicators) else 0
-    atm_height = 100 if (indicators and "ATM_Option_Flow" in indicators) else 0
     iv_skew_height = 100 if (indicators and "IV Skew (25Δ)" in indicators) and iv_skew_history and len(iv_skew_history) > 0 else 0
     iv_skew_hist_height = 50 if (indicators and "IV Skew (25Δ)" in indicators) and iv_skew_history and len(iv_skew_history) > 0 else 0
     init_data = build_init_data(candles, indicators, call_wall, put_wall, last_close=last_close)
@@ -1405,12 +1381,11 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, force_
     payload = {"init": init_data}
     root_id = f"lwc_candlestick_{symbol}"
     json_str = json.dumps(payload)
-    atm_height = 100 if (indicators and "ATM_Option_Flow" in indicators) else 0
-    total_height = main_height + vol_height + atm_height + osc_height + iv_skew_height + iv_skew_hist_height
+    total_height = main_height + vol_height + osc_height + iv_skew_height + iv_skew_hist_height
     from charts import _IS_DARK
     if _IS_DARK:
         _bg, _tc, _gc = "#dbeafe", "#1e293b", "#bfdbfe"
     else:
         _bg, _tc, _gc = "#ffffff", "#1e293b", "#e9eef3"
-    html = _HTML_TEMPLATE % {"root_id": root_id, "main_height": main_height, "vol_height": vol_height, "atm_height": atm_height, "osc_height": osc_height, "iv_skew_height": iv_skew_height, "iv_skew_hist_height": iv_skew_hist_height, "total_height": total_height, "lib": _JS_LIB, "json_data": json_str, "bg": _bg, "tc": _tc, "gc": _gc}
+    html = _HTML_TEMPLATE % {"root_id": root_id, "main_height": main_height, "vol_height": vol_height, "osc_height": osc_height, "iv_skew_height": iv_skew_height, "iv_skew_hist_height": iv_skew_hist_height, "total_height": total_height, "lib": _JS_LIB, "json_data": json_str, "bg": _bg, "tc": _tc, "gc": _gc}
     st.html(html, unsafe_allow_javascript=True)

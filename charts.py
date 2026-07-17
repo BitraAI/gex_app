@@ -1519,7 +1519,6 @@ INDICATORS = {
     "EMA 200": {"period": 200, "color": "#2196f3", "lineWidth": 2},
     "Trend": {"alphaLength": 50},
     "Volume": {},
-    "ATM_Option_Flow": {},
     "Andean Osc": {"length": 50, "sigLength": 9},
     "EMA 50 Squeeze": {},
     "Volume Profile": {},

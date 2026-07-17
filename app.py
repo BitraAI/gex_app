@@ -49,14 +49,9 @@ from analytics import compute_analytics
 from signals import score_options, generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import (
-    TEMPLATE,
     _get_style,
     _get_css,
     set_dark,
-    INDICATORS,
-    _sma,
-    _ema,
-    _trend,
     create_gex_histogram,
     create_gex_by_expiration,
     create_oi_by_strike,
@@ -71,7 +66,6 @@ from charts import (
     create_iv_richness_by_strike,
     create_iv_richness_pct_by_expiration,
 )
-from chart_component import render_chart
 
 st.set_page_config(
     page_title="GammaEx - GEX Analytics",
@@ -213,6 +207,11 @@ def run_async(coro):
 def fetch_data(symbol: str) -> bool:
     if not init_client():
         return False
+    _sym = symbol.upper().lstrip("$")
+    sym_map = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
+    is_index_symbol = _sym in sym_map
+
+    raw = None
     try:
         raw = run_async(
             fetch_option_chain(
@@ -220,26 +219,40 @@ def fetch_data(symbol: str) -> bool:
             )
         )
     except Exception as e:
-        st.error(f"API Error: {e}")
-        return False
+        if not is_index_symbol:
+            st.error(f"API Error: {e}")
+            return False
 
     r = run_async(get_interest_rate(st.session_state.client))
     q = run_async(get_yield(st.session_state.client, symbol))
 
     fallback_greeks = None
-    sym_map = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
-    if symbol.upper() in sym_map:
+    etf_analytics = None
+    etf_data = None
+    etf_spot = 0.0
+
+    if is_index_symbol:
         try:
             fb_raw = run_async(
                 fetch_option_chain(
-                    st.session_state.client, sym_map[symbol.upper()], strike_count=75, include_quotes=True,
+                    st.session_state.client, sym_map[_sym], strike_count=75, include_quotes=True,
                 )
             )
             fallback_greeks = build_greeks_lookup(fb_raw)
+            etf_data, etf_spot = parse_option_chain(fb_raw, r=r, q=q)
+            if etf_data and etf_spot > 0:
+                etf_analytics = compute_analytics(etf_data, etf_spot, data_full=etf_data, r=r, q=q)
         except Exception:
             pass
 
-    data, spot = parse_option_chain(raw, r=r, q=q, fallback_greeks=fallback_greeks)
+    if raw is not None and not (isinstance(raw, dict) and raw.get("errors")):
+        data, spot = parse_option_chain(raw, r=r, q=q, fallback_greeks=fallback_greeks)
+    else:
+        data, spot = [], 0.0
+
+    if (not data or spot <= 0) and etf_data and etf_spot > 0:
+        data, spot = etf_data, etf_spot
+
     st.session_state.r = r
     st.session_state.q = q
     if not data:
@@ -263,6 +276,19 @@ def fetch_data(symbol: str) -> bool:
     prefetch_daily_candles(symbol)
     apply_filters()
     compute_state()
+    st.session_state.etf_analytics = etf_analytics
+    if etf_analytics and st.session_state.analytics.get("net_gex", 0) == 0:
+        for key in ("net_gex", "total_call_gex", "total_put_gex",
+                     "max_positive_gex", "max_negative_gex",
+                     "max_positive_gex_strike", "max_negative_gex_strike",
+                     "dealer_position"):
+            if key in etf_analytics:
+                st.session_state.analytics[key] = etf_analytics[key]
+    if etf_analytics and st.session_state.analytics.get("ssvi_surface") is None:
+        st.session_state.analytics["ssvi_surface"] = etf_analytics.get("ssvi_surface")
+        st.session_state.analytics["ssvi_skew"] = etf_analytics.get("ssvi_skew")
+        if st.session_state.analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
+            st.session_state.analytics["atm_iv"] = etf_analytics["atm_iv"]
     st.session_state.iv_rank = compute_iv_rank(
         symbol, atm_iv=st.session_state.analytics.get("atm_iv")
     )
@@ -359,9 +385,10 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
         unsafe_allow_html=True,
     )
     net = analytics.get('net_gex', 0)
+    net_label = "Net GEX" + (" (via ETF)" if st.session_state.get("etf_analytics") else "")
     net_cls = "positive" if net >= 0 else "negative"
     col2.markdown(
-        f'<div class="gex-metric"><div class="label">Net GEX</div>'
+        f'<div class="gex-metric"><div class="label">{net_label}</div>'
         f'<div class="value {net_cls}">${net:,.0f}</div></div>',
         unsafe_allow_html=True,
     )
@@ -780,7 +807,7 @@ def render_candlesticks():
             timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()), index=0, label_visibility="collapsed", width=100)
         
         with row2:
-            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "ATM_Option_Flow", "Andean Osc"]
+            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "Andean Osc"]
             selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Osc", "EMA 50 Squeeze", "Trend"], label_visibility="collapsed")
         
         from client import load_candle_cache
@@ -854,7 +881,7 @@ def render_candlesticks():
         # Map index symbols (SPX, RUT, NDX) to their ETF equivalents
         # because Schwab LEVELONE_EQUITIES does not support index symbols.
         _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
-        stream_symbol = _STREAM_SYMBOL_MAP.get(symbol.upper(), symbol)
+        stream_symbol = _STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"), symbol)
         svc = st.session_state.get("streaming_service")
         if svc:
             if not svc.is_running:
@@ -864,28 +891,6 @@ def render_candlesticks():
                 svc.start(stream_symbol)
 
         # Feed spot from equity stream to ATM option service
-        svc_spot = st.session_state.get("streaming_service")
-        if svc_spot and svc_spot.last_price:
-            atm_svc = st.session_state.get("atm_option_service")
-            if atm_svc:
-                atm_svc.update_spot(svc_spot.last_price)
-
-        # Start ATM option streaming on the shared equity StreamClient
-        if "ATM_Option_Flow" in selected_indicators:
-            atm_svc = st.session_state.get("atm_option_service")
-            if atm_svc:
-                by_exp_all = s.get("by_exp_all", [])
-                if by_exp_all:
-                    front_exp = by_exp_all[0]["expiration"]
-                else:
-                    from datetime import timedelta
-                    front_exp = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-                if svc_spot and svc_spot.last_price:
-                    atm_svc.update_spot(svc_spot.last_price)
-                eq_sc = svc_spot.get_stream_client() if svc_spot else None
-                if eq_sc is not None and (not atm_svc.is_running or atm_svc.symbol != symbol):
-                    atm_svc.register(eq_sc, symbol, front_exp)
-
         # Normalize chart_df["datetime"] to int64 for merging
         chart_df["datetime"] = chart_df["datetime"].astype("int64")
 
@@ -1084,9 +1089,9 @@ def render_candlesticks():
 
         # Merge ATM option volume into chart df when available
         # atm_df index is int64 milliseconds — same unit as chart_df["datetime"].
-        # Warnings are shown near the chart (see ATM Option Flow block below);
+        # Warnings are shown near the chart (see Option_Volume_Profile block below);
         # this block only attaches ATM volume columns to chart_df.
-        if "ATM_Option_Flow" in selected_indicators:
+        if "Option_Volume_Profile" in selected_indicators:
             atm_svc = st.session_state.get("atm_option_service")
             if atm_svc and atm_svc.is_running:
                 try:
@@ -1134,30 +1139,30 @@ def render_candlesticks():
 
         # Build the candle list for chart_component.render_chart. Keep datetime as
         # int64 ms so the streaming 1-second bars are uniquely keyed on time.
-        candles_payload = []
-        for _, row in df.iterrows():
-            c = {
-                "datetime": int(row["datetime"]),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-            }
-            if "volume" in df.columns:
-                vol_val = row.get("volume")
-                if pd.notna(vol_val):
-                    vol_val = float(vol_val)
-                    if vol_val == vol_val:  # NaN guard
-                        c["volume"] = vol_val
-            if "buy_vol" in df.columns and pd.notna(row.get("buy_vol")):
-                c["buy_vol"] = int(row["buy_vol"])
-            if "sell_vol" in df.columns and pd.notna(row.get("sell_vol")):
-                c["sell_vol"] = int(row["sell_vol"])
-            for atm_col in ["call_buy_vol", "call_sell_vol", "put_buy_vol", "put_sell_vol",
-                            "total_buy_vol", "total_sell_vol"]:
-                if atm_col in df.columns and pd.notna(row.get(atm_col)):
-                    c[atm_col] = int(row[atm_col])
-            candles_payload.append(c)
+        _extra_cols = [c for c in ["buy_vol", "sell_vol",
+                                   "call_buy_vol", "call_sell_vol",
+                                   "put_buy_vol", "put_sell_vol",
+                                   "total_buy_vol", "total_sell_vol"]
+                       if c in df.columns]
+        base_cols = ["datetime", "open", "high", "low", "close"]
+        if "volume" in df.columns:
+            base_cols.append("volume")
+        candles_payload = df[base_cols + _extra_cols].to_dict("records")
+        for c in candles_payload:
+            c["datetime"] = int(c["datetime"])
+            c["open"] = float(c["open"])
+            c["high"] = float(c["high"])
+            c["low"] = float(c["low"])
+            c["close"] = float(c["close"])
+            if "volume" in c:
+                v = c["volume"]
+                c["volume"] = float(v) if pd.notna(v) and v == v else 0.0
+            for ac in _extra_cols:
+                v = c.get(ac)
+                if v is not None and pd.notna(v):
+                    c[ac] = int(v)
+                else:
+                    c.pop(ac, None)
 
         # Use unique chart id for the current ticker to preserve Y-axis state
         chart_id = s.get("symbol", "SPY")
@@ -1171,7 +1176,7 @@ def render_candlesticks():
 
         # Websocket streaming status — overlaid on the candlesticks chart.
         # The equity StreamClient feeds the live candles (and, when
-        # ATM_Option_Flow is selected, the option-trade aggregation), so its
+        # Option_Volume_Profile is selected, the option-trade aggregation), so its
         # status is shown regardless of which indicators are selected.  We
         # resolve a single status string + level here and hand it to
         # render_chart() via the `status` parameter; an absolute-positioned
@@ -1185,7 +1190,7 @@ def render_candlesticks():
             _status = {"text": f"Starting {stream_symbol} stream...", "level": "info"}
         elif _eq_svc.is_connected and _eq_svc.has_data:
             _msg = f"Receiving {stream_symbol} ticks · {_eq_svc.ticks_received} received"
-            if "ATM_Option_Flow" in selected_indicators and _atm_svc is not None:
+            if "Option_Volume_Profile" in selected_indicators and _atm_svc is not None:
                 if _atm_svc.is_running and _atm_svc.has_data:
                     _n = _atm_svc.ticks_received
                     _msg += f" · { _n } option tick{'s' if _n != 1 else ''}"
@@ -1239,10 +1244,17 @@ def render_metrics_frag():
     # the "Current Price" card updates at the fragment cadence rather
     # than the slower option-chain poll cadence. The analytics shown in
     # the neighbouring columns still run off the polled s.spot.
+    #
+    # For index symbols (SPX, RUT, NDX) the stream subscribes to the
+    # ETF proxy (SPY, IWM, QQQ) which has a completely different price
+    # scale — never use the ETF's live price as the index spot.
+    _INDEX_SYMBOLS = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP"}
+    _sym = s.get("symbol", "").upper().lstrip("$")
     live = None
-    svc = s.get("streaming_service")
-    if svc:
-        live = svc.last_price
+    if _sym not in _INDEX_SYMBOLS:
+        svc = s.get("streaming_service")
+        if svc:
+            live = svc.last_price
     spot = live if (live and live > 0) else s.spot
     metrics_container = st.container()
     with metrics_container:
@@ -1305,11 +1317,16 @@ def render_positioning_frag():
     if not s.get("show_otm", True):
         raw_data = [e for e in raw_data if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
     
+    if not raw_data:
+        st.info("No positioning data available")
+        return
+    
     raw_data = _filter_strikes_near_atm(raw_data, s.spot)
     positioning_data = aggregate_by_strike(
         raw_data, s.spot, show_calls=s.show_calls, show_puts=s.show_puts
     )
     if not positioning_data:
+        st.info("No positioning data available")
         return
 
     if selected_view_type == "Open Interest":

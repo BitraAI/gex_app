@@ -217,13 +217,17 @@ async def _compute_for_symbol(client, symbol: str) -> Optional[dict[str, Any]]:
         r, q = 0.0, 0.0
 
     fallback_greeks = None
-    fallback_sym = _FALLBACK_SYMBOLS.get(symbol.upper())
+    etf_analytics = None
+    fallback_sym = _FALLBACK_SYMBOLS.get(symbol.upper().lstrip("$"))
     if fallback_sym:
         try:
             fb_raw = await fetch_option_chain(
                 client, fallback_sym, strike_count=_STRIKE_COUNT, include_quotes=True,
             )
             fallback_greeks = build_greeks_lookup(fb_raw)
+            etf_data, etf_spot = parse_option_chain(fb_raw, r=r, q=q)
+            if etf_data and etf_spot > 0:
+                etf_analytics = compute_analytics(etf_data, etf_spot, data_full=etf_data, r=r, q=q)
         except Exception as exc:
             logger.warning("fallback greeks fetch failed for %s via %s: %s",
                            symbol, fallback_sym, exc)
@@ -234,6 +238,20 @@ async def _compute_for_symbol(client, symbol: str) -> Optional[dict[str, Any]]:
         return None
 
     analytics = compute_analytics(data, spot, r=r, q=q)
+
+    if etf_analytics:
+        if analytics.get("net_gex", 0) == 0:
+            for key in ("net_gex", "total_call_gex", "total_put_gex",
+                         "max_positive_gex", "max_negative_gex",
+                         "max_positive_gex_strike", "max_negative_gex_strike",
+                         "dealer_position"):
+                if key in etf_analytics:
+                    analytics[key] = etf_analytics[key]
+        if analytics.get("ssvi_surface") is None and etf_analytics.get("ssvi_surface") is not None:
+            analytics["ssvi_surface"] = etf_analytics["ssvi_surface"]
+            analytics["ssvi_skew"] = etf_analytics["ssvi_skew"]
+            if analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
+                analytics["atm_iv"] = etf_analytics["atm_iv"]
 
     rv = 0.0
     try:
