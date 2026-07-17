@@ -866,26 +866,26 @@ def create_dealer_gamma_curve(
             fig.add_vline(
                 x=vex_magnet,
                 line_dash="dot",
-                line_color="#ffa15a",
+                line_color="#ef553b",
             )
             fig.add_annotation(
                 x=vex_magnet, yref="paper", y=0.12,
                 text=f"Magnet: ${vex_magnet:.2f}",
                 showarrow=False,
-                font_color="#ffa15a",
+                font_color="#ef553b",
                 font_size=11,
             )
         if vex_repellent:
             fig.add_vline(
                 x=vex_repellent,
                 line_dash="dot",
-                line_color="#ef553b",
+                line_color="#00cc96",
             )
             fig.add_annotation(
                 x=vex_repellent, yref="paper", y=0.12,
                 text=f"Repellent: ${vex_repellent:.2f}",
                 showarrow=False,
-                font_color="#ef553b",
+                font_color="#00cc96",
                 font_size=11,
             )
 
