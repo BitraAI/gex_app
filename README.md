@@ -6,8 +6,8 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 
 ## Features
 
-- **Real-time Option Chain Data** — Fetches live options data via the Schwab API
-- **Candlestick Charts** — Interactive OHLCV charts with SMA/EMA overlays, Trend, Volume (buy/sell pressure with streaming delta), ATM_Option_Flow (real-time ATM option trade flow via LEVELONE_OPTIONS streaming — computes `(call_buy + put_sell) - (call_sell + put_buy)` per 1s bar with Bullish/Bearish Flow label over last 20 bars), Volume Profile (VPVR — client-side per-bar volume binned at each visible price level with buy/sell split, POC highlighted, recomputes on every pan/zoom), Anchored VWAP (session-reset line, anchored at each 09:30 ET boundary), Andean Oscillator, and EMA 50 Squeeze indicators
+- **Real-time Option Chain Data** — Fetches live options data via the Schwab API. For index symbols (`$SPX`, `$RUT`, `$NDX`), the ETF proxy chain (`SPY`, `IWM`, `QQQ`) is automatically fetched as a fallback: when the index chain returns zero gamma or open interest (common with Schwab's index data), delta-matched values from the ETF chain backfill the missing fields so GEX calculations remain meaningful.
+- **Candlestick Charts** — Interactive OHLCV charts with SMA/EMA overlays, Trend, Volume (buy/sell pressure with streaming delta), ATM_Option_Flow (real-time ATM option trade flow via LEVELONE_OPTIONS streaming with Bullish/Bearish Flow label over last 20 bars), Volume Profile (VPVR — client-side per-bar volume binned at each visible price level with buy/sell split, POC highlighted, recomputes on every pan/zoom), Anchored VWAP (session-reset line, anchored at each 09:30 ET boundary), Andean Oscillator, and EMA 50 Squeeze indicators
 - **Candlestick Chart Interactions** — TradingView-style dual-axis pan and zoom:
   - **Drag in the chart body** pans BOTH the time (X) and price (Y) axes together vertically and horizontally (custom body-drag handler pans Y; LWC handles X natively).
   - **Drag the price-scale labels** (right edge) or **drag the time-scale labels** (bottom) zooms each respective axis natively.
@@ -33,6 +33,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Dealer Position (Long/Short Gamma)
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
   - IV Rank — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
+   - **Bullish/Bearish Flow** — Real-time ATM option flow metrics from the shared equity WebSocket stream, displayed in a dedicated fragment refreshing every 1 second. Subscribes to the front expiration ATM call and put contracts via LEVELONE_OPTIONS streaming. Trade direction is inferred by comparing trade price to the bid-ask midpoint. Bullish Flow = `call_buy_vol + put_sell_vol`; Bearish Flow = `call_sell_vol + put_buy_vol`. Totals accumulate over the streaming session (up to 200 seconds of 1-second bars). Cards are color-coded green/red based on which side dominates.
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
@@ -218,7 +219,7 @@ You can then open the app in your local browser.
 
 ## Usage
 
-1. Enter a ticker symbol (e.g., SPY, AAPL, TSLA) in the sidebar
+1. Enter a ticker symbol (e.g., SPY, AAPL, TSLA, $SPX) in the sidebar
 2. Click **Refresh** to load the option chain (the app works best during regular US market trading hours)
 3. Explore 10 chart tabs with GEX visualizations and analytics
 4. Use the sidebar expiration selector to filter the Options Data table (charts use sliders to control expiration count)
@@ -229,6 +230,7 @@ You can then open the app in your local browser.
    - **Drag the price-scale labels** (right edge) to zoom the Y-axis, or the **time-scale labels** (bottom) to zoom the X-axis.
    - **Scroll the mouse wheel** to zoom the X-axis (bar spacing).
    - The Y zoom persists across the live 1-second streaming updates — drag it to where you want and the chart stays there.
+8. **Bullish/Bearish Flow** metrics (below the analytics cards) show real-time ATM option flow from the shared WebSocket stream, refreshing every 1 second. The metrics subscribe to the front expiration ATM call and put contracts. Bullish Flow = call buys + put sells; Bearish Flow = call sells + put buys. Totals accumulate over the session. Trade direction is inferred by comparing the trade price to the bid-ask midpoint (at or above mid = buy, below mid = sell).
 
 ## Architecture
 
@@ -236,13 +238,13 @@ You can then open the app in your local browser.
 gex_app/
 ├── app.py                 # Main Streamlit application
 ├── analytics.py           # Analytical calculations (walls, flip, skew, etc.)
-├── calculations.py        # GEX/VEX/CEX calculation engine and data aggregation
+├── calculations.py        # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
 ├── charts.py              # Plotly chart generators
 ├── chart_component.py     # Lightweight Charts HTML/JS component (custom indicators, dual-axis pan/zoom, VPVR overlay, Y-range persistence across streaming re-renders)
 ├── client.py              # Schwab API client wrapper
-├── option_streaming_service.py  # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, 1s aggregation with buy/sell split)
+├── option_streaming_service.py  # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, 1s aggregation with buy/sell split — shares the equity StreamClient)
 ├── streaming_service.py   # Schwab WebSocket streaming (Level 1 + NASDAQ/NYSE Level 2 order books, 1s OHLCV aggregation with tick-direction buy/sell volume split)
-├── config.py              # Application configuration
+├── config.py              # Application configuration (single-parse of config.toml)
 ├── config.toml            # Schwab credentials and settings
 ├── config.toml.example    # Example configuration template
 ├── schwab_auth.py         # OAuth authentication script
@@ -347,6 +349,8 @@ Where:
   2. **SSVI surface**: Across-expiration fit of ATM total variance `θ(t) = w(0, t)`, then surface-wide `ρ` (average skew), `η` (skew-smile decay), and `γ` (power-law exponent) parameters, giving a fully arbitrage-free surface.
 - **SSVI IV / Skew** — Once calibrated, the surface provides cleaner `iv(strike, tte)` queries and a model-based 25Δ skew via root-finding on Black-Scholes delta. Stored as `ssvi_surface` and `ssvi_skew` in analytics.
 - **IV Rank** — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. The 20-day RV for each trailing day is computed as `σ × √252` where `σ` is the population standard deviation of the 20 most recent daily log returns. The current ATM IV (from the front-month option chain) is then ranked against the 252 trailing RV values. If ATM IV is unavailable, the latest 20-day RV is used as a fallback. Formula: `round((current - min_rv_252d) / (max_rv_252d - min_rv_252d) × 100, 2)`. Values >70 indicate options are expensive relative to history (favor selling premium), values <30 indicate options are cheap (favor buying premium). The IV by Strike chart's IV Rank view overlays the SSVI fitted surface (green line+markers) on the same strikes at the front-month tenor.
+- **Bullish Flow** — `call_buy_vol + put_sell_vol` from ATM option streaming. Both buying calls and selling puts express bullish conviction. Subscribes to the front expiration ATM call and put contracts via LEVELONE_OPTIONS WebSocket streaming. Trade direction is inferred by comparing the trade price to the bid-ask midpoint: trades at or above mid are classified as buys, trades below mid as sells. When bid/ask data is unavailable, volume is split evenly between buy and sell. Totals accumulate over the streaming session (up to 200 seconds of 1-second aggregated bars) and display in a dedicated fragment refreshing every 1 second. Card turns green when bullish flow exceeds bearish flow.
+- **Bearish Flow** — `call_sell_vol + put_buy_vol` from ATM option streaming. Both selling calls and buying puts express bearish conviction. Uses the same front expiration ATM contracts and direction inference as Bullish Flow. Totals accumulate over the streaming session and display in the metrics panel with 1-second refresh. Card turns red when bearish flow exceeds bullish flow. Note: bearish flow can increase during a price rally — this often reflects traders selling calls into strength or buying protective puts to hedge long positions.
 
 **Dealer Curve:**
 Plots cumulative net GEX, VEX, or CEX across a continuum of hypothetical spot prices (toggleable). At each price level:
@@ -361,7 +365,9 @@ A downward-sloping curve means dealers are short gamma (rising spot reduces net 
 
 ## Data Source
 
-Uses the [Schwab API](https://developer.schwab.com/) via the `schwab-py` Python client library, which provides real-time options chain data including gamma, open interest, volume, IV, and Greeks.
+Uses the [Schwab API](https://developer.schwab.com/) via the `schwab-py` Python client library, which provides real-time options chain data including gamma, open interest, volume, IV, and Greeks. For index symbols (`$SPX`, `$RUT`, `$NDX`), the ETF chain is automatically fetched as a fallback source for gamma, open interest, and volume when the index chain returns zeros — matched by delta (not strike) so it works across different price scales.
+
+Streaming uses a single WebSocket connection per session. The equity `StreamingService` owns the connection; the `AtmOptionVolumeService` piggybacks on the same `StreamClient` to subscribe to ATM option L1 quotes without opening a second connection.
 
 ## Disclaimer
 

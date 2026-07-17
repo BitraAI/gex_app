@@ -377,6 +377,21 @@ def compute_state():
     ))
 
 
+def _compute_flow(atm_svc):
+    """Aggregate ATM option streaming into bullish/bearish flow totals."""
+    if atm_svc is None or not getattr(atm_svc, "is_running", False):
+        return None, None
+    try:
+        df = atm_svc.get_candles()
+        if df.empty:
+            return None, None
+        bullish = int(df["call_buy_vol"].sum() + df["put_sell_vol"].sum())
+        bearish = int(df["call_sell_vol"].sum() + df["put_buy_vol"].sum())
+        return bullish, bearish
+    except Exception:
+        return None, None
+
+
 def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime], rv: float = 0.0, iv_rank: float | None = None, iv_skew: float | None = None):
     col1, col2, col3, col4 = st.columns(4)
     col1.markdown(
@@ -505,6 +520,7 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
         f'<div style="text-align:right;color:gray;font-size:0.85rem">Last Refresh: {lr}</div>',
         unsafe_allow_html=True,
     )
+
 
 
 def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]:
@@ -890,6 +906,24 @@ def render_candlesticks():
                 svc.stop()
                 svc.start(stream_symbol)
 
+        # --- Register ATM option service on the equity WebSocket ---
+        atm_svc = st.session_state.get("atm_option_service")
+        _sel_exp = st.session_state.get("selected_expiration", [])
+        _first_exp = _sel_exp[0] if _sel_exp else None
+        if svc and svc.is_connected and atm_svc and _first_exp:
+            _need_register = (
+                not atm_svc.is_running
+                or atm_svc.symbol != stream_symbol
+                or getattr(atm_svc, "_expiration", None) != _first_exp
+            )
+            if _need_register:
+                sc = svc.get_stream_client()
+                if sc is not None:
+                    atm_svc.register(sc, stream_symbol, _first_exp)
+            # Feed live spot so ATM strike tracking stays current
+            if svc.last_price and svc.last_price > 0:
+                atm_svc.update_spot(svc.last_price)
+
         # Feed spot from equity stream to ATM option service
         # Normalize chart_df["datetime"] to int64 for merging
         chart_df["datetime"] = chart_df["datetime"].astype("int64")
@@ -1261,6 +1295,30 @@ def render_metrics_frag():
         iv_rank = s.get("iv_rank")
         iv_skew = s.analytics.get('iv_skew')
         render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=iv_rank, iv_skew=iv_skew)
+
+
+@st.fragment(run_every=1)
+def render_flow_frag():
+    s = st.session_state
+    if not s.get("data"):
+        return
+    bullish_flow, bearish_flow = _compute_flow(s.get("atm_option_service"))
+    if bullish_flow is not None or bearish_flow is not None:
+        c1, c2 = st.columns(2)
+        bf = bullish_flow if bullish_flow is not None else 0
+        brf = bearish_flow if bearish_flow is not None else 0
+        bf_cls = "positive" if bf > brf else "negative" if brf > bf else "neutral"
+        brf_cls = "negative" if brf > bf else "positive" if bf > brf else "neutral"
+        c1.markdown(
+            f'<div class="gex-metric"><div class="label">Bullish Flow</div>'
+            f'<div class="value {bf_cls}">{bf:,} contracts</div></div>',
+            unsafe_allow_html=True,
+        )
+        c2.markdown(
+            f'<div class="gex-metric"><div class="label">Bearish Flow</div>'
+            f'<div class="value {brf_cls}">{brf:,} contracts</div></div>',
+            unsafe_allow_html=True,
+        )
 
 
 def render_market_structure_frag():
@@ -1827,6 +1885,7 @@ def main():
 
         if st.session_state.get("data"):
             render_metrics_frag()
+            render_flow_frag()
             render_tabs_frag()
         else:
             st.info("Enter a stock ticker in the sidebar and click Refresh to begin analysis")
