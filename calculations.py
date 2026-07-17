@@ -1,19 +1,7 @@
 import numpy as np
 from typing import Any, Optional
-from datetime import datetime, date
+from datetime import datetime
 from zoneinfo import ZoneInfo
-
-STRIKE_SPACING_MAP: dict[float, float] = {
-    0.0: 0.5,
-    5.0: 0.5,
-    10.0: 0.5,
-    25.0: 0.5,
-    50.0: 0.5,
-    100.0: 1.0,
-    200.0: 1.0,
-    500.0: 2.5,
-    1000.0: 5.0,
-}
 
 
 def get_strike_spacing(price: float) -> float:
@@ -67,7 +55,7 @@ def calculate_cex(
 
 
 def parse_option_chain(raw: dict[str, Any], r: float = 0.0, q: float = 0.0,
-                       fallback_greeks: dict[tuple[str, float, str], float] | None = None) -> tuple[list[dict[str, Any]], float]:
+                       fallback_greeks: dict[tuple[str, float, str], dict[str, float]] | None = None) -> tuple[list[dict[str, Any]], float]:
     results = []
     spot_price = 0.0
 
@@ -91,10 +79,8 @@ def parse_option_chain(raw: dict[str, Any], r: float = 0.0, q: float = 0.0,
             for opt in options:
                 if opt.get("putCall", "").upper() != "CALL":
                     continue
-                fb = None
-                if fallback_greeks is not None:
-                    fb = fallback_greeks.get((exp_date, strike, "CALL"))
-                entry = _extract_option_fields(opt, "CALL", strike, exp_date, spot_price, r, q, fallback_gamma=fb)
+                fb = _find_fallback(fallback_greeks, exp_date, float(opt.get("delta", 0) or 0), "CALL")
+                entry = _extract_option_fields(opt, "CALL", strike, exp_date, spot_price, r, q, fallback=fb)
                 if entry:
                     results.append(entry)
 
@@ -108,10 +94,8 @@ def parse_option_chain(raw: dict[str, Any], r: float = 0.0, q: float = 0.0,
             for opt in options:
                 if opt.get("putCall", "").upper() != "PUT":
                     continue
-                fb = None
-                if fallback_greeks is not None:
-                    fb = fallback_greeks.get((exp_date, strike, "PUT"))
-                entry = _extract_option_fields(opt, "PUT", strike, exp_date, spot_price, r, q, fallback_gamma=fb)
+                fb = _find_fallback(fallback_greeks, exp_date, float(opt.get("delta", 0) or 0), "PUT")
+                entry = _extract_option_fields(opt, "PUT", strike, exp_date, spot_price, r, q, fallback=fb)
                 if entry:
                     results.append(entry)
 
@@ -119,31 +103,64 @@ def parse_option_chain(raw: dict[str, Any], r: float = 0.0, q: float = 0.0,
 
 
 def build_greeks_lookup(raw: dict[str, Any]) -> dict[tuple[str, float, str], float]:
-    """Build {(expiration, strike, type): gamma} lookup from an option chain response."""
-    lookup = {}
+    """Build {(expiration, rounded_delta, type): {gamma, oi, volume}} lookup
+    from an option chain response.  Delta-based so it works across underlyings
+    with different price scales (e.g. SPX vs SPY)."""
+    lookup: dict[tuple[str, float, str], dict[str, float]] = {}
     for exp_key, strikes in raw.get("callExpDateMap", {}).items():
         exp_date = _parse_exp_key(exp_key)
         for strike_str, options in strikes.items():
-            try:
-                strike = float(strike_str)
-            except (ValueError, TypeError):
-                continue
             for opt in options:
                 gamma = opt.get("gamma")
-                if gamma is not None:
-                    lookup[(exp_date, strike, "CALL")] = float(gamma)
+                delta = opt.get("delta")
+                oi = opt.get("openInterest", 0) or 0
+                vol = opt.get("totalVolume", 0) or 0
+                if gamma is None or delta is None:
+                    continue
+                d_rounded = round(float(delta), 2)
+                lookup[(exp_date, d_rounded, "CALL")] = {
+                    "gamma": float(gamma), "oi": int(oi), "volume": int(vol),
+                }
     for exp_key, strikes in raw.get("putExpDateMap", {}).items():
         exp_date = _parse_exp_key(exp_key)
         for strike_str, options in strikes.items():
-            try:
-                strike = float(strike_str)
-            except (ValueError, TypeError):
-                continue
             for opt in options:
                 gamma = opt.get("gamma")
-                if gamma is not None:
-                    lookup[(exp_date, strike, "PUT")] = float(gamma)
+                delta = opt.get("delta")
+                oi = opt.get("openInterest", 0) or 0
+                vol = opt.get("totalVolume", 0) or 0
+                if gamma is None or delta is None:
+                    continue
+                d_rounded = round(float(delta), 2)
+                lookup[(exp_date, d_rounded, "PUT")] = {
+                    "gamma": float(gamma), "oi": int(oi), "volume": int(vol),
+                }
     return lookup
+
+
+def _find_fallback(
+    fallback: dict[tuple[str, float, str], dict[str, float]] | None,
+    expiration: str, delta: float, option_type: str,
+) -> dict[str, float] | None:
+    """Find the closest-delta fallback entry for an option."""
+    if fallback is None:
+        return None
+    d_rounded = round(delta, 2)
+    exact = fallback.get((expiration, d_rounded, option_type))
+    if exact is not None:
+        return exact
+    best = None
+    best_dist = 999.0
+    for (exp, d, t), v in fallback.items():
+        if exp != expiration or t != option_type:
+            continue
+        dist = abs(d - delta)
+        if dist < best_dist:
+            best_dist = dist
+            best = v
+    if best is not None and best_dist < 0.15:
+        return best
+    return None
 
 
 def _parse_exp_key(exp_key: str) -> str:
@@ -159,25 +176,29 @@ def _extract_option_fields(
     spot: float,
     r: float = 0.0,
     q: float = 0.0,
-    fallback_gamma: float | None = None,
+    fallback: dict[str, float] | None = None,
 ) -> Optional[dict[str, Any]]:
     try:
         gamma = opt.get("gamma")
+        if (gamma is None or gamma == 0) and fallback is not None:
+            gamma = fallback.get("gamma")
         if gamma is None:
-            gamma = fallback_gamma
-        if gamma is None:
-            return None
+            gamma = 0.0
         gamma = float(gamma)
 
         oi = opt.get("openInterest", 0)
         if oi is None:
             oi = 0
         oi = int(oi)
+        if oi <= 0 and fallback is not None:
+            oi = int(fallback.get("oi", 0) or 0)
 
         volume = opt.get("totalVolume", 0)
         if volume is None:
             volume = 0
         volume = int(volume)
+        if volume <= 0 and fallback is not None:
+            volume = int(fallback.get("volume", 0) or 0)
 
         delta = opt.get("delta")
         if delta is not None:
@@ -352,6 +373,7 @@ def aggregate_by_expiration(
     spot: float = 0.0,
 ) -> list[dict[str, Any]]:
     exp_map: dict[str, dict] = {}
+    exp_entries: dict[str, list] = {}
 
     for entry in data:
         exp = entry["expiration"]
@@ -369,7 +391,9 @@ def aggregate_by_expiration(
                 "atm_iv": 0.0,
                 "dte": 0,
             }
+            exp_entries[exp] = []
 
+        exp_entries[exp].append(entry)
         exp_map[exp]["num_contracts"] += 1
         if entry["type"] == "CALL" and show_calls:
             exp_map[exp]["call_gex"] += entry["gex"]
@@ -389,10 +413,9 @@ def aggregate_by_expiration(
         item["put_gex"] = round(item["put_gex"], 2)
         item["net_gex"] = round(item["net_gex"], 2)
 
-        # Find the ATM entry for this expiration to get atm_iv and dte
-        exp_entries = [e for e in data if e["expiration"] == exp]
-        if exp_entries and spot > 0:
-            atm_entry = min(exp_entries, key=lambda e: abs(e["strike"] - spot))
+        entries = exp_entries[exp]
+        if entries and spot > 0:
+            atm_entry = min(entries, key=lambda e: abs(e["strike"] - spot))
             raw_iv = atm_entry.get("iv", 0.0) or 0.0
             item["atm_iv"] = round(raw_iv / 100, 4) if raw_iv > 3 else round(raw_iv, 4)
             item["dte"] = atm_entry.get("days_to_exp", 0)

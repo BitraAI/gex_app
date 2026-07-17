@@ -1,7 +1,9 @@
 import asyncio
 import threading
+import time
 from datetime import datetime, timezone
-import streamlit as st
+
+import pandas as pd
 
 # Mocking the necessary components for testing
 class MockAsyncClient:
@@ -91,9 +93,6 @@ class MockStreamingService:
 print("=" * 60)
 print("TESTING: Streaming service can properly aggregate ticks")
 print("=" * 60)
-
-import pandas as pd
-import time
 
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)

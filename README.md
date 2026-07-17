@@ -250,7 +250,6 @@ gex_app/
 ├── telegram_notifier.py   # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
 ├── telegram_alerts.py     # Standalone cron runner — multi-ticker alerts from ticker_history.json (RTH-guarded)
 ├── svi.py                 # SSVI volatility surface (Raw SVI + SSVI surface calibration)
-├── schwab_data.py         # Standalone Schwab price history fetcher
 ├── test_calculations.py   # Unit tests for calculations
 ├── test_streaming.py      # Unit tests for streaming service
 ├── requirements.txt       # Python dependencies
