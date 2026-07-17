@@ -444,7 +444,7 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
 
     c1, c2, c3 = st.columns([1, 2, 1])
     if iv_rank is not None:
-        rank_cls = "negative" if iv_rank > 50 else "positive"
+        rank_cls = "negative" if iv_rank > 60 else "positive" if iv_rank < 40 else "warning"
         c1.markdown(
             f'<div class="gex-metric"><div class="label">IV Rank</div>'
             f'<div class="value {rank_cls}">{iv_rank:.2f}%</div></div>',
@@ -1349,7 +1349,7 @@ def render_volatility_frag():
         )
 
         if vol_view == "IV by Strike":
-            tm = st.radio("View", ["IV", "IV Richness (pp)", "VRP"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
+            tm = st.radio("View", ["IV", "VRP", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
         else:
             mo = st.radio("View", ["ATM IV", "IV Richness (%)", "VRP"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
 
@@ -1371,12 +1371,63 @@ def render_volatility_frag():
                     st.info("No strike data")
             elif tm == "IV Richness (pp)":
                 if vk and _ssvi_surf is not None and _ssvi_tte is not None:
+                    legend_items = [
+                        ("#27AE60", "≤ -5%"),
+                        ("#2ECC71", "-5 to -2"),
+                        ("#BDC3C7", "-2 to +2"),
+                        ("#F39C12", "+2 to +5"),
+                        ("#E74C3C", "≥ +5%"),
+                    ]
+                    cols = st.columns(len(legend_items) + 2)
+                    cols[0].markdown(
+                        f'<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+                        f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Cheap</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                    for ci, (color, label) in zip(cols[1:-1], legend_items):
+                        ci.markdown(
+                            f'<div style="display:flex;align-items:center;gap:4px;justify-content:center;">'
+                            f'<span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:{color};border:1px solid #555;"></span>'
+                            f'<span style="font-size:0.75rem;white-space:nowrap;">{label}</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                    cols[-1].markdown(
+                        f'<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+                        f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Expensive</span></div>',
+                        unsafe_allow_html=True,
+                    )
                     st.plotly_chart(create_iv_richness_by_strike(vk, s.spot, _ssvi_surf, _ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_by_strike")
                 elif not vk:
                     st.info("No strike data")
                 else:
                     st.info("SSVI surface not calibrated yet")
             elif _rv > 0 and vk:
+                legend_items = [
+                    ("#27AE60", "≤ -10"),
+                    ("#2ECC71", "-10 to -5"),
+                    ("#BDC3C7", "-5 to +2"),
+                    ("#F4D03F", "+2 to +5"),
+                    ("#F39C12", "+5 to +10"),
+                    ("#E74C3C", "≥ +10"),
+                ]
+                cols = st.columns(len(legend_items) + 2)
+                cols[0].markdown(
+                    f'<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+                    f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Buy Premium</span></div>',
+                    unsafe_allow_html=True,
+                )
+                for ci, (color, label) in zip(cols[1:-1], legend_items):
+                    ci.markdown(
+                        f'<div style="display:flex;align-items:center;gap:4px;justify-content:center;">'
+                        f'<span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:{color};border:1px solid #555;"></span>'
+                        f'<span style="font-size:0.75rem;white-space:nowrap;">{label}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                cols[-1].markdown(
+                    f'<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+                    f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
+                    unsafe_allow_html=True,
+                )
                 st.plotly_chart(create_vrp_by_strike(vk, s.spot, _rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_by_strike")
             else: st.info("No RV data")
         else:

@@ -313,28 +313,20 @@ def create_vrp_by_strike(
     tickformat = ".0%"
     ref_line = 0
 
-    min_v = min(values) if values else 0
-    max_v = max(values) if values else 1
-    v_range = max_v - min_v if max_v > min_v else 1
-    norm_vs = [(v - min_v) / v_range for v in values]
-    colors = []
-    for n in norm_vs:
-        if n < 0.33:
-            t = n / 0.33
-            r = int(0 + t * 50)
-            g = int(200 - t * 30)
-            b = int(100 + t * 50)
-        elif n < 0.66:
-            t = (n - 0.33) / 0.33
-            r = int(50 + t * 205)
-            g = int(170 - t * 70)
-            b = int(150 - t * 100)
+    def _vrp_color(v: float) -> str:
+        if v <= -0.10:
+            return "#27AE60"
+        elif v <= -0.05:
+            return "#2ECC71"
+        elif v < 0.02:
+            return "#BDC3C7"
+        elif v < 0.05:
+            return "#F4D03F"
+        elif v < 0.10:
+            return "#F39C12"
         else:
-            t = (n - 0.66) / 0.34
-            r = int(255)
-            g = int(100 - t * 70)
-            b = int(50 - t * 30)
-        colors.append(f"rgb({max(0, min(255, r))},{max(0, min(255, g))},{max(0, min(255, b))})")
+            return "#E74C3C"
+    colors = [_vrp_color(v) for v in values]
 
     fig.add_trace(go.Bar(
         x=labels,
@@ -680,13 +672,34 @@ def create_vol_surface_2d(
             "<extra></extra>"
         )
 
+    if mode == "iv_richness":
+        cs = [
+            [0.0, "#27AE60"], [0.3, "#27AE60"],
+            [0.3, "#2ECC71"], [0.5, "#BDC3C7"],
+            [0.7, "#F39C12"], [1.0, "#E74C3C"],
+        ]
+        zmin, zmax = -0.05, 0.05
+    elif mode == "vrp":
+        cs = [
+            [0.0, "#27AE60"], [0.25, "#27AE60"],
+            [0.25, "#2ECC71"], [0.6, "#BDC3C7"],
+            [0.75, "#F4D03F"], [0.875, "#F39C12"],
+            [1.0, "#E74C3C"],
+        ]
+        zmin, zmax = -0.10, 0.10
+    else:
+        cs = "RdYlGn"
+        zmin = zmax = None
+
     fig = go.Figure(data=go.Heatmap(
         x=exp_labels,
         y=strikes,
         z=z,
         text=text,
         texttemplate=texttemplate,
-        colorscale="RdYlGn",
+        colorscale=cs,
+        zmin=zmin,
+        zmax=zmax,
         colorbar=dict(title=colorbar_title, tickformat=tickformat, x=1.02),
         hovertemplate=hovertemplate,
     ))
@@ -1115,28 +1128,20 @@ def create_vrp_chart(
     tick_fmt = ".0%"
     ref_val = 0
 
-    min_v = min(vals) if vals else 0
-    max_v = max(vals) if vals else 1
-    v_range = max_v - min_v if max_v > min_v else 1
-    norm_vs = [(v - min_v) / v_range for v in vals]
-    colors = []
-    for n in norm_vs:
-        if n < 0.33:
-            t = n / 0.33
-            r = int(0 + t * 50)
-            g = int(200 - t * 30)
-            b = int(100 + t * 50)
-        elif n < 0.66:
-            t = (n - 0.33) / 0.33
-            r = int(50 + t * 205)
-            g = int(170 - t * 70)
-            b = int(150 - t * 100)
+    def _vrp_color(v: float) -> str:
+        if v <= -0.10:
+            return "#27AE60"
+        elif v <= -0.05:
+            return "#2ECC71"
+        elif v < 0.02:
+            return "#BDC3C7"
+        elif v < 0.05:
+            return "#F4D03F"
+        elif v < 0.10:
+            return "#F39C12"
         else:
-            t = (n - 0.66) / 0.34
-            r = int(255)
-            g = int(100 - t * 70)
-            b = int(50 - t * 30)
-        colors.append(f"rgb({max(0, min(255, r))},{max(0, min(255, g))},{max(0, min(255, b))})")
+            return "#E74C3C"
+    colors = [_vrp_color(v) for v in vals]
 
     fig.add_trace(go.Bar(
         x=labels,
@@ -1224,7 +1229,18 @@ def create_iv_richness_pct_by_expiration(
         else:
             richness_pct.append(0.0)
 
-    colors = ["#ef553b" if v > 0 else "#00cc96" for v in richness_pct]
+    def _richness_pct_color(v: float) -> str:
+        if v <= -5:
+            return "#27AE60"
+        elif v <= -2:
+            return "#2ECC71"
+        elif v < 2:
+            return "#BDC3C7"
+        elif v < 5:
+            return "#F39C12"
+        else:
+            return "#E74C3C"
+    colors = [_richness_pct_color(v) for v in richness_pct]
 
     hovertext = [
         f"{lb}<br>ATM IV: {m:.2%}<br>SSVI IV: {s:.2%}<br>Richness: {r:+.2f}%"
@@ -1415,7 +1431,18 @@ def create_iv_richness_by_strike(
     ssvi_iv = [ssvi_surface.iv(float(k), float(ssvi_tte)) for k in x]
     richness = [m - s for m, s in zip(market_iv, ssvi_iv)]
 
-    colors = ["#ef553b" if v > 0 else "#00cc96" for v in richness]
+    def _richness_pp_color(v: float) -> str:
+        if v <= -0.05:
+            return "#27AE60"
+        elif v <= -0.02:
+            return "#2ECC71"
+        elif v < 0.02:
+            return "#BDC3C7"
+        elif v < 0.05:
+            return "#F39C12"
+        else:
+            return "#E74C3C"
+    colors = [_richness_pp_color(v) for v in richness]
 
     ATM_EDGE = "#ffffff"
     OTM_CALL_EDGE = "#1f77b4"
@@ -2032,6 +2059,7 @@ CSS = """
     .gex-metric .value.positive { color: #00cc96; }
     .gex-metric .value.negative { color: #ef553b; }
     .gex-metric .value.neutral { color: #1e293b; }
+    .gex-metric .value.warning { color: #eab308; }
 </style>
 """
 
@@ -2173,5 +2201,6 @@ DARK_CSS = """
     .gex-metric .value.positive { color: #34d399; }
     .gex-metric .value.negative { color: #f87171; }
     .gex-metric .value.neutral { color: #e2e8f0; }
+    .gex-metric .value.warning { color: #eab308; }
 </style>
 """
