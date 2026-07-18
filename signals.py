@@ -204,6 +204,12 @@ def generate_recommendations(
     def _buy_key(opt: dict[str, Any]) -> tuple[float, float]:
         return (_exp_vrp(opt), _ssvi_iv(opt))
 
+    def _long_puts_key(opt: dict[str, Any]) -> tuple[float, float]:
+        return (-_exp_vrp(opt), -_ssvi_iv(opt))
+
+    def _short_puts_key(opt: dict[str, Any]) -> tuple[float, float]:
+        return (_exp_vrp(opt), _ssvi_iv(opt))
+
     def _sell_key(opt: dict[str, Any]) -> tuple[float, float]:
         return (-_exp_vrp(opt), -_ssvi_iv(opt))
 
@@ -228,7 +234,7 @@ def generate_recommendations(
         if iv_skew is not None and iv_skew < 0:
             puts = [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot]
             if puts:
-                best = min(puts, key=_buy_key)
+                best = min(puts, key=_long_puts_key)
                 recs.append(
                     f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
                     f"25Δ Skew {iv_skew:+.2%} (puts cheap), VRP {best['vrp']:.1f}%."
@@ -256,7 +262,7 @@ def generate_recommendations(
         if iv_skew is not None and iv_skew > 0:
             puts = [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot]
             if puts:
-                best = max(puts, key=_sell_key)
+                best = min(puts, key=_short_puts_key)
                 recs.append(
                     f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
                     f"25Δ Skew {iv_skew:+.2%} (puts rich), VRP {best['vrp']:.1f}%."
