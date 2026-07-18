@@ -554,7 +554,7 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
         buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
     if buy_sd:
         sc = score_options(buy_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
-        buy_recs = [r for r in generate_recommendations(sc, spot, strategy="Long Calls", all_data=buy_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew")) if "No strong" not in r]
+        buy_recs = [r for r in generate_recommendations(sc, spot, strategy="Long Calls", all_data=buy_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte) if "No strong" not in r]
         if buy_recs:
             alerts.append("Buy Premium:")
             for r in buy_recs[:3]:
@@ -566,7 +566,7 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
         sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) > 0]
     if sell_sd:
         sc = score_options(sell_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
-        sell_recs = [r for r in generate_recommendations(sc, spot, strategy="Short Calls", all_data=sell_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew")) if "No strong" not in r]
+        sell_recs = [r for r in generate_recommendations(sc, spot, strategy="Short Calls", all_data=sell_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte) if "No strong" not in r]
         if sell_recs:
             alerts.append("Sell Premium:")
             for r in sell_recs[:3]:
@@ -1516,7 +1516,7 @@ def render_volatility_frag():
                 ("#27AE60", "≤ -10"),
                 ("#2ECC71", "-10 to -5"),
                 ("#BDC3C7", "-5 to 0"),
-                ("#F4D03F", "0 to +5"),
+                ("#F4D03F", "0 to +5 Fair"),
                 ("#F39C12", "+5 to +10"),
                 ("#E74C3C", "≥ +10"),
             ]
@@ -1712,7 +1712,7 @@ def render_trade_signals_frag():
                 sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) > 0]
             sd2 = [e for e in sd2 if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
         sc = score_options(sd2, s.spot, _rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"), iv_rank=_iv_rank)
-        rc = generate_recommendations(sc, s.spot, strategy=_rec_stg, all_data=sd, rv=_rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"))
+        rc = generate_recommendations(sc, s.spot, strategy=_rec_stg, all_data=sd, rv=_rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte)
         with c2:
             for r in rc: st.markdown(f"- {r}")
 

@@ -177,7 +177,7 @@ def _build_strategy_alerts(
 
     if buy_sd:
         sc = score_options(buy_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
-        buy_recs = [r for r in generate_recommendations(sc, spot, strategy="Long Calls", all_data=buy_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew")) if "No strong" not in r]
+        buy_recs = [r for r in generate_recommendations(sc, spot, strategy="Long Calls", all_data=buy_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte) if "No strong" not in r]
         if buy_recs:
             alerts.append("Buy Premium:")
             for r in buy_recs[:3]:
@@ -185,7 +185,7 @@ def _build_strategy_alerts(
 
     if sell_sd:
         sc = score_options(sell_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
-        sell_recs = [r for r in generate_recommendations(sc, spot, strategy="Short Calls", all_data=sell_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew")) if "No strong" not in r]
+        sell_recs = [r for r in generate_recommendations(sc, spot, strategy="Short Calls", all_data=sell_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte) if "No strong" not in r]
         if sell_recs:
             alerts.append("Sell Premium:")
             for r in sell_recs[:3]:

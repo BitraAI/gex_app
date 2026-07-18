@@ -163,6 +163,8 @@ def generate_recommendations(
     call_wall: float | None = None,
     put_wall: float | None = None,
     iv_skew: float | None = None,
+    ssvi_surface: Any = None,
+    ssvi_tte: float | None = None,
 ) -> list[str]:
     recs = []
 
@@ -175,6 +177,36 @@ def generate_recommendations(
         key=lambda s: s["score"],
     )
 
+    # Expiration-level VRP — represent each expiration by the VRP of the option
+    # closest to spot (ATM-like). Used to favor the cheapest expiration for buy
+    # premium and the richest expiration for sell premium.
+    exp_vrp: dict[str, float] = {}
+    exp_strike: dict[str, float] = {}
+    for s in scored:
+        ep = s["expiration"]
+        if ep not in exp_vrp or abs(s["strike"] - spot) < abs(exp_strike[ep] - spot):
+            exp_vrp[ep] = s["vrp"]
+            exp_strike[ep] = s["strike"]
+
+    def _exp_vrp(opt: dict[str, Any]) -> float:
+        return exp_vrp.get(opt["expiration"], opt["vrp"])
+
+    # Per-strike SSVI IV — used to pick the cheapest (lowest SSVI) strike for
+    # buy premium and the richest (highest SSVI) strike for sell premium within
+    # the selected expiration.
+    def _ssvi_iv(opt: dict[str, Any]) -> float:
+        if ssvi_surface is not None and ssvi_tte is not None and ssvi_tte > 0:
+            iv = ssvi_surface.iv(float(opt["strike"]), float(ssvi_tte))
+            if iv and iv > 0:
+                return iv
+        return float("inf")
+
+    def _buy_key(opt: dict[str, Any]) -> tuple[float, float]:
+        return (_exp_vrp(opt), _ssvi_iv(opt))
+
+    def _sell_key(opt: dict[str, Any]) -> tuple[float, float]:
+        return (-_exp_vrp(opt), -_ssvi_iv(opt))
+
     if strategy in ("Sell Premium", "Call Credit Spread", "Put Credit Spread", "Iron Condor"):
         pass
 
@@ -182,7 +214,7 @@ def generate_recommendations(
         if iv_skew is not None and iv_skew > 0:
             calls = [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot]
             if calls:
-                best = min(calls, key=lambda s: s["vrp"])
+                best = min(calls, key=_buy_key)
                 recs.append(
                     f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
                     f"25Δ Skew {iv_skew:+.2%} (calls cheap), VRP {best['vrp']:.1f}%."
@@ -196,7 +228,7 @@ def generate_recommendations(
         if iv_skew is not None and iv_skew < 0:
             puts = [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot]
             if puts:
-                best = min(puts, key=lambda s: s["vrp"])
+                best = min(puts, key=_buy_key)
                 recs.append(
                     f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
                     f"25Δ Skew {iv_skew:+.2%} (puts cheap), VRP {best['vrp']:.1f}%."
@@ -210,7 +242,7 @@ def generate_recommendations(
         if iv_skew is not None and iv_skew < 0:
             calls = [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot]
             if calls:
-                best = max(calls, key=lambda s: s["vrp"])
+                best = max(calls, key=_sell_key)
                 recs.append(
                     f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
                     f"25Δ Skew {iv_skew:+.2%} (calls rich), VRP {best['vrp']:.1f}%."
@@ -224,7 +256,7 @@ def generate_recommendations(
         if iv_skew is not None and iv_skew > 0:
             puts = [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot]
             if puts:
-                best = max(puts, key=lambda s: s["vrp"])
+                best = max(puts, key=_sell_key)
                 recs.append(
                     f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
                     f"25Δ Skew {iv_skew:+.2%} (puts rich), VRP {best['vrp']:.1f}%."
@@ -266,7 +298,8 @@ def generate_recommendations(
         otm_sell = [s for s in sell_candidates if
                     (s["type"] == "CALL" and s["strike"] >= spot) or
                     (s["type"] == "PUT" and s["strike"] <= spot)]
-        best = otm_sell[0] if otm_sell else sell_candidates[0]
+        pool = otm_sell if otm_sell else sell_candidates
+        best = max(pool, key=_sell_key)
         recs.append(
             f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
             f"VRP {best['vrp']:.1f}%, GEX {best['net_gex']:,.0f}."
@@ -276,7 +309,8 @@ def generate_recommendations(
         otm_buy = [s for s in buy_candidates if
                    (s["type"] == "CALL" and s["strike"] >= spot) or
                    (s["type"] == "PUT" and s["strike"] <= spot)]
-        best = otm_buy[0] if otm_buy else buy_candidates[0]
+        pool = otm_buy if otm_buy else buy_candidates
+        best = min(pool, key=_buy_key)
         recs.append(
             f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
             f"VRP {best['vrp']:.1f}% (cheap), GEX {best['net_gex']:,.0f}."
