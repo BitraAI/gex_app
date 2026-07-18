@@ -1,4 +1,4 @@
-# Candlesticks Tab
+# Candlesticks Chart
 
 Live OHLCV candlestick chart for the current symbol, with optional technical
 indicators and a real-time WebSocket stream merged into the latest bar.
