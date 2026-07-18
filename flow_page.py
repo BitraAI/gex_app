@@ -132,17 +132,33 @@ def render_atm_order_flow_grid():
 
     df = pd.DataFrame(rows)
 
-    # Colour the Status column, like the Options Data table's conditional
-    # highlighting.  'Live' = green, 'Closed' = grey/amber, 'Cached' = blue,
-    # 'No Data' = grey.
+    # Static colour key for the Status column (non-interactive legend).
+    _status_colors = {
+        "Live": "#00cc96",
+        "Closed": "#E69500",
+        "Cached": "#1E90FF",
+        "No Data": "#808080",
+    }
+    _items = list(_status_colors.items())
+    _legend_html = "".join(
+        f'<span style="display:inline-flex;align-items:center;'
+        f'margin-left:16px;">'
+        f'<span style="font-size:25px;line-height:25px;'
+        f'color:{c};margin-right:6px;">\u25cf</span>{name}</span>'
+        for name, c in _items
+    )
+    st.markdown(
+        f'<div style="margin-bottom:8px;font-size:0.9rem;display:flex;'
+        f'justify-content:flex-end;">{_legend_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Status column shows the colour-key only (no background fill, no text).
+    # The cell background is white/transparent and holds a centered coloured
+    # dot; the text is hidden so only the colour conveys status (see legend).
     def _status_color(val):
-        color = {
-            "Live": "#00cc96",
-            "Closed": "#E69500",
-            "Cached": "#1E90FF",
-            "No Data": "#808080",
-        }.get(val, "#808080")
-        return f"background-color: {color}; color: white; font-weight: bold; text-align: center;"
+        color = _status_colors.get(val, "#808080")
+        return f"color: {color}; font-size: 25px; text-align: center;"
 
     # Net Flow colouring: green when net bullish, red when net bearish,
     # neutral grey when zero.  Colour the text so the row stays readable.
@@ -165,6 +181,7 @@ def render_atm_order_flow_grid():
         "Bullish Flow": "{:,.0f}",
         "Bearish Flow": "{:,.0f}",
         "Net Flow": "{:,.0f}",
+        "Status": lambda v: "\u25cf",
     })
 
     st.markdown("""

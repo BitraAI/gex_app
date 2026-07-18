@@ -48,7 +48,7 @@ atm_svc = st.session_state.get("atm_option_service")
 if not (atm_svc and getattr(atm_svc, "is_running", False)):
     st.info(
         "Streaming is not running yet. Open the main GammaEx page, enter a "
-        "ticker, and click **Refresh** to start the WebSocket feed."
+        "ticker, and click **Refresh** to start the WebSocket feed during market hours."
     )
 
 
