@@ -38,6 +38,7 @@ from client import create_client, fetch_option_chain, get_yield, get_interest_ra
 from streaming_service import StreamingService
 from option_streaming_service import AtmOptionVolumeService
 from chart_component import render_chart
+from flow_page import render_atm_order_flow_grid
 from calculations import (
     aggregate_by_strike,
     aggregate_by_expiration,
@@ -67,27 +68,34 @@ from charts import (
     create_iv_richness_pct_by_expiration,
 )
 
-st.set_page_config(
-    page_title="GammaEx - GEX Analytics",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
+# NOTE: st.set_page_config / theme markdown must NOT run when this module is
+# imported by a Streamlit *page* (pages/atm_order_flow.py) — calling it twice
+# raises StreamlitAPIException.  Guard it so the module is safely importable
+# for its helper functions (ensure_atm_streaming, fetch_data, etc.).
 _initial_d = st.session_state.get("theme", "light") == "dark"
-set_dark(_initial_d)
-st.markdown(_get_style(_initial_d), unsafe_allow_html=True)
+try:
+    st.set_page_config(
+        page_title="GammaEx - GEX Analytics",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
-st.markdown("""
-<style>
-input[value="Sell Premium"]:checked + div {
-    background-color: #00cc96 !important;
-    border-color: #00cc96 !important;
-}
-input[value="Sell Premium"]:checked + div > div {
-    background-color: #00cc96 !important;
-}
-</style>
-""", unsafe_allow_html=True)
+    set_dark(_initial_d)
+    st.markdown(_get_style(_initial_d), unsafe_allow_html=True)
+
+    st.markdown("""
+    <style>
+    input[value="Sell Premium"]:checked + div {
+        background-color: #00cc96 !important;
+        border-color: #00cc96 !important;
+    }
+    input[value="Sell Premium"]:checked + div > div {
+        background-color: #00cc96 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+except Exception:
+    pass
 
 _SESSION_DEFAULTS = {
     "theme": "light",
@@ -126,6 +134,9 @@ _SESSION_DEFAULTS = {
     "candlestick_data": pd.DataFrame(),
     "candlestick_label": "",
     "iv_skew_history": [],
+    "prev_flow_state": None,
+    "flow_cache": {},
+    "spot_cache": {},
 }
 
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
@@ -266,6 +277,7 @@ def fetch_data(symbol: str) -> bool:
     st.session_state.data = data
     st.session_state.spot = spot
     st.session_state.symbol = symbol
+    st.session_state.spot_cache[symbol.upper().lstrip("$")] = spot
     if symbol not in st.session_state.ticker_history:
         st.session_state.ticker_history.insert(0, symbol)
         st.session_state.ticker_history = st.session_state.ticker_history[:10]
@@ -569,7 +581,29 @@ def check_alerts(analytics: dict, spot: float):
 
     rv = st.session_state.get("underlying_20d_rv", 0.0)
     strat_alerts = _build_strategy_alerts(analytics, spot, rv) if rv > 0 else []
-    all_alerts = new_alerts + strat_alerts
+
+    # Flow dominance alerts
+    flow_alerts = []
+    atm_svc = st.session_state.get("atm_option_service")
+    if atm_svc is not None and getattr(atm_svc, "is_running", False):
+        bf, brf = _compute_flow(atm_svc)
+        if bf is not None and brf is not None:
+            prev_flow = st.session_state.get("prev_flow_state")
+            cur_dominant = "bullish" if bf > brf else "bearish" if brf > bf else "neutral"
+            if prev_flow is not None:
+                prev_dominant = prev_flow.get("dominant", "neutral")
+                if prev_dominant != cur_dominant and cur_dominant != "neutral":
+                    flow_alerts.append(
+                        f"Flow flipped to {cur_dominant.upper()} — "
+                        f"Bullish: {bf:,} | Bearish: {brf:,}"
+                    )
+            st.session_state.prev_flow_state = {
+                "bullish": bf,
+                "bearish": brf,
+                "dominant": cur_dominant,
+            }
+
+    all_alerts = new_alerts + strat_alerts + flow_alerts
 
     if all_alerts:
         st.session_state.alerts = all_alerts + st.session_state.alerts[:20]
@@ -734,7 +768,7 @@ def render_sidebar():
         else:
             symbol = choice
 
-        refresh = st.button("Refresh", type="primary", use_container_width=True)
+        refresh = st.button("Refresh", type="primary", width="stretch")
         if refresh and symbol:
             with st.spinner(f"Loading {symbol} option chain..."):
                 fetch_data(symbol)
@@ -800,6 +834,75 @@ def _build_candlestick_df(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         "close": "last", "volume": "sum",
     }).dropna()
     return resampled.reset_index().rename(columns={"index": "datetime"})
+
+
+def ensure_atm_streaming(stream_symbol: str):
+    """Start the equity + ATM option streaming services for ``stream_symbol``
+    and register the ATM option volume service (subscribing to the front
+    expiration).  Idempotent — safe to call on every render.
+
+    Extracted from render_candlesticks so the dedicated ATM Order Flow page
+    can start streaming on its own without re-running the whole chart render.
+    Shared session state (streaming_service / atm_option_service) is reused.
+    """
+    s = st.session_state
+    _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
+    stream_symbol = _STREAM_SYMBOL_MAP.get(stream_symbol.upper().lstrip("$"), stream_symbol)
+
+    svc = s.get("streaming_service")
+    if svc:
+        if not svc.is_running:
+            svc.start(stream_symbol)
+        elif svc.symbol != stream_symbol:
+            svc.stop()
+            svc.start(stream_symbol)
+
+    atm_svc = s.get("atm_option_service")
+    _sel_exp = s.get("selected_expiration", [])
+    if isinstance(_sel_exp, str):
+        _sel_exp = [_sel_exp]
+    _first_exp = _sel_exp[0] if _sel_exp else None
+    # Spec: always track the ATM *front* expiration.  If the user has not
+    # manually selected an expiration (or it was cleared), fall back to the
+    # nearest expiration in the loaded chain so the service still registers
+    # and the bullish/bearish flow keeps updating.
+    if _first_exp is None and s.get("expirations"):
+        _front_exp = sorted(s["expirations"])[0]
+        _first_exp = _front_exp
+        s.selected_expiration = [_front_exp]
+
+    if svc and svc.is_connected and atm_svc and _first_exp:
+        _need_register = (
+            not atm_svc.is_running
+            or atm_svc.symbol != stream_symbol
+            or getattr(atm_svc, "_expiration", None) != _first_exp
+        )
+        if _need_register:
+            sc = svc.get_stream_client()
+            if sc is not None:
+                # Pre-fetch spots for ALL tickers before registering
+                _all_tickers = s.get("ticker_history", [])
+                _stream_symbols = [
+                    _STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$"))
+                    for t in _all_tickers
+                ]
+                try:
+                    from client import fetch_quotes
+                    quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
+                    for disp_sym, _sym in zip(_all_tickers, _stream_symbols):
+                        qd = quote_resp.get(_sym, {}) or {}
+                        quote = qd.get("quote", {}) or qd.get(_sym, {})
+                        last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                        if last is not None and float(last) > 0:
+                            s.spot_cache[disp_sym.upper().lstrip("$")] = float(last)
+                except Exception:
+                    pass
+                atm_svc.register(sc, stream_symbol, _first_exp)
+                atm_svc.start()
+        # Feed live spot so ATM strike tracking stays current
+        if svc.last_price and svc.last_price > 0:
+            atm_svc.update_spot(svc.last_price)
+            s.spot_cache[stream_symbol] = svc.last_price
 
 
 def render_candlesticks():
@@ -893,40 +996,43 @@ def render_candlesticks():
             st.info("No data available")
             return
 
-        # --- Start streaming services if not running ---
-        # Map index symbols (SPX, RUT, NDX) to their ETF equivalents
-        # because Schwab LEVELONE_EQUITIES does not support index symbols.
+        # --- Start streaming services (equity + ATM option) ---
         _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
         stream_symbol = _STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"), symbol)
-        svc = st.session_state.get("streaming_service")
-        if svc:
-            if not svc.is_running:
-                svc.start(stream_symbol)
-            elif svc.symbol != stream_symbol:
-                svc.stop()
-                svc.start(stream_symbol)
+        ensure_atm_streaming(stream_symbol)
 
-        # --- Register ATM option service on the equity WebSocket ---
+        # Periodically refresh spots for all tickers (every 10s)
         atm_svc = st.session_state.get("atm_option_service")
-        _sel_exp = st.session_state.get("selected_expiration", [])
-        _first_exp = _sel_exp[0] if _sel_exp else None
-        if svc and svc.is_connected and atm_svc and _first_exp:
-            _need_register = (
-                not atm_svc.is_running
-                or atm_svc.symbol != stream_symbol
-                or getattr(atm_svc, "_expiration", None) != _first_exp
-            )
-            if _need_register:
-                sc = svc.get_stream_client()
-                if sc is not None:
-                    atm_svc.register(sc, stream_symbol, _first_exp)
-            # Feed live spot so ATM strike tracking stays current
-            if svc.last_price and svc.last_price > 0:
-                atm_svc.update_spot(svc.last_price)
+        _first_exp = st.session_state.get("selected_expiration")
+        _first_exp = _first_exp[0] if isinstance(_first_exp, list) and _first_exp else (_first_exp if isinstance(_first_exp, str) else None)
+        if atm_svc and atm_svc.is_running and _first_exp:
+            import time
+            _now = time.time()
+            _last_spot_refresh = s.get("_last_spot_refresh", 0)
+            if _now - _last_spot_refresh > 10:
+                s._last_spot_refresh = _now
+                _all_tickers = s.get("ticker_history", [])
+                _stream_symbols = [_STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$")) for t in _all_tickers]
+                try:
+                    from client import fetch_quotes
+                    quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
+                    for disp_sym, stream_sym in zip(_all_tickers, _stream_symbols):
+                        qd = quote_resp.get(stream_sym, {}) or {}
+                        quote = qd.get("quote", {}) or qd.get(stream_sym, {})
+                        last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                        if last is not None and float(last) > 0:
+                            spot = float(last)
+                            s.spot_cache[disp_sym.upper().lstrip("$")] = spot
+                            # Also update ATM service
+                            atm_svc.update_ticker_spot(disp_sym.upper().lstrip("$"), spot)
+                except Exception:
+                    pass
 
         # Feed spot from equity stream to ATM option service
         # Normalize chart_df["datetime"] to int64 for merging
         chart_df["datetime"] = chart_df["datetime"].astype("int64")
+
+        svc = s.get("streaming_service")
 
         # Merge streaming OHLC + buy_vol/sell_vol into chart df when available.
         # Streaming aggregates ticks into 1-second buckets keyed on ms timestamps.
@@ -1297,30 +1403,6 @@ def render_metrics_frag():
         render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=iv_rank, iv_skew=iv_skew)
 
 
-@st.fragment(run_every=1)
-def render_flow_frag():
-    s = st.session_state
-    if not s.get("data"):
-        return
-    bullish_flow, bearish_flow = _compute_flow(s.get("atm_option_service"))
-    if bullish_flow is not None or bearish_flow is not None:
-        c1, c2 = st.columns(2)
-        bf = bullish_flow if bullish_flow is not None else 0
-        brf = bearish_flow if bearish_flow is not None else 0
-        bf_cls = "positive" if bf > brf else "negative" if brf > bf else "neutral"
-        brf_cls = "negative" if brf > bf else "positive" if bf > brf else "neutral"
-        c1.markdown(
-            f'<div class="gex-metric"><div class="label">Bullish Flow</div>'
-            f'<div class="value {bf_cls}">{bf:,} contracts</div></div>',
-            unsafe_allow_html=True,
-        )
-        c2.markdown(
-            f'<div class="gex-metric"><div class="label">Bearish Flow</div>'
-            f'<div class="value {brf_cls}">{brf:,} contracts</div></div>',
-            unsafe_allow_html=True,
-        )
-
-
 def render_market_structure_frag():
     s = st.session_state; d = False
     if not s.get("strikes"):
@@ -1647,39 +1729,7 @@ def render_trade_signals_frag():
 
 def render_options_data_frag():
     if not st.session_state.get("data"): return
-    render_analytics_panel()
     render_table()
-
-
-def render_analytics_panel():
-    with st.expander("Analytics Panel", expanded=False):
-        a = st.session_state.get("analytics", {})
-        if not a:
-            st.info("Load data to see analytics")
-            return
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("#### Key Levels")
-            st.markdown(f"- **Call Wall:** ${a.get('call_wall', 'N/A')}")
-            st.markdown(f"- **Put Wall:** ${a.get('put_wall', 'N/A')}")
-            st.markdown(f"- **Gamma Flip:** ${a.get('gamma_flip', 'N/A')}")
-            st.markdown(f"- **Max Pain:** ${a.get('expected_pin', 'N/A')}")
-
-        with col2:
-            st.markdown("#### Exposure Summary")
-            st.markdown(f"- **Max +GEX:** ${a.get('max_positive_gex', 0):,.0f} @ {a.get('max_positive_gex_strike', 'N/A')}")
-            st.markdown(f"- **Max -GEX:** ${a.get('max_negative_gex', 0):,.0f} @ {a.get('max_negative_gex_strike', 'N/A')}")
-            st.markdown(f"- **Total Call GEX:** ${a.get('total_call_gex', 0):,.0f}")
-            st.markdown(f"- **Total Put GEX:** ${a.get('total_put_gex', 0):,.0f}")
-            st.markdown(f"- **Net GEX:** ${a.get('net_gex', 0):,.0f}")
-            st.markdown(f"- **Dealer Position:** {a.get('dealer_position', 'N/A')}")
-            vex_m = a.get('vex_magnet')
-            vex_r = a.get('vex_repellent')
-            if vex_m:
-                st.markdown(f"- **VEX Magnet:** ${vex_m:.2f} ({a.get('vex_magnet_value', 0):,.0f})")
-            if vex_r:
-                st.markdown(f"- **VEX Repellent:** ${vex_r:.2f} ({a.get('vex_repellent_value', 0):,.0f})")
 
 def _filter_strikes_near_atm(data: list[dict], spot: float, n: int = 20) -> list[dict]:
     strikes = sorted(set(e["strike"] for e in data))
@@ -1810,17 +1860,6 @@ def render_table():
         "Put Price": "${:.2f}",
     })
 
-    col1, col2 = st.columns([6, 1])
-    with col2:
-        if st.button("Export CSV", width='stretch'):
-            csv = df.to_csv(index=False)
-            st.download_button(
-                "Download", csv,
-                f"{st.session_state.symbol}_gex.csv",
-                "text/csv",
-                width='stretch',
-            )
-
     st.markdown("""
 <style>
 div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
@@ -1864,14 +1903,44 @@ setTimeout(fixTabColors, 1500);
 window.addEventListener('load', fixTabColors);
 </script>
 """, unsafe_allow_html=True)
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks", "Order Flow"])
     with tab1: render_market_structure_frag()
     with tab2: render_positioning_frag()
     with tab3: render_volatility_frag()
     with tab4: render_heatmaps_frag()
     with tab5: render_trade_signals_frag()
     with tab6: render_candlesticks()
+    with tab7: _render_flow_link()
     with st.container(): render_options_data_frag()
+
+
+def _render_flow_link():
+    """Render a link to the dedicated ATM Order Flow page that opens in a NEW
+    browser tab.
+
+    Streamlit's built-in page navigation always opens in the same tab, and
+    st.markdown strips target="_blank" from anchors.  So we embed the anchor
+    as a raw HTML string via st.iframe (it auto-detects HTML content); the
+    target="_blank" is preserved inside the iframe and opens a new tab.
+    """
+    link_html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head><meta charset="utf-8"><style>
+      html, body { margin: 0; padding: 0; }
+      a {
+        display: block; width: 100%; text-align: center; padding: 8px 0;
+        border-radius: 6px; background-color: #1E90FF; color: white;
+        font-weight: bold; font-family: sans-serif; text-decoration: none;
+        box-sizing: border-box;
+      }
+    </style></head>
+    <body>
+      <a href="http://localhost:8501/atm_order_flow" target="_blank" rel="noopener noreferrer">Open ATM Order Flow ↗</a>
+    </body>
+    </html>
+    """
+    st.iframe(link_html, width="stretch", height=44)
 
 
 def main():
@@ -1885,7 +1954,6 @@ def main():
 
         if st.session_state.get("data"):
             render_metrics_frag()
-            render_flow_frag()
             render_tabs_frag()
         else:
             st.info("Enter a stock ticker in the sidebar and click Refresh to begin analysis")
