@@ -316,13 +316,13 @@ def create_vrp_by_strike(
     def _vrp_color(v: float) -> str:
         if v <= -0.10:
             return "#27AE60"
-        elif v <= -0.05:
+        elif v < -0.05:
             return "#2ECC71"
-        elif v < 0.02:
+        elif v < 0:
             return "#BDC3C7"
         elif v < 0.05:
             return "#F4D03F"
-        elif v < 0.10:
+        elif v <= 0.10:
             return "#F39C12"
         else:
             return "#E74C3C"
@@ -1017,24 +1017,6 @@ def create_atm_iv_histogram(
         showlegend=False,
     ))
 
-    # SSVI ATM IV line overlay
-    if ssvi_surface is not None and spot > 0:
-        ssvi_ivs = []
-        for e in weekdays:
-            d = e.get("dte", 0) or 0
-            tte = d / 365.0
-            iv = ssvi_surface.iv(float(spot), tte) if d > 0 else 0.0
-            ssvi_ivs.append(iv)
-        fig.add_trace(go.Scatter(
-            x=labels,
-            y=ssvi_ivs,
-            name="SSVI ATM IV",
-            mode="lines+markers",
-            line=dict(color="#FFD700", width=2.5),
-            marker=dict(size=6, color="#FFD700", line=dict(color="#fff", width=1)),
-            hovertemplate="<b>%{x}</b><br>SSVI ATM IV: %{y:.2%}<extra></extra>",
-        ))
-
     # Add horizontal line at RV
     if rv > 0:
         fig.add_hline(
@@ -1131,13 +1113,13 @@ def create_vrp_chart(
     def _vrp_color(v: float) -> str:
         if v <= -0.10:
             return "#27AE60"
-        elif v <= -0.05:
+        elif v < -0.05:
             return "#2ECC71"
-        elif v < 0.02:
+        elif v < 0:
             return "#BDC3C7"
         elif v < 0.05:
             return "#F4D03F"
-        elif v < 0.10:
+        elif v <= 0.10:
             return "#F39C12"
         else:
             return "#E74C3C"
@@ -1391,12 +1373,6 @@ def create_iv_by_strike(
             annotation_font_color="#ffa15a",
         )
 
-    if rv > 0:
-        fig.add_hline(y=rv, line_dash="dash", line_color="#ab63fa",
-                      annotation_text=f"RV: {rv*100:.2f}%",
-                      annotation_font_color="#ab63fa")
-
-
     fig.update_layout(
         title="Implied Volatility by Strike",
         xaxis_title="Strike",
@@ -1432,13 +1408,13 @@ def create_iv_richness_by_strike(
     richness = [m - s for m, s in zip(market_iv, ssvi_iv)]
 
     def _richness_pp_color(v: float) -> str:
-        if v <= -0.05:
+        if v < -0.03:
             return "#27AE60"
-        elif v <= -0.02:
+        elif v < -0.01:
             return "#2ECC71"
-        elif v < 0.02:
+        elif v <= 0.01:
             return "#BDC3C7"
-        elif v < 0.05:
+        elif v <= 0.03:
             return "#F39C12"
         else:
             return "#E74C3C"
