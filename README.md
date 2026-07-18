@@ -22,8 +22,8 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - 3D Gamma Surface (strike × expiration × GEX, expandable via slider)
   - Dealer Curve (cumulative GEX/VEX/CEX across strikes, with Spot/Call Wall/Put Wall/Gamma Flip markers in GEX mode, VEX Magnet/Repellent markers in VEX mode)
   - OI/Vol by Strike (grouped bars, toggle OI or Volume)
-   - IV by Strike (bar chart, toggle IV Rank/VRP/VRP Ratio, with Spot/RV/SSVI model overlay lines — SSVI fitted surface drawn in IV Rank and IV modes, expandable via slider)
-   - IV by Expiration (bar chart, toggle ATM IV/VRP/VRP Ratio, with RV/SSVI model overlay lines, expandable via slider)
+    - IV by Expiration (bar chart, toggle ATM IV / VRP — ATM IV colored by IV magnitude with RV horizontal line; VRP colored by ±10pp buckets with a Buy Premium → Sell Premium legend)
+    - IV by Strike (bar chart, toggle IV / IV Richness (pp) — IV with SSVI fitted smile overlay and Spot/ATM marker; IV Richness (pp) colored by ±5pp buckets with a Cheap → Expensive legend)
   - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP/VRP Ratio, expandable via slider, x-axis locked)
   - Strategy Signals (scored options with automated trade recommendations)
 - **Analytics Panel:**
@@ -43,9 +43,9 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Sell Premium includes Calendar Spread, Butterfly, Broken Wing Butterfly, Jade Lizard
   - Buy Premium includes Calendar Spread, Long LEAPS
   - **Per-strategy filters** (applied before scoring):
-    - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 20–45
+    - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 20–45 — selects the expiration with the lowest expiration-level VRP
     - **Long LEAPS:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
-    - **Sell Premium:** delta 0.10–0.20, VRP > 0.05, IV Richness > 0, DTE 30–45
+    - **Sell Premium:** delta 0.10–0.20, VRP > 0.05, IV Richness > 0, DTE 30–45 — selects the expiration with the highest expiration-level VRP
 - **Automatic Data Filtering:**
   - **±20 strikes around ATM** applied across all heatmaps (OI, Volume, IV Richness, VRP), positioning charts (OI, Volume), dealer curve (GEX, VEX, CEX), and volatility charts (IV, IV Richness, VRP)
   - **Nearest 4 active expirations** (excludes expirations with zero OI/volume)

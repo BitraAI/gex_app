@@ -75,8 +75,8 @@ When an `ssvi_surface` is provided, the Iron Condor strategy uses SSVI-smoothed 
 
 | Strategy | Logic | Pre-filters |
 |---|---|---|
-| **Long Calls** | Best call (lowest VRP) above spot when 25Δ skew positive (calls cheap) | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
-| **Long Puts** | Best put (lowest VRP) below spot when 25Δ skew negative (puts cheap) | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Long Calls** | Best call above spot when 25Δ skew positive (calls cheap); picks the expiration with the lowest VRP, then the lowest SSVI IV strike | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Long Puts** | Best put below spot when 25Δ skew negative (puts cheap); picks the expiration with the lowest VRP, then the lowest SSVI IV strike | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
 | **Long LEAPS** | Same as Long Calls, but filtered to long-dated expirations | delta 0.35–0.55, VRP<0, IR<0, DTE 90–365 |
 | **Call Debit Spread** | Buy lowest-strike call (score ≤ -0.5) / Sell highest-strike call, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
 | **Put Debit Spread** | Buy highest-strike put (score ≤ -0.5) / Sell lowest-strike put, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
@@ -88,8 +88,8 @@ When an `ssvi_surface` is provided, the Iron Condor strategy uses SSVI-smoothed 
 
 | Strategy | Logic | Pre-filters |
 |---|---|---|
-| **Short Calls** | Best call (highest VRP) above spot when 25Δ skew negative (calls rich) | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
-| **Short Puts** | Best put (highest VRP) below spot when 25Δ skew positive (puts rich) | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Short Calls** | Best call above spot when 25Δ skew negative (calls rich); picks the expiration with the highest VRP, then the highest SSVI IV strike | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Short Puts** | Best put below spot when 25Δ skew positive (puts rich); picks the expiration with the highest VRP, then the highest SSVI IV strike | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
 | **Call Credit Spread** | Sell lowest OTM call / Buy higher OTM call, same expiration; picks the pair with the highest avg score | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
 | **Put Credit Spread** | Sell highest OTM put / Buy lower OTM put, same expiration; picks the pair with the highest avg score | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
 | **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes (or SSVI 25Δ strikes when surface is available, falling back to highest-scored OTM strikes), with long protection legs beyond them (~10Δ when using SSVI). Falls back to symmetric wings if walls unavailable | delta 0.10–0.20, VRP>5pp, IR>0, DTE 30–45 |
@@ -103,9 +103,9 @@ When an `ssvi_surface` is provided, the Iron Condor strategy uses SSVI-smoothed 
 - The strike range is limited by the sidebar's "Strikes around ATM" setting (default ±20 strikes).
 - All recommendations use same-expiration legs where applicable.
 - **Per-strategy pre-filters** (applied before scoring, removed from `sd2`):
-  - **Buy Premium:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 20–45
-  - **Long LEAPS:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
-  - **Sell Premium:** delta `|Δ|` 0.10–0.20, VRP > 0.05 (>5pp), IV Richness > 0, DTE 30–45
+- **Buy Premium:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 20–45 — selects the expiration with the lowest expiration-level VRP, then the lowest SSVI IV strike
+- **Long LEAPS:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
+- **Sell Premium:** delta `|Δ|` 0.10–0.20, VRP > 0.05 (>5pp), IV Richness > 0, DTE 30–45 — selects the expiration with the highest expiration-level VRP, then the highest SSVI IV strike
 
 ---
 
