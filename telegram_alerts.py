@@ -165,11 +165,11 @@ def _build_strategy_alerts(
 
     buy_sd = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55]
     buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - rv < 0]
-    buy_sd = [e for e in buy_sd if 20 <= (e.get("days_to_exp", 0) or 0) <= 45]
+    buy_sd = [e for e in buy_sd if 60 <= (e.get("days_to_exp", 0) or 0) <= 90]
     if ssvi_surf and ir_tte:
         buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
 
-    sell_sd = [e for e in sd2 if 0.10 <= abs(e.get("delta", 0) or 0) <= 0.20]
+    sell_sd = [e for e in sd2 if 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20]
     sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - rv > 0.05]
     sell_sd = [e for e in sell_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
     if ssvi_surf and ir_tte:

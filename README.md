@@ -42,23 +42,29 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Iron Condor uses ATM range boundaries for short legs with protection legs from full data
   - Sell Premium includes Calendar Spread, Butterfly, Broken Wing Butterfly, Jade Lizard
   - Buy Premium includes Calendar Spread, Long LEAPS
-  - **Per-strategy filters** (applied before scoring):
-    - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 20–45 — selects the expiration with the lowest expiration-level VRP
-    - **Long LEAPS:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
-    - **Sell Premium:** delta 0.10–0.20, VRP > 0.05, IV Richness > 0, DTE 30–45 — selects the expiration with the highest expiration-level VRP
+  - **Multi-ticker scan** — Tick the "Scan all tickers in ticker_history.json" box to run the same signal pipeline (Buy/Sell Premium with the selected strategy) across every ticker listed in `~/.local/share/gex_app/ticker_history.json`; results are shown grouped per ticker.
+    - **Per-strategy filters** (applied before scoring):
+      - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 60–90
+        - **Long Calls:** gate `iv_skew > 0` & selected-expiration VRP `< 0`; strike CALL `> spot`, lowest SSVI richness (pp) `< 0`
+        - **Long Puts:** gate `iv_skew < 0` & selected-expiration VRP `> 0`; strike PUT `< spot`, highest SSVI richness (pp) `> 0`
+      - **Long LEAPS:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
+      - **Sell Premium:** delta 0.15–0.20, VRP > 0.05, IV Richness > 0, DTE 30–45
+        - **Short Calls:** gate `iv_skew < 0` & selected-expiration VRP `> 0`; strike CALL `< spot`, highest SSVI richness (pp) `> 0`
+        - **Short Puts:** gate `iv_skew > 0` & selected-expiration VRP `< 0`; strike PUT `> spot`, lowest SSVI richness (pp) `< 0`
+      - Single-ticker view restricts scoring to the **selected expiration** so displayed VRP is the selected expiration's VRP and the strike is from that expiration.
 - **Automatic Data Filtering:**
   - **±20 strikes around ATM** applied across all heatmaps (OI, Volume, IV Richness, VRP), positioning charts (OI, Volume), dealer curve (GEX, VEX, CEX), and volatility charts (IV, IV Richness, VRP)
   - **Nearest 4 active expirations** (excludes expirations with zero OI/volume)
   - Charts have sliders to control expiration count and are unaffected by sidebar expiration selection
-- **Options Data** — Sortable grid filtered by sidebar expiration selection, with highlighted cells and CSV export (columns: Strike, Call/Put GEX, Net GEX, Call/Put OI, Call/Put Vol, Call/Put Gamma, Call/Put IV, VRP, SSVI IV, IV (pp), Call/Put Price, Expirations):
+- **Options Data** — Sortable grid filtered by sidebar expiration selection, with highlighted cells and CSV export (columns: Strike, Call/Put GEX, Net GEX, Call/Put OI, Call/Put Vol, Call/Put Gamma, Call/Put Price, Call/Put Delta, Call/Put IV, SSVI IV, IV (pp), Expirations):
   - **Gray row** — ATM strike (closest to spot)
   - **Red OI cells** — Max Pain strike OI columns
   - **Orange Call GEX cell** — Call Wall strike Call GEX
   - **Green Put GEX cell** — Put Wall strike Put GEX
   - **RV** — 20-day annualized realized volatility of the underlying (population std of log returns, × √(252 × n/(n−1)))
-  - **VRP** — Volatility Risk Premium = IV - RV
   - **SSVI IV** — Model IV from the SSVI volatility surface at the front-month TTE
   - **IV (pp)** — IV Richness in percentage points = IV - SSVI IV
+  - **Call/Put Delta** — Option delta at the front expiration (used for the Trade Signals delta filters)
 - **Light Theme** — Clean light-themed UI
 - **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
   - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
@@ -342,7 +348,7 @@ Where:
 - **Expected Move** — Expected price range based on ATM straddle cost
   - `Expected Move = (ATM Call Price + ATM Put Price) × 0.85`
   - Finds the ATM strike (closest to spot), sums the call and put mark prices, multiplies by 0.85 (TastyTrade convention, approximating one standard deviation)
-- **IV Skew (25Δ)** — Front-expiration OTM put IV minus OTM call IV at 25 delta. Positive value = puts more expensive (downside skew), negative = calls more expensive (upside skew). Steep put skew combined with short gamma creates explosive downside risk — dealers who are short gamma must sell more into a falling market, and expensive puts amplify the hedging pressure.
+- **IV Skew (25Δ)** — For the **selected expiration**, OTM put IV minus OTM call IV at 25 delta (OTM strikes only: puts `strike < spot`, calls `strike > spot`). Positive value = puts more expensive (downside skew), negative = calls more expensive (upside skew). Steep put skew combined with short gamma creates explosive downside risk — dealers who are short gamma must sell more into a falling market, and expensive puts amplify the hedging pressure. When the chain lacks usable OTM put/call quotes for the selected expiration it falls back to the SSVI-smoothed 25Δ skew at that tenor, then to the front expiration's market skew, so the metric always displays a value when any expiration carries a valid skew.
 - **IV (Implied Volatility)** — Per strike: uses call IV for strikes ≥ spot and put IV for strikes < spot. Represents the market's expectation of future price volatility over the option's remaining life, derived from option market prices via the Black-Scholes model.
 - **VRP (Volatility Risk Premium)** — Per strike: `VRP = IV - RV`. Computed as `VRP = ATM IV - RV` for each expiration. Measures the spread between implied volatility (option price) and realized volatility. Positive VRP → Options are expensive relative to recent realized movement. Negative VRP → Options are cheap relative to recent realized movement. VRP only tells you whether options (Call/Put) are cheap or expensive, not whether the underlying will go up or down.
 - **VEX Magnet** — Strike with highest positive net VEX (most positive vanna exposure). As IV rises, dealer hedging creates buying pressure that attracts price toward this level.
@@ -350,6 +356,12 @@ Where:
 - **SSVI Volatility Surface** — A parametric implied volatility surface fit using the Surface Stochastic Volatility Inspired (SSVI) framework. Two-stage calibration:
   1. **Raw SVI**: Per-expiration fit of total variance as a function of log-moneyness: `w(k) = a + b(ρ(k - m) + √((k - m)² + σ²))`. TTE uses the trading-day-aware formula `(DTE + secsLeft/23400)/365`.
   2. **SSVI surface**: Across-expiration fit of ATM total variance `θ(t) = w(0, t)`, then surface-wide `ρ` (average skew), `η` (skew-smile decay), and `γ` (power-law exponent) parameters, giving a fully arbitrage-free surface.
+  - **Curvature (γ)**: Controls how steeply IV rises away from ATM along the smile.
+    - **High Curvature (γ is large)**: OTM strikes are heavily penalized (expensive) compared to ATM options.
+    - **Low Curvature (γ is small)**: The smile is flatter. OTM options are relatively cheap.
+  - **Skew (ρ)**: Controls the left/right asymmetry of the smile.
+    - **Negative Skew (ρ ≪ 0)**: Common in equity indexes like SPY, where puts are expensive. Use the SSVI surface to locate the specific put strike where the skew slope begins to decay, creating an optimal entry for Put Ratio Spreads.
+  - **Skew-smile decay (η)**: Controls how quickly the skew term fades as time-to-expiration grows. Higher `η` means the skew-smile shape decays faster across expirations.
 - **SSVI IV / Skew** — Once calibrated, the surface provides cleaner `iv(strike, tte)` queries and a model-based 25Δ skew via root-finding on Black-Scholes delta. Stored as `ssvi_surface` and `ssvi_skew` in analytics.
 - **IV Rank** — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. The 20-day RV for each trailing day is computed as `σ × √252` where `σ` is the population standard deviation of the 20 most recent daily log returns. The current ATM IV (from the front-month option chain) is then ranked against the 252 trailing RV values. If ATM IV is unavailable, the latest 20-day RV is used as a fallback. Formula: `round((current - min_rv_252d) / (max_rv_252d - min_rv_252d) × 100, 2)`. Values >70 indicate options are expensive relative to history (favor selling premium), values <30 indicate options are cheap (favor buying premium). The IV by Strike chart's IV Rank view overlays the SSVI fitted surface (green line+markers) on the same strikes at the front-month tenor.
 - **Bullish Flow** — `call_buy_vol + put_sell_vol` from ATM option streaming. Both buying calls and selling puts express bullish conviction. Subscribes to the front expiration ATM call and put contracts via LEVELONE_OPTIONS WebSocket streaming. Trade direction is inferred by comparing the trade price to the bid-ask midpoint: trades at or above mid are classified as buys, trades below mid as sells. When bid/ask data is unavailable, volume is split evenly between buy and sell. Totals accumulate over the streaming session (up to 200 seconds of 1-second aggregated bars) and display in a dedicated fragment refreshing every 1 second. Card turns green when bullish flow exceeds bearish flow.

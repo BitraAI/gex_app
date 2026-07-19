@@ -6,10 +6,11 @@ from calculations import (
     compute_totals,
 )
 from svi import calibrate as calibrate_ssvi
+from svi import skew_for_tte as ssvi_skew_for_tte
 
 logger = logging.getLogger(__name__)
 
-def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool = True, show_puts: bool = True, data_full: list[dict[str, Any]] | None = None, r: float = 0.0, q: float = 0.0) -> dict[str, Any]:
+def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool = True, show_puts: bool = True, data_full: list[dict[str, Any]] | None = None, r: float = 0.0, q: float = 0.0, expiration: str | None = None) -> dict[str, Any]:
     strikes = aggregate_by_strike(data, spot, show_calls=show_calls, show_puts=show_puts)
     by_exp = aggregate_by_expiration(data, show_calls=show_calls, show_puts=show_puts)
     totals = compute_totals(data)
@@ -46,18 +47,6 @@ def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool 
     expected_pin = _find_expected_pin(strikes, spot, data_full)
     analytics["expected_pin"] = expected_pin
 
-    iv_skew_result = _calculate_iv_skew(data, spot)
-    if isinstance(iv_skew_result, dict):
-        analytics["iv_skew"] = iv_skew_result["iv_skew"]
-        analytics["put_iv_25d"] = iv_skew_result["put_iv_25d"]
-        analytics["call_iv_25d"] = iv_skew_result["call_iv_25d"]
-        analytics["atm_iv"] = iv_skew_result["atm_iv"]
-    else:
-        analytics["iv_skew"] = iv_skew_result
-        analytics["put_iv_25d"] = None
-        analytics["call_iv_25d"] = None
-        analytics["atm_iv"] = None
-
     # SSVI arbitrage-free volatility surface (Raw SVI per tenor -> SSVI).
     # Calibrated on the unfiltered chain (``data_full``) when available,
     # so the surface sees as many OTM quotes as possible across expirations.
@@ -71,6 +60,45 @@ def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool 
         logger.warning("SSVI calibration failed: %s", exc, exc_info=True)
         analytics["ssvi_surface"] = None
         analytics["ssvi_skew"] = None
+
+    # Compute the skew on the full (untruncated) chain so every strike for the
+    # selected expiration is available — ``data`` may be ATM-range limited.
+    _skew_src = data_full if data_full else data
+    iv_skew_result = _calculate_iv_skew(_skew_src, spot, expiration=expiration)
+    if isinstance(iv_skew_result, dict):
+        analytics["iv_skew"] = iv_skew_result["iv_skew"]
+        analytics["put_iv_25d"] = iv_skew_result["put_iv_25d"]
+        analytics["call_iv_25d"] = iv_skew_result["call_iv_25d"]
+        analytics["atm_iv"] = iv_skew_result["atm_iv"]
+    else:
+        analytics["iv_skew"] = None
+        analytics["put_iv_25d"] = None
+        analytics["call_iv_25d"] = None
+        analytics["atm_iv"] = None
+
+    # Fall back to the SSVI-smoothed 25Δ skew for the selected expiration when
+    # the market chain lacks usable OTM put/call quotes (e.g. LEAPS or weekly
+    # expirations with strikes only on one side of spot, or no 25Δ quote).
+    if analytics.get("iv_skew") is None and expiration:
+        _exp_rows = [e for e in _skew_src if e.get("expiration") == expiration]
+        _tte = None
+        for e in _exp_rows:
+            dte = e.get("days_to_exp") or e.get("dte")
+            if dte:
+                _tte = max(dte, 0) / 365.0
+                break
+        if _tte:
+            _fb = ssvi_skew_for_tte(analytics.get("ssvi_surface"), _tte, ref_spot=spot)
+            if _fb is not None:
+                analytics["iv_skew"] = _fb
+
+    # Last-resort fallback: if the selected expiration has no usable quotes and
+    # SSVI is unavailable, use the front expiration's market skew so the metric
+    # never shows N/A when any expiration in the chain carries a valid skew.
+    if analytics.get("iv_skew") is None:
+        _front = _calculate_iv_skew(_skew_src, spot)
+        if isinstance(_front, dict) and _front.get("iv_skew") is not None:
+            analytics["iv_skew"] = _front["iv_skew"]
 
     analytics["expected_move"] = _calculate_expected_move(data, spot)
     analytics["num_strikes"] = len(strikes)
@@ -136,13 +164,17 @@ def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: li
     return best_strike
 
 
-def _calculate_iv_skew(data: list[dict[str, Any]], spot: float) -> Optional[dict[str, float]]:
-    front = min((e for e in data if e["days_to_exp"] > 0), key=lambda e: e["days_to_exp"], default=None)
-    if not front:
-        return None
-
-    front_exp = front["expiration"]
+def _calculate_iv_skew(data: list[dict[str, Any]], spot: float, expiration: str | None = None) -> Optional[dict[str, float]]:
+    if expiration:
+        front_exp = expiration
+    else:
+        front = min((e for e in data if e["days_to_exp"] > 0), key=lambda e: e["days_to_exp"], default=None)
+        if not front:
+            return None
+        front_exp = front["expiration"]
     exp_data = [e for e in data if e["expiration"] == front_exp]
+    if not exp_data:
+        return None
 
     otm_puts = [e for e in exp_data if e["type"] == "PUT" and e["strike"] < spot and e["delta"] < 0 and e["iv"] > 0]
     otm_calls = [e for e in exp_data if e["type"] == "CALL" and e["strike"] > spot and e["delta"] > 0 and e["iv"] > 0]
@@ -150,8 +182,16 @@ def _calculate_iv_skew(data: list[dict[str, Any]], spot: float) -> Optional[dict
     if not otm_puts or not otm_calls:
         return None
 
-    put = min(otm_puts, key=lambda e: abs(abs(e["delta"]) - 0.25))
-    call = min(otm_calls, key=lambda e: abs(e["delta"] - 0.25))
+    # Prefer the quote closest to 25Δ; fall back to the most OTM valid quote
+    # (largest |delta|) when no near-25Δ quote exists for this expiration.
+    def _closest(items, target):
+        with_delta = [e for e in items if e.get("delta")]
+        if with_delta:
+            return min(with_delta, key=lambda e: abs(abs(e["delta"]) - target))
+        return max(items, key=lambda e: abs(e.get("strike", 0) - spot))
+
+    put = _closest(otm_puts, 0.25)
+    call = _closest(otm_calls, 0.25)
 
     atm = min(exp_data, key=lambda e: abs(e["strike"] - spot), default=None)
     atm_iv = (atm["iv"] / 100 if atm and atm["iv"] > 3 else atm["iv"] if atm else None)
