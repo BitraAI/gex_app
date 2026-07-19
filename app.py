@@ -363,7 +363,11 @@ def compute_state():
         e for e in aggregate_by_expiration(data, show_calls, show_puts, spot)
         if e.get("call_oi", 0) + e.get("put_oi", 0) > 0 or e.get("atm_iv", 0) > 0
     ]
-    analytics = compute_analytics(data, spot, show_calls, show_puts, data_full=st.session_state.data, r=st.session_state.get("r", 0.0), q=st.session_state.get("q", 0.0))
+    _sel_exp = st.session_state.get("selected_expiration", [])
+    if isinstance(_sel_exp, str):
+        _sel_exp = [_sel_exp]
+    _sel_exp_for_skew = _sel_exp[0] if _sel_exp else None
+    analytics = compute_analytics(data, spot, show_calls, show_puts, data_full=st.session_state.data, r=st.session_state.get("r", 0.0), q=st.session_state.get("q", 0.0), expiration=_sel_exp_for_skew)
 
     st.session_state.strikes = strikes
     st.session_state.by_exp = by_exp
@@ -549,7 +553,7 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
     alerts = []
     buy_sd = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55]
     buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - rv < 0]
-    buy_sd = [e for e in buy_sd if 20 <= (e.get("days_to_exp", 0) or 0) <= 45]
+    buy_sd = [e for e in buy_sd if 60 <= (e.get("days_to_exp", 0) or 0) <= 90]
     if ssvi_surf and ir_tte:
         buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
     if buy_sd:
@@ -559,7 +563,7 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
             alerts.append("Buy Premium:")
             for r in buy_recs[:3]:
                 alerts.append(f"  • {r}")
-    sell_sd = [e for e in sd2 if 0.10 <= abs(e.get("delta", 0) or 0) <= 0.20]
+    sell_sd = [e for e in sd2 if 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20]
     sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - rv > 0.05]
     sell_sd = [e for e in sell_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
     if ssvi_surf and ir_tte:
@@ -1657,6 +1661,151 @@ def render_heatmaps_frag():
                 st.info("No RV data")
 
 
+def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
+    """Self-contained trade-signal analysis for a single ticker.
+
+    Mirrors the pipeline in ``fetch_data`` + ``compute_state`` but keeps all
+    state local so the Trade Signals tab can scan every ticker in
+    ``ticker_history.json`` without disturbing the main session state.
+    Returns ``None`` if data cannot be loaded.
+    """
+    if not init_client():
+        return None
+    _sym = symbol.upper().lstrip("$")
+    sym_map = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
+    is_index_symbol = _sym in sym_map
+
+    raw = None
+    try:
+        raw = run_async(
+            fetch_option_chain(st.session_state.client, symbol, strike_count=75, include_quotes=True)
+        )
+    except Exception:
+        if not is_index_symbol:
+            return None
+
+    r = run_async(get_interest_rate(st.session_state.client))
+    q = run_async(get_yield(st.session_state.client, symbol))
+
+    fallback_greeks = None
+    etf_analytics = None
+    etf_data = None
+    etf_spot = 0.0
+
+    if is_index_symbol:
+        try:
+            fb_raw = run_async(
+                fetch_option_chain(st.session_state.client, sym_map[_sym], strike_count=75, include_quotes=True)
+            )
+            fallback_greeks = build_greeks_lookup(fb_raw)
+            etf_data, etf_spot = parse_option_chain(fb_raw, r=r, q=q)
+            if etf_data and etf_spot > 0:
+                etf_analytics = compute_analytics(etf_data, etf_spot, data_full=etf_data, r=r, q=q)
+        except Exception:
+            pass
+
+    if raw is not None and not (isinstance(raw, dict) and raw.get("errors")):
+        data, spot = parse_option_chain(raw, r=r, q=q, fallback_greeks=fallback_greeks)
+    else:
+        data, spot = [], 0.0
+
+    if (not data or spot <= 0) and etf_data and etf_spot > 0:
+        data, spot = etf_data, etf_spot
+
+    if not data or spot <= 0:
+        return None
+
+    analytics = compute_analytics(data, spot, r=r, q=q, data_full=data)
+    if etf_analytics:
+        if analytics.get("net_gex", 0) == 0:
+            for key in ("net_gex", "total_call_gex", "total_put_gex",
+                         "max_positive_gex", "max_negative_gex",
+                         "max_positive_gex_strike", "max_negative_gex_strike",
+                         "dealer_position"):
+                if key in etf_analytics:
+                    analytics[key] = etf_analytics[key]
+        if analytics.get("ssvi_surface") is None:
+            analytics["ssvi_surface"] = etf_analytics.get("ssvi_surface")
+            analytics["iv_skew"] = etf_analytics.get("iv_skew")
+
+    rv = run_async(get_20d_rv(st.session_state.client, symbol))
+    if rv is None:
+        rv = 0.0
+
+    return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym}
+
+
+def _build_signals(
+    data: list[dict], spot: float, analytics: dict, rv: float,
+    pt: str, stg: str, atm_range: int = 20, by_exp_all: list | None = None,
+    selected_expirations: list[str] | None = None,
+) -> list[str]:
+    """Build trade-signal recommendations for a single ticker's option data.
+
+    Shared by the single-ticker Trade Signals view and the multi-ticker scan.
+    """
+    aks = sorted(set(e["strike"] for e in data))
+    atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
+    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
+    if atm_range > 0 and sd and spot > 0:
+        sk = sorted(set(e["strike"] for e in sd)); ak = min(sk, key=lambda k: abs(k - spot)); ai = sk.index(ak)
+        nb = min(atm_range, ai); na = min(atm_range, len(sk) - 1 - ai)
+        sd2 = [e for e in sd if sk[ai - nb] <= e["strike"] <= sk[ai + na]]
+    else:
+        sd2 = sd
+
+    if selected_expirations:
+        sd2 = [e for e in sd2 if e["expiration"] in selected_expirations]
+
+    _rec_stg = stg
+    if stg == "Long LEAPS":
+        sd2 = [e for e in sd2 if 90 <= (e.get("days_to_exp", 0) or 0) <= 365]
+        _rec_stg = "Long Calls"
+
+    _ssvi_surf = analytics.get("ssvi_surface")
+    _ir_tte = _compute_ssvi_tte([e.get("dte", 0) for e in by_exp_all]) if (_ssvi_surf is not None and by_exp_all) else None
+
+    if pt == "Buy Premium":
+        sd2 = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0)) <= 0.55]
+        sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - rv < 0]
+        if _ssvi_surf is not None and _ir_tte is not None:
+            sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) < 0]
+        _sk = analytics.get("iv_skew")
+        if stg == "Long Calls" and _sk is not None:
+            sd2 = [e for e in sd2 if _sk > 0]
+            sd2 = [e for e in sd2 if e["type"] == "CALL" and e["strike"] > spot]
+        elif stg == "Long Puts" and _sk is not None:
+            sd2 = [e for e in sd2 if _sk < 0]
+            sd2 = [e for e in sd2 if e["type"] == "PUT" and e["strike"] < spot]
+        if stg != "Long LEAPS":
+            sd2 = [e for e in sd2 if 60 <= (e.get("days_to_exp", 0) or 0) <= 90]
+    else:
+        sd2 = [e for e in sd2 if 0.15 <= abs(e.get("delta", 0)) <= 0.20]
+        sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - rv > 0.05]
+        if _ssvi_surf is not None and _ir_tte is not None:
+            sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) > 0]
+        sd2 = [e for e in sd2 if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
+        if stg == "Short Calls":
+            sd2 = [e for e in sd2 if e["type"] == "CALL" and e["strike"] < spot]
+        elif stg == "Short Puts":
+            sd2 = [e for e in sd2 if e["type"] == "PUT" and e["strike"] > spot]
+
+    _iv_rank = analytics.get("iv_rank")
+    sc = score_options(sd2, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), iv_rank=_iv_rank)
+    rc = generate_recommendations(sc, spot, strategy=_rec_stg, all_data=sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte)
+    return rc
+
+
+def _strategy_side(stg: str) -> str | None:
+    """Return the option side a strategy acts on: 'call', 'put', or None (both/neutral)."""
+    name = stg.lower()
+    if "call" in name:
+        return "call"
+    if "put" in name:
+        return "put"
+    return None
+
+
 def render_trade_signals_frag():
     s = st.session_state; d = False
 
@@ -1670,51 +1819,81 @@ def render_trade_signals_frag():
             return
         if not s.get("strikes"):
             return
-        aks = sorted(set(e["strike"] for e in s.filtered_data)); atm_k = min(aks, key=lambda k: abs(k-s.spot)) if aks else s.spot
-        sd = [e for e in s.filtered_data if e.get("open_interest",0)>0 and (e.get("mark",0) or 0)>0 and ((e["strike"]==atm_k) or (e["type"]=="CALL" and e["strike"]>s.spot) or (e["type"]=="PUT" and e["strike"]<s.spot))]
         with st.expander("How to read these signals", expanded=False):
             st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+2% option expensive. &lt;-2% option cheap.\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where ATM IV sits in the trailing 1Y range of 20d realized vol. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Scoring** &mdash; Sell Premium (>= +1), Buy Premium (<= -1), Neutral.\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
-        _iv_rank = s.get("iv_rank")
-        b, br = assess_market_bias(s.analytics, s.spot, iv_rank=_iv_rank)
-        e = {"Bullish":"🟢","Bearish":"🔴","Neutral":"🟡"}
-        st.markdown(f"**Market Bias:** {e.get(b,'')} {b} - {br}")
-        st.markdown(f"**Next Earnings:** {s.get('next_earnings_date') or 'N/A'}")
-        ar = s.get("strikes_atm_range",20)
-        if ar>0 and sd and s.spot>0:
-            sk = sorted(set(e["strike"] for e in sd)); ak = min(sk, key=lambda k: abs(k-s.spot)); ai = sk.index(ak)
-            nb = min(ar,ai); na = min(ar,len(sk)-1-ai); sd2 = [e for e in sd if sk[ai-nb]<=e["strike"]<=sk[ai+na]]
-        else: sd2 = sd
-        c1,c2 = st.columns([1,2])
+
+        scan_all = st.checkbox("Scan all tickers in ticker_history.json", value=False, key="scan_all_tickers")
+
+        c1, c2 = st.columns([1, 2])
         with c1:
-            pt = st.radio("Premium Type", ["Buy Premium","Sell Premium"], horizontal=True, key="premium_type")
-            stg = st.selectbox("Strategy", ["Long Calls","Long Puts","Call Debit Spread","Put Debit Spread","Long LEAPS","Long Straddles","Long Strangles","Calendar Spread"] if pt=="Buy Premium" else ["Short Calls","Short Puts","Call Credit Spread","Put Credit Spread","Iron Condor","Butterfly","Broken Wing Butterfly","Jade Lizard"])
-        _rec_stg = stg
-        if stg == "Long LEAPS":
-            sd2 = [e for e in sd2 if 90 <= (e.get("days_to_exp", 0) or 0) <= 365]
-            _rec_stg = "Long Calls"
-        _ssvi_surf = None
-        try:
-            _ssvi_surf = s.analytics.get("ssvi_surface")
-        except Exception:
-            pass
-        _ir_tte = _compute_ssvi_tte([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
-        if pt == "Buy Premium":
-            sd2 = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0)) <= 0.55]
-            sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _rv < 0]
-            if _ssvi_surf is not None and _ir_tte is not None:
-                sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) < 0]
-            if stg != "Long LEAPS":
-                sd2 = [e for e in sd2 if 20 <= (e.get("days_to_exp", 0) or 0) <= 45]
-        else:
-            sd2 = [e for e in sd2 if 0.10 <= abs(e.get("delta", 0)) <= 0.20]
-            sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _rv > 0.05]
-            if _ssvi_surf is not None and _ir_tte is not None:
-                sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) > 0]
-            sd2 = [e for e in sd2 if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
-        sc = score_options(sd2, s.spot, _rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"), iv_rank=_iv_rank)
-        rc = generate_recommendations(sc, s.spot, strategy=_rec_stg, all_data=sd, rv=_rv, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), iv_skew=s.analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte)
+            pt = st.radio("Premium Type", ["Buy Premium", "Sell Premium"], horizontal=True, key="premium_type")
+            stg = st.selectbox("Strategy", ["Long Calls", "Long Puts", "Call Debit Spread", "Put Debit Spread", "Long LEAPS", "Long Straddles", "Long Strangles", "Calendar Spread"] if pt == "Buy Premium" else ["Short Calls", "Short Puts", "Call Credit Spread", "Put Credit Spread", "Iron Condor", "Butterfly", "Broken Wing Butterfly", "Jade Lizard"])
+
         with c2:
-            for r in rc: st.markdown(f"- {r}")
+            if not scan_all:
+                b, br = assess_market_bias(s.analytics, s.spot, iv_rank=s.get("iv_rank"))
+                e = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}
+                st.markdown(f"**Market Bias:** {e.get(b, '')} {b} - {br}")
+                st.markdown(f"**Next Earnings:** {s.get('next_earnings_date') or 'N/A'}")
+                rc = _build_signals(
+                    s.filtered_data, s.spot, s.analytics, _rv, pt, stg,
+                    atm_range=s.get("strikes_atm_range", 20), by_exp_all=s.get("by_exp_all"),
+                    selected_expirations=[e for e in s.get("selected_expiration", []) if isinstance(e, str)] or None,
+                )
+                if rc:
+                    for r in rc:
+                        st.markdown(f"- {r}")
+                else:
+                    st.info("No strong signals")
+            else:
+                tickers = list(s.get("ticker_history", []))
+                if not tickers:
+                    st.info("No tickers in ticker_history.json")
+                else:
+                    run = st.button("Run scan", key="run_ticker_scan")
+                    if run:
+                        st.session_state.ticker_scan_empty = False
+                        results = {}
+                        for sym in tickers:
+                            with st.spinner(f"Analyzing {sym}..."):
+                                res = _run_ticker_signals(sym)
+                            if res is None:
+                                continue
+                            _sk = res["analytics"].get("iv_skew")
+                            _side = _strategy_side(stg)
+                            if _sk is not None and _side is not None:
+                                if pt == "Buy Premium" and _side == "call" and _sk <= 0:
+                                    continue
+                                if pt == "Buy Premium" and _side == "put" and _sk >= 0:
+                                    continue
+                                if pt == "Sell Premium" and _side == "call" and _sk >= 0:
+                                    continue
+                                if pt == "Sell Premium" and _side == "put" and _sk <= 0:
+                                    continue
+                            rc = _build_signals(
+                                res["data"], res["spot"], res["analytics"], res["rv"], pt, stg,
+                                atm_range=s.get("strikes_atm_range", 20),
+                                by_exp_all=[e for e in aggregate_by_expiration(res["data"], spot=res["spot"]) if e.get("call_oi", 0) + e.get("put_oi", 0) > 0 or e.get("atm_iv", 0) > 0],
+                            )
+                            _no_sig = "No strong signals" in " ".join(rc)
+                            if rc and not _no_sig:
+                                results[sym] = rc
+                        st.session_state.ticker_scan_results = results
+                        st.session_state.ticker_scan_pt = pt
+                        st.session_state.ticker_scan_stg = stg
+                        st.session_state.ticker_scan_empty = (len(results) == 0)
+
+                    results = st.session_state.get("ticker_scan_results")
+                    if results:
+                        shown_pt = st.session_state.get("ticker_scan_pt")
+                        shown_stg = st.session_state.get("ticker_scan_stg")
+                        st.markdown(f"**Scan results — {shown_pt} / {shown_stg}**")
+                        for sym, recs in results.items():
+                            st.markdown(f"**{sym}**")
+                            for r in recs:
+                                st.markdown(f"- {r}")
+                    elif st.session_state.get("ticker_scan_empty"):
+                        st.info("No signals found across tickers")
 
 
 def render_options_data_frag():
@@ -1768,6 +1947,8 @@ def render_table():
             "Put Vol": s["put_volume"],
             "Call Price": s.get("call_mark", 0),
             "Put Price": s.get("put_mark", 0),
+            "Call Delta": s.get("call_delta", 0),
+            "Put Delta": s.get("put_delta", 0),
             "Expirations": s["num_expirations"],
             "IV": s.get("call_iv", 0) if s["strike"] >= st.session_state.spot else s.get("put_iv", 0),
         })
@@ -1792,12 +1973,8 @@ def render_table():
         df["IV (pp)"] = 0.0
 
     rv = st.session_state.get("underlying_20d_rv", 0.0)
-    if rv > 0:
-        df["VRP"] = df["IV"] - rv
-    else:
-        df["VRP"] = 0.0
 
-    df = df[["Strike","Call GEX","Put GEX","Net GEX","Call Gamma","Put Gamma","Call OI","Put OI","Call Vol","Put Vol","Call Price","Put Price","Expirations","IV","VRP","SSVI IV","IV (pp)"]]
+    df = df[["Strike","Call GEX","Put GEX","Net GEX","Call Gamma","Put Gamma","Call OI","Put OI","Call Vol","Put Vol","Call Price","Put Price","Call Delta","Put Delta","Expirations","IV","SSVI IV","IV (pp)"]]
 
     max_pin_idx = (df["Call OI"] + df["Put OI"]).idxmax()
     call_wall = st.session_state.analytics.get("call_wall")
@@ -1848,6 +2025,8 @@ def render_table():
         "IV (pp)": "{:.2%}",
         "Call Price": "${:.2f}",
         "Put Price": "${:.2f}",
+        "Call Delta": "{:.4f}",
+        "Put Delta": "{:.4f}",
     })
 
     st.markdown("""

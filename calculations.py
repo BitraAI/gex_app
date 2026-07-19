@@ -298,8 +298,10 @@ def aggregate_by_strike(
                 "total_gamma": 0.0,
                 "call_front_dte": 9999,
                 "call_front_iv": 0.0,
+                "call_front_delta": 0.0,
                 "put_front_dte": 9999,
                 "put_front_iv": 0.0,
+                "put_front_delta": 0.0,
                 "call_mark": 0.0,
                 "put_mark": 0.0,
                 "num_calls": 0,
@@ -325,6 +327,7 @@ def aggregate_by_strike(
             if entry["days_to_exp"] < strikes_map[sk]["call_front_dte"]:
                 strikes_map[sk]["call_front_dte"] = entry["days_to_exp"]
                 strikes_map[sk]["call_front_iv"] = entry["iv"]
+                strikes_map[sk]["call_front_delta"] = entry.get("delta", 0) or 0
                 strikes_map[sk]["call_mark"] = entry.get("mark", 0) or 0
             strikes_map[sk]["num_calls"] += 1
 
@@ -342,6 +345,7 @@ def aggregate_by_strike(
             if entry["days_to_exp"] < strikes_map[sk]["put_front_dte"]:
                 strikes_map[sk]["put_front_dte"] = entry["days_to_exp"]
                 strikes_map[sk]["put_front_iv"] = entry["iv"]
+                strikes_map[sk]["put_front_delta"] = entry.get("delta", 0) or 0
                 strikes_map[sk]["put_mark"] = entry.get("mark", 0) or 0
             strikes_map[sk]["num_puts"] += 1
 
@@ -361,6 +365,8 @@ def aggregate_by_strike(
         item["net_cex"] = round(item["net_cex"], 2)
         item["call_iv"] = round(item["call_front_iv"] / 100, 4) if item["call_front_dte"] < 9999 else 0.0
         item["put_iv"] = round(item["put_front_iv"] / 100, 4) if item["put_front_dte"] < 9999 else 0.0
+        item["call_delta"] = round(item["call_front_delta"], 4) if item["call_front_dte"] < 9999 else 0.0
+        item["put_delta"] = round(item["put_front_delta"], 4) if item["put_front_dte"] < 9999 else 0.0
         result.append(item)
 
     return result

@@ -201,30 +201,39 @@ def generate_recommendations(
                 return iv
         return float("inf")
 
-    def _buy_key(opt: dict[str, Any]) -> tuple[float, float]:
-        return (_exp_vrp(opt), _ssvi_iv(opt))
+    def _rich(opt: dict[str, Any]) -> float:
+        """SSVI richness (pp) = market IV minus SSVI IV (as a fraction)."""
+        s = _ssvi_iv(opt)
+        if s == float("inf"):
+            return float("inf")
+        return (opt.get("iv", 0) or 0) - s
 
-    def _long_puts_key(opt: dict[str, Any]) -> tuple[float, float]:
-        return (-_exp_vrp(opt), -_ssvi_iv(opt))
-
-    def _short_puts_key(opt: dict[str, Any]) -> tuple[float, float]:
-        return (_exp_vrp(opt), _ssvi_iv(opt))
+    def _sel_exp_vrp(opt: dict[str, Any]) -> float:
+        """VRP of the option's expiration (ATM-like), used as the selected-expiration VRP."""
+        return exp_vrp.get(opt["expiration"], opt["vrp"])
 
     def _sell_key(opt: dict[str, Any]) -> tuple[float, float]:
         return (-_exp_vrp(opt), -_ssvi_iv(opt))
+
+    def _buy_key(opt: dict[str, Any]) -> tuple[float, float]:
+        return (_exp_vrp(opt), _ssvi_iv(opt))
 
     if strategy in ("Sell Premium", "Call Credit Spread", "Put Credit Spread", "Iron Condor"):
         pass
 
     if strategy in ("Long Calls",):
         if iv_skew is not None and iv_skew > 0:
-            calls = [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot]
+            calls = [s for s in scored if s["type"] == "CALL" and s["strike"] > spot]
             if calls:
-                best = min(calls, key=_buy_key)
-                recs.append(
-                    f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-                    f"25Δ Skew {iv_skew:+.2%} (calls cheap), VRP {best['vrp']:.1f}%."
-                )
+                best = min(calls, key=_rich)
+                _sel_vrp = _sel_exp_vrp(best)
+                _richness = _rich(best)
+                if _sel_vrp < 0 and _richness < 0:
+                    recs.append(
+                        f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
+                        f"25Δ Skew {iv_skew:+.2%} - Calls cheap; Buy Calls, "
+                        f"VRP {_sel_vrp:.1f}%, SSVI Richness {_richness * 100:+.2f}%."
+                    )
         elif iv_skew is not None:
             recs.append(f"25Δ Skew {iv_skew:+.2%} — puts cheap; skip Long Calls.")
         else:
@@ -232,13 +241,17 @@ def generate_recommendations(
 
     if strategy in ("Long Puts",):
         if iv_skew is not None and iv_skew < 0:
-            puts = [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot]
+            puts = [s for s in scored if s["type"] == "PUT" and s["strike"] < spot]
             if puts:
-                best = min(puts, key=_long_puts_key)
-                recs.append(
-                    f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-                    f"25Δ Skew {iv_skew:+.2%} (puts cheap), VRP {best['vrp']:.1f}%."
-                )
+                best = max(puts, key=_rich)
+                _sel_vrp = _sel_exp_vrp(best)
+                _richness = _rich(best)
+                if _sel_vrp > 0 and _richness > 0:
+                    recs.append(
+                        f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
+                        f"25Δ Skew {iv_skew:+.2%} - Puts cheap; Buy Puts, "
+                        f"VRP {_sel_vrp:.1f}%, SSVI Richness {_richness * 100:+.2f}%."
+                    )
         elif iv_skew is not None:
             recs.append(f"25Δ Skew {iv_skew:+.2%} — puts not cheap; skip Long Puts.")
         else:
@@ -246,13 +259,17 @@ def generate_recommendations(
 
     if strategy in ("Short Calls",):
         if iv_skew is not None and iv_skew < 0:
-            calls = [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot]
+            calls = [s for s in scored if s["type"] == "CALL" and s["strike"] < spot]
             if calls:
-                best = max(calls, key=_sell_key)
-                recs.append(
-                    f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-                    f"25Δ Skew {iv_skew:+.2%} (calls rich), VRP {best['vrp']:.1f}%."
-                )
+                best = max(calls, key=_rich)
+                _sel_vrp = _sel_exp_vrp(best)
+                _richness = _rich(best)
+                if _sel_vrp > 0 and _richness > 0:
+                    recs.append(
+                        f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
+                        f"25Δ Skew {iv_skew:+.2%} - Calls expensive; Sell Calls, "
+                        f"VRP {_sel_vrp:.1f}%, SSVI Richness {_richness * 100:+.2f}%."
+                    )
         elif iv_skew is not None:
             recs.append(f"25Δ Skew {iv_skew:+.2%} — calls not rich; skip Short Calls.")
         else:
@@ -260,13 +277,17 @@ def generate_recommendations(
 
     if strategy in ("Short Puts",):
         if iv_skew is not None and iv_skew > 0:
-            puts = [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot]
+            puts = [s for s in scored if s["type"] == "PUT" and s["strike"] > spot]
             if puts:
-                best = min(puts, key=_short_puts_key)
-                recs.append(
-                    f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-                    f"25Δ Skew {iv_skew:+.2%} (puts rich), VRP {best['vrp']:.1f}%."
-                )
+                best = min(puts, key=_rich)
+                _sel_vrp = _sel_exp_vrp(best)
+                _richness = _rich(best)
+                if _sel_vrp < 0 and _richness < 0:
+                    recs.append(
+                        f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
+                        f"25Δ Skew {iv_skew:+.2%} - Puts expensive; Sell Puts, "
+                        f"VRP {_sel_vrp:.1f}%, SSVI Richness {_richness * 100:+.2f}%."
+                    )
         elif iv_skew is not None:
             recs.append(f"25Δ Skew {iv_skew:+.2%} — puts not rich; skip Short Puts.")
         else:

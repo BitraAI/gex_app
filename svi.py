@@ -433,6 +433,22 @@ def _implied_vol_for_delta(
     return surface.iv(k, tte, ref_spot=s)
 
 
+def skew_for_tte(
+    surface: SSVISurface, tte: float, ref_spot: Optional[float] = None,
+) -> Optional[float]:
+    """SSVI-smoothed 25Δ skew (put25 IV − call25 IV) at a given tenor ``tte``."""
+    if surface is None or tte is None or tte <= 0:
+        return None
+    try:
+        put25 = _implied_vol_for_delta(surface, -0.25, tte, ref_spot=ref_spot)
+        call25 = _implied_vol_for_delta(surface, 0.25, tte, ref_spot=ref_spot)
+        if put25 is not None and call25 is not None:
+            return round(put25 - call25, 4)
+    except Exception:
+        return None
+    return None
+
+
 def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float = 0.0) -> dict[str, Any]:
     """Calibrate the SSVI surface from an option chain.
 
