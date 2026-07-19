@@ -94,10 +94,10 @@ The four directional strategies gate on the **selected-expiration 25Δ skew** an
 | **Long Puts** | Gate `iv_skew < 0` & selected-exp `VRP > 0`; strike PUT `< spot`, highest SSVI richness (pp) `> 0` | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
 | **Long LEAPS** | Same as Long Calls, but filtered to long-dated expirations (DTE 90–365) | delta 0.35–0.55, VRP<0, IR<0, DTE 90–365 |
 | **Call Debit Spread** | Buy lowest-strike call (score ≤ -0.5) / Sell highest-strike call, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
-| **Put Debit Spread** | Buy highest-strike put (score ≤ -0.5) / Sell lowest-strike put, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
-| **Long Straddles** | ATM call + put at same strike; buys if avg VRP negative (cheap), sells if avg VRP positive (rich) | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
-| **Long Strangles** | OTM call + put from the same expiration; buys if avg VRP negative, sells if positive | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
-| **Calendar Spread** | Sell front expiration / Buy back expiration at the same strike; selects the pair with the largest score difference | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Put Debit Spread** | Buy highest-strike put (score ≤ -0.5) / Sell lowest-strike put, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
+| **Long Straddles** | ATM call + put at same strike; buys if avg VRP negative (cheap), sells if avg VRP positive (rich) | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
+| **Long Strangles** | OTM call + put from the same expiration; buys if avg VRP negative, sells if positive | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
+| **Calendar Spread** | Sell front expiration / Buy back expiration at the same strike; selects the pair with the largest score difference | delta 0.35–0.55, VRP<0, IR<0, DTE 30–90 |
 
 ### Sell Premium strategies
 

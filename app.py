@@ -1778,7 +1778,10 @@ def _build_signals(
             sd2 = [e for e in sd2 if _sk < 0]
             sd2 = [e for e in sd2 if e["type"] == "PUT" and e["strike"] < spot]
         if stg != "Long LEAPS":
-            sd2 = [e for e in sd2 if 60 <= (e.get("days_to_exp", 0) or 0) <= 90]
+            if stg == "Calendar Spread":
+                sd2 = [e for e in sd2 if 30 <= (e.get("days_to_exp", 0) or 0) <= 90]
+            else:
+                sd2 = [e for e in sd2 if 60 <= (e.get("days_to_exp", 0) or 0) <= 90]
     else:
         sd2 = [e for e in sd2 if 0.15 <= abs(e.get("delta", 0)) <= 0.20]
         sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - rv > 0.05]
