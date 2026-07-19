@@ -29,9 +29,7 @@ The **IV Skew (25Δ)** metric itself is computed for the **selected expiration**
 
 `score_options()` in `signals.py:68` assigns each OTM/ATM option a numeric score. The same factors used for bias are applied per option to produce a score and signal.
 
-When an `ssvi_surface` is provided, two improvements activate:
-- **Smoothed IV**: the SSVI model IV replaces raw market IV for VRP calculation, filtering out price noise
-- **SSVI skew**: the SSVI-smoothed 25Δ skew replaces the raw market skew for per-option adjustment
+The VRP is computed as raw market IV minus RV. When an `ssvi_surface` is available, SSVI is used downstream in `generate_recommendations()` for per-strike richness comparison and strike selection (not in scoring itself).
 
 ### Per-strategy pre-filters
 
@@ -49,8 +47,8 @@ These filters apply to all strategies within each premium type.
 | **VRP < 0** | -1 (option cheap → buy) |
 | **Positive net GEX below spot** | -0.5 (dealer support below) |
 | **Negative net GEX above spot** | +0.5 (dealer resistance above) |
-| **Within 2% of call wall** | +0.5 | Resisting above → sell premium against resistance |
-| **Within 2% of put wall** | -0.5 | Supporting below → risky for short puts; lean buy premium |
+| **Within 2% of call wall** | +0.5 — Resisting above → sell premium against resistance |
+| **Within 2% of put wall** | -0.5 — Supporting below → risky for short puts; lean buy premium |
 | **IV Skew skew adjustment** | ±0.5 — see detail below |
 | **IV Rank > 70** | +0.5 (high rank → sell premium) |
 | **IV Rank < 30** | -0.5 (low rank → buy premium) |
@@ -73,7 +71,7 @@ These filters apply to all strategies within each premium type.
 
 The Trade Signals tab can scan **every ticker in `~/.local/share/gex_app/ticker_history.json`** by ticking "Scan all tickers in ticker_history.json" and pressing **Run scan**. Each ticker's option chain is fetched and run through the same scoring + recommendation pipeline (using the selected Premium Type and strategy), with results shown grouped per ticker. This is independent of the currently loaded symbol and does not alter the main session state.
 
-When an `ssvi_surface` is provided, the Iron Condor strategy uses SSVI-smoothed 25Δ put/call strikes (with 10Δ protection) instead of the raw market walls, giving more consistent risk/reward across different volatility regimes.
+When an `ssvi_surface` is provided, the IV Skew (25Δ) metric uses a fallback chain: market OTM quotes → SSVI-smoothed skew at the selected expiration's TTE → front expiration market skew.
 
 ### Selection logic (Long / Short Calls / Puts)
 
@@ -93,7 +91,7 @@ The four directional strategies gate on the **selected-expiration 25Δ skew** an
 | **Long Calls** | Gate `iv_skew > 0` & selected-exp `VRP < 0`; strike CALL `> spot`, lowest SSVI richness (pp) `< 0` | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
 | **Long Puts** | Gate `iv_skew < 0` & selected-exp `VRP > 0`; strike PUT `< spot`, highest SSVI richness (pp) `> 0` | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
 | **Long LEAPS** | Same as Long Calls, but filtered to long-dated expirations (DTE 90–365) | delta 0.35–0.55, VRP<0, IR<0, DTE 90–365 |
-| **Call Debit Spread** | Buy lowest-strike call (score ≤ -0.5) / Sell highest-strike call, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 20–45 |
+| **Call Debit Spread** | Buy lowest-strike call (score ≤ -0.5) / Sell highest-strike call, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
 | **Put Debit Spread** | Buy highest-strike put (score ≤ -0.5) / Sell lowest-strike put, same expiration | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
 | **Long Straddles** | ATM call + put at same strike; buys if avg VRP negative (cheap), sells if avg VRP positive (rich) | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
 | **Long Strangles** | OTM call + put from the same expiration; buys if avg VRP negative, sells if positive | delta 0.35–0.55, VRP<0, IR<0, DTE 60–90 |
@@ -107,7 +105,7 @@ The four directional strategies gate on the **selected-expiration 25Δ skew** an
 | **Short Puts** | Gate `iv_skew > 0` & selected-exp `VRP < 0`; strike PUT `> spot`, lowest SSVI richness (pp) `< 0` | delta 0.15–0.20, VRP>5pp, IR>0, DTE 30–45 |
 | **Call Credit Spread** | Sell lowest OTM call / Buy higher OTM call, same expiration; picks the pair with the highest avg score | delta 0.15–0.20, VRP>5pp, IR>0, DTE 30–45 |
 | **Put Credit Spread** | Sell highest OTM put / Buy lower OTM put, same expiration; picks the pair with the highest avg score | delta 0.15–0.20, VRP>5pp, IR>0, DTE 30–45 |
-| **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes (or SSVI 25Δ strikes when surface is available, falling back to highest-scored OTM strikes), with long protection legs beyond them (~10Δ when using SSVI). Falls back to symmetric wings if walls unavailable | delta 0.15–0.20, VRP>5pp, IR>0, DTE 30–45 |
+| **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes, with long protection legs at the highest-scored OTM strikes beyond them. Falls back to symmetric wings if walls unavailable | delta 0.15–0.20, VRP>5pp, IR>0, DTE 30–45 |
 | **Butterfly** | Buy one OTM put + one OTM call, sell 2× ATM body | delta 0.15–0.20, VRP>5pp, IR>0, DTE 30–45 |
 | **Broken Wing Butterfly (Calls)** | Buy lowest OTM call / Sell 2× middle call / Buy highest OTM call, where the upper wing is wider than the lower | delta 0.15–0.20, VRP>5pp, IR>0, DTE 30–45 |
 | **Jade Lizard** | Sell OTM put + Sell OTM call + Buy higher OTM call (protection), same expiration; picks the combo with the highest avg score | delta 0.15–0.20, VRP>5pp, IR>0, DTE 30–45 |
@@ -127,8 +125,8 @@ The four directional strategies gate on the **selected-expiration 25Δ skew** an
 
 ## Code reference
 
-- `signals.py` — Scoring, bias, and recommendation logic (SSVI-smoothed IV/Skew/Iron Condor strikes when surface is available, trading-day TTE for CEX/SSVI precision). Long/Short Calls/Puts gating and SSVI-richness strike selection at `signals.py:224`+.
+- `signals.py` — Scoring, bias, and recommendation logic (SSVI-smoothed skew for IV Skew metric, SSVI-based per-strike richness and strike selection in directional strategies, trading-day TTE for CEX/SSVI precision). Long/Short Calls/Puts gating and SSVI richness strike selection at `signals.py:224`+.
 - `analytics.py:167` — `_calculate_iv_skew()` computes the selected-expiration 25Δ skew from OTM strikes, with SSVI and front-expiration fallbacks.
-- `app.py:1799` — `render_trade_signals_frag()` renders the UI, applies per-strategy pre-filters and the selected-expiration restriction, and calls `score_options` + `generate_recommendations`.
+- `app.py:1812` — `render_trade_signals_frag()` renders the UI, applies per-strategy pre-filters and the selected-expiration restriction, and calls `score_options` + `generate_recommendations`.
 - `telegram_alerts.py:166` — `_build_strategy_alerts()` replicates the same filtering logic for standalone Telegram alert generation.
-- `app.py:560` — `_build_strategy_alerts()` in-app variant triggered by `check_alerts()` on data refresh.
+- `app.py:542` — `_build_strategy_alerts()` in-app variant triggered by `check_alerts()` on data refresh.
