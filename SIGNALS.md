@@ -29,8 +29,6 @@ The **IV Skew (25Δ)** metric itself is computed for the **selected expiration**
 
 The VRP is computed as raw market IV minus RV. When an `ssvi_surface` is available, SSVI is used downstream in `generate_recommendations()` for per-strike richness comparison and strike selection (not in scoring itself).
 
-**Pre-filters have been removed.** All filtering is now done inside each strategy's pipeline in `generate_recommendations()`.
-
 | Factor | Contribution |
 |---|---|
 | **VRP > 5pp** | +1 (option expensive → sell) |
@@ -62,7 +60,7 @@ When an `ssvi_surface` is provided, the IV Skew (25Δ) metric uses a fallback ch
 
 ### Selection logic (Long / Short Calls / Puts)
 
-Each directional strategy follows a multi-step pipeline. Pre-filters are no longer applied — all criteria are checked inside the strategy logic.
+Each directional strategy follows a multi-step pipeline. All criteria are checked inside the strategy logic.
 
 | Strategy | GEX Bias | Strike filter | DTE range | VRP selection | IV Skew gate | Delta filter | Strike pick | Display |
 |---|---|---|---|---|---|---|---|---|
@@ -85,7 +83,7 @@ Each directional strategy follows a multi-step pipeline. Pre-filters are no long
 |---|---|
 | **Long Calls** | GEX Bullish → OTM calls (`strike > spot`) DTE 30–45 → lowest-VRP expiration → IV skew `> 0` → `|Δ|` 0.35–0.55 → lowest (IV − SSVI IV) → `Buy Call @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
 | **Long Puts** | GEX Bearish → OTM puts (`strike < spot`) DTE 30–45 → lowest-VRP expiration → IV skew `< 0` → `|Δ|` 0.35–0.55 → lowest (IV − SSVI IV) → `Buy Put @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
-| **Long LEAPS** | Same as Long Calls, but DTE 90–365 (still uses pre-filter in `_build_signals`) |
+| **Long LEAPS** | Same as Long Calls, but DTE 90–365 (DTE filter applied in `_build_signals`) |
 | **Call Debit Spread** | Buy lowest-strike call (score ≤ -0.5) / Sell highest-strike call, same expiration |
 | **Put Debit Spread** | Buy highest-strike put (score ≤ -0.5) / Sell lowest-strike put, same expiration |
 | **Long Straddles** | ATM call + put at same strike; buys if avg VRP negative (cheap), sells if avg VRP positive (rich) |
@@ -111,10 +109,6 @@ Each directional strategy follows a multi-step pipeline. Pre-filters are no long
 - The strike range is limited by the sidebar's "Strikes around ATM" setting (default ±20 strikes).
 - All recommendations use same-expiration legs where applicable.
 - The IV Skew (25Δ) metric uses **OTM strikes only** (puts `strike < spot`, calls `strike > spot`) and reflects the **selected expiration**.
-- **Per-strategy pre-filters** (applied before scoring, removed from `sd2`):
-- **Buy Premium:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 60–90 — Long Calls: gate `iv_skew > 0` & selected-exp VRP `< 0`, strike CALL `> spot` (OTM), lowest SSVI richness; Long Puts: gate `iv_skew < 0` & selected-exp VRP `> 0`, strike PUT `< spot` (OTM), lowest SSVI richness
-- **Long LEAPS:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
-- **Sell Premium:** delta `|Δ|` 0.15–0.20, VRP > 0.05 (>5pp), IV Richness > 0, DTE 30–45 — Short Calls: gate `iv_skew < 0` & selected-exp VRP `> 0`, strike CALL `> spot` (OTM), highest SSVI richness; Short Puts: gate `iv_skew > 0` & selected-exp VRP `< 0`, strike PUT `< spot` (OTM), highest SSVI richness
 
 ---
 
@@ -122,6 +116,6 @@ Each directional strategy follows a multi-step pipeline. Pre-filters are no long
 
 - `signals.py` — Scoring, bias, and recommendation logic (SSVI-smoothed skew for IV Skew metric, SSVI-based per-strike richness and strike selection in directional strategies, trading-day TTE for CEX/SSVI precision). Directional strategies: Long Calls at `signals.py:225`, Long Puts at `signals.py:264`, Short Calls at `signals.py:303`, Short Puts at `signals.py:342`.
 - `analytics.py:167` — `_calculate_iv_skew()` computes the selected-expiration 25Δ skew from OTM strikes, with SSVI and front-expiration fallbacks.
-- `app.py:1812` — `render_trade_signals_frag()` renders the UI, applies per-strategy pre-filters and the selected-expiration restriction, and calls `score_options` + `generate_recommendations`.
+- `app.py:1812` — `render_trade_signals_frag()` renders the UI, applies the selected-expiration restriction, and calls `score_options` + `generate_recommendations`.
 - `telegram_alerts.py:166` — `_build_strategy_alerts()` replicates the same filtering logic for standalone Telegram alert generation.
 - `app.py:542` — `_build_strategy_alerts()` in-app variant triggered by `check_alerts()` on data refresh.
