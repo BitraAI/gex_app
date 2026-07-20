@@ -47,7 +47,7 @@ from calculations import (
     build_greeks_lookup,
 )
 from analytics import compute_analytics
-from signals import score_options, generate_recommendations, assess_market_bias
+from signals import generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import (
     _get_style,
@@ -550,8 +550,7 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
     ir_tte = _compute_ssvi_tte(dtes) if ssvi_surf and dtes else None
     bias, _ = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))
     alerts = []
-    sc = score_options(sd2, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
-    recs = generate_recommendations(sc, spot, strategy="All", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias)
+    recs = generate_recommendations(sd2, spot, strategy="All", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias)
     recs = [r for r in recs if "No strong" not in r and "skip" not in r]
     if recs:
         alerts.append("Trade Signals:")
@@ -1745,8 +1744,7 @@ def _build_signals(
         sd2 = [e for e in sd2 if e["type"] == "PUT"]
 
     bias, _ = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))
-    sc = score_options(sd2, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), iv_rank=analytics.get("iv_rank"))
-    rc = generate_recommendations(sc, spot, strategy=_rec_stg, all_data=sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte, bias=bias)
+    rc = generate_recommendations(sd2, spot, strategy=_rec_stg, all_data=sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte, bias=bias)
     return rc
 
 
@@ -1774,7 +1772,7 @@ def render_trade_signals_frag():
         if not s.get("strikes"):
             return
         with st.expander("How to read these signals", expanded=False):
-            st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+2% option expensive. &lt;-2% option cheap.\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where the latest daily return ranks in the trailing 52-week range of daily returns. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Scoring** &mdash; Sell Premium (>= +1), Buy Premium (<= -1), Neutral.\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
+            st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+2% option expensive (sell premium). &lt;-2% option cheap (buy premium).\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where the latest daily return ranks in the trailing 52-week range of daily returns. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
 
         scan_all = st.checkbox("Scan all tickers in ticker_history.json", value=False, key="scan_all_tickers")
 

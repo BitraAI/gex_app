@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 
 def assess_market_bias(
@@ -65,97 +65,15 @@ def assess_market_bias(
     return bias, "; ".join(reasons)
 
 
-def score_options(
-    data: list[dict[str, Any]],
-    spot: float,
-    rv: float,
-    call_wall: Optional[float] = None,
-    put_wall: Optional[float] = None,
-    iv_skew: Optional[float] = None,
-    iv_rank: float | None = None,
-) -> list[dict[str, Any]]:
-    gex_per_strike: dict[float, float] = {}
-    for e in data:
-        gex_per_strike[e["strike"]] = gex_per_strike.get(e["strike"], 0) + (e.get("gex", 0) or 0)
-
-    scored = []
-    for e in data:
-        sk = e["strike"]
-        opt_type = e["type"]
-        iv = e.get("iv", 0) or 0
-        if iv > 3:
-            iv = iv / 100
-        vrp = iv - rv
-        net_gex = gex_per_strike.get(sk, 0)
-
-        dist_to_call_wall = (call_wall - sk) if call_wall else None
-        dist_to_put_wall = (sk - put_wall) if put_wall else None
-
-        score = 0.0
-        reasons = []
-
-        if vrp > 0.02:
-            score += 1
-            reasons.append("VRP rich → sell")
-        elif vrp < -0.02:
-            score -= 1
-            reasons.append("VRP cheap → buy")
-
-        if net_gex > 0 and sk < spot:
-            score -= 0.5
-            reasons.append("Dealer support below")
-        elif net_gex < 0 and sk > spot:
-            score += 0.5
-            reasons.append("Dealer resistance above")
-
-        if dist_to_call_wall is not None and 0 < dist_to_call_wall < spot * 0.02:
-            score += 0.5
-            reasons.append("Near call wall")
-        if dist_to_put_wall is not None and 0 < dist_to_put_wall < spot * 0.02:
-            score -= 0.5
-            reasons.append("Near put wall")
-
-        if iv_rank is not None:
-            if iv_rank > 70:
-                score += 0.5
-                reasons.append(f"IV Rank high ({iv_rank:.0f}%) → sell premium")
-            elif iv_rank < 30:
-                score -= 0.5
-                reasons.append(f"IV Rank low ({iv_rank:.0f}%) → buy premium")
-
-        if iv_skew is not None:
-            if iv_skew > 0 and opt_type == "CALL":
-                score -= 0.5
-                reasons.append(f"25Δ skew +{iv_skew:.1%} → calls cheap")
-            elif iv_skew < 0 and opt_type == "PUT":
-                score += 0.5
-                reasons.append(f"25Δ skew {iv_skew:.1%} → puts cheap")
-
-        if score >= 1:
-            signal = "Sell Premium"
-        elif score <= -1:
-            signal = "Buy Premium"
-        else:
-            signal = "Neutral"
-
-        ep = e["expiration"]
-        scored.append({
-            "strike": sk,
-            "expiration": f"{ep[-5:]}",
-            "type": opt_type,
-            "vrp": round(vrp * 100, 1),
-            "price": round(e.get("mark", 0) or 0, 2),
-            "oi": e.get("open_interest", 0) or 0,
-            "net_gex": net_gex,
-            "score": round(score, 1),
-            "signal": signal,
-            "reasons": "; ".join(reasons) if reasons else "",
-        })
-    return scored
+def _option_vrp(opt: dict[str, Any], rv: float) -> float:
+    iv = opt.get("iv", 0) or 0
+    if iv > 3:
+        iv = iv / 100
+    return round((iv - rv) * 100, 1)
 
 
 def generate_recommendations(
-    scored: list[dict[str, Any]],
+    options: list[dict[str, Any]],
     spot: float,
     strategy: str = "All",
     all_data: list[dict[str, Any]] | None = None,
@@ -169,13 +87,16 @@ def generate_recommendations(
 ) -> list[str]:
     recs = []
 
+    # Normalize raw option data, enriching each entry with a VRP (in pp).
+    scored = [{**o, "vrp": _option_vrp(o, rv)} for o in options]
+
     sell_candidates = sorted(
-        [s for s in scored if s["score"] >= 1],
-        key=lambda s: s["score"], reverse=True,
+        [s for s in scored if s["vrp"] >= 2],
+        key=lambda s: s["vrp"], reverse=True,
     )
     buy_candidates = sorted(
-        [s for s in scored if s["score"] <= -1],
-        key=lambda s: s["score"],
+        [s for s in scored if s["vrp"] <= -2],
+        key=lambda s: s["vrp"],
     )
 
     # Expiration-level VRP — represent each expiration by the VRP of the option
@@ -380,7 +301,7 @@ def generate_recommendations(
 
     if strategy in ("Call Debit Spread",):
         calls = sorted(
-            [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot and s["score"] <= -0.5],
+            [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot and s["vrp"] <= 0],
             key=lambda s: s["strike"],
         )
         if len(calls) >= 2:
@@ -394,7 +315,7 @@ def generate_recommendations(
 
     if strategy in ("Put Debit Spread",):
         puts = sorted(
-            [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot and s["score"] <= -0.5],
+            [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot and s["vrp"] <= 0],
             key=lambda s: s["strike"], reverse=True,
         )
         if len(puts) >= 2:
@@ -431,7 +352,7 @@ def generate_recommendations(
     if strategy in ("Call Credit Spread",):
         calls_by_exp = {}
         for s in scored:
-            if s["type"] == "CALL" and s["strike"] >= spot and s["score"] >= 0.5:
+            if s["type"] == "CALL" and s["strike"] >= spot and s["vrp"] >= 0:
                 calls_by_exp.setdefault(s["expiration"], []).append(s)
         best = None
         for exp, opts in calls_by_exp.items():
@@ -439,9 +360,9 @@ def generate_recommendations(
             if len(opts_sorted) >= 2:
                 short, long_call = opts_sorted[0], opts_sorted[-1]
                 width = long_call["strike"] - short["strike"]
-                avg_score = (short["score"] + long_call["score"]) / 2
-                if best is None or avg_score > best[0]:
-                    best = (avg_score, short, long_call, width, exp)
+                avg_vrp = (short["vrp"] + long_call["vrp"]) / 2
+                if best is None or avg_vrp > best[0]:
+                    best = (avg_vrp, short, long_call, width, exp)
         if best:
             _, short, long_call, width, exp = best
             recs.append(
@@ -452,7 +373,7 @@ def generate_recommendations(
     if strategy in ("Put Credit Spread",):
         puts_by_exp = {}
         for s in scored:
-            if s["type"] == "PUT" and s["strike"] <= spot and s["score"] >= 0.5:
+            if s["type"] == "PUT" and s["strike"] <= spot and s["vrp"] >= 0:
                 puts_by_exp.setdefault(s["expiration"], []).append(s)
         best = None
         for exp, opts in puts_by_exp.items():
@@ -460,9 +381,9 @@ def generate_recommendations(
             if len(opts_sorted) >= 2:
                 short, long_put = opts_sorted[0], opts_sorted[-1]
                 width = short["strike"] - long_put["strike"]
-                avg_score = (short["score"] + long_put["score"]) / 2
-                if best is None or avg_score > best[0]:
-                    best = (avg_score, short, long_put, width, exp)
+                avg_vrp = (short["vrp"] + long_put["vrp"]) / 2
+                if best is None or avg_vrp > best[0]:
+                    best = (avg_vrp, short, long_put, width, exp)
         if best:
             _, short, long_put, width, exp = best
             recs.append(
@@ -517,12 +438,12 @@ def generate_recommendations(
         else:
             puts_otm = sorted(
                 [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot
-                 and s["score"] >= 0.5 and s["vrp"] > 0],
+                 and s["vrp"] >= 0],
                 key=lambda s: s["strike"],
             )
             calls_otm = sorted(
                 [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot
-                 and s["score"] >= 0.5 and s["vrp"] > 0],
+                 and s["vrp"] >= 0],
                 key=lambda s: s["strike"],
             )
             if puts_otm and calls_otm:
@@ -577,17 +498,16 @@ def generate_recommendations(
         best = None
         groups = {}
         for s in scored:
-            if abs(s["score"]) >= 0.5:
-                key = (s["type"], s["strike"])
-                groups.setdefault(key, []).append(s)
+            key = (s["type"], s["strike"])
+            groups.setdefault(key, []).append(s)
         for (typ, sk), opts in groups.items():
             opts_sorted = sorted(opts, key=lambda s: s["expiration"])
             if len(opts_sorted) >= 2:
                 front, back = opts_sorted[0], opts_sorted[-1]
                 if front["expiration"] != back["expiration"]:
-                    spread_score = front["score"] - back["score"]
-                    if best is None or spread_score > best[0]:
-                        best = (spread_score, front, back)
+                    spread_vrp = front["vrp"] - back["vrp"]
+                    if best is None or spread_vrp > best[0]:
+                        best = (spread_vrp, front, back)
         if best:
             _, front, back = best
             recs.append(
@@ -698,9 +618,9 @@ def generate_recommendations(
                 gap1 = body["strike"] - lower["strike"]
                 gap2 = upper["strike"] - body["strike"]
                 if gap2 > gap1:
-                    avg_score = (lower["score"] + body["score"] + upper["score"]) / 3
-                    if best is None or avg_score > best[0]:
-                        best = (avg_score, lower, body, upper, gap1, gap2, exp)
+                    avg_vrp = (lower["vrp"] + body["vrp"] + upper["vrp"]) / 3
+                    if best is None or avg_vrp > best[0]:
+                        best = (avg_vrp, lower, body, upper, gap1, gap2, exp)
         if best:
             _, lower, body, upper, gap1, gap2, exp = best
             recs.append(
@@ -720,7 +640,7 @@ def generate_recommendations(
             for put_short in puts_otm:
                 if put_short["expiration"] != call_short["expiration"]:
                     continue
-                score = (call_short["score"] + put_short["score"]) / 2
+                score = (call_short["vrp"] + put_short["vrp"]) / 2
                 if best is None or score > best[0]:
                     best = (score, call_short, call_protect, put_short)
         if best:
