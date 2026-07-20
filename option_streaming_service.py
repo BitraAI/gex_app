@@ -125,6 +125,11 @@ class AtmOptionVolumeService:
         self._ticks_received = 0
         self._resubscribes = 0
 
+        # Timestamp (time.time()) of the last tick processed by _option_handler.
+        # Used by the Order Flow watchdog to detect a silently dead feed.
+        import time as _time_mod
+        self._last_tick_time: float = _time_mod.time()
+
         # Track the last set of skipped (unknown-spot) tickers so the
         # "skipped N ticker(s)" notice is only printed when the set changes,
         # not on every re-subscribe.
@@ -265,6 +270,12 @@ class AtmOptionVolumeService:
             self._sym_to_ticker.clear()
             self._last_sub_ok_set = None
 
+            # Reset the watchdog timestamp so it doesn't immediately fire
+            # again after this re-registration.  The flow needs time to
+            # re-subscribe and start receiving ticks.
+            import time as _time_mod
+            self._last_tick_time = _time_mod.time()
+
         self._symbol = symbol
         self._expiration = expiration
         self._stream_client = stream_client
@@ -326,6 +337,14 @@ class AtmOptionVolumeService:
         self._subscribed_call_sym = None
         self._subscribed_put_sym = None
         self._stream_client = None
+
+    def is_feed_stale(self, max_age_seconds: float = 60.0) -> bool:
+        """Return True if no option ticks have been received for
+        *max_age_seconds*.  Used by the Order Flow watchdog to detect a
+        silently dead WebSocket subscription."""
+        import time as _time_mod
+        with self._lock:
+            return (_time_mod.time() - self._last_tick_time) > max_age_seconds
 
     # ------------------------------------------------------------------ #
     # Per-ticker flow tracking API
@@ -454,16 +473,25 @@ class AtmOptionVolumeService:
         """Set spot prices for multiple tickers at once and trigger a single
         re-subscription.  Avoids the race where per-ticker update_ticker_spot
         calls each schedule separate _do_subscribe coroutines that run before
-        all spots are set."""
+        all spots are set.
+
+        Only triggers re-subscription if at least one spot actually changed
+        by more than 0.1%, so calling this every 2 seconds from
+        ensure_atm_streaming does NOT spam the Schwab server with redundant
+        subscription requests."""
         sc = None
+        _spot_changed = False
         with self._lock:
             for display_symbol, spot in spot_map.items():
                 ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
                 if ticker is not None:
+                    old = ticker["spot"]
                     ticker["spot"] = spot
+                    if abs(spot - old) / max(old, 1) > 0.001:
+                        _spot_changed = True
             if self._running and self._expiration:
                 sc = self._stream_client
-        if sc is not None:
+        if sc is not None and _spot_changed:
             asyncio.run_coroutine_threadsafe(
                 self._do_subscribe(sc), self._loop,
             )
@@ -498,6 +526,8 @@ class AtmOptionVolumeService:
                     continue
 
                 self._ticks_received += 1
+                import time as _time_mod
+                self._last_tick_time = _time_mod.time()
 
                 bid = c.get("BID_PRICE")
                 ask = c.get("ASK_PRICE")
@@ -622,6 +652,21 @@ class AtmOptionVolumeService:
         if not all_symbols:
             return
 
+        # Deduplicate: skip the subscription request if the symbol set
+        # is identical to the last successful one.  Sending redundant
+        # subscription requests every 2 s causes the Schwab server to
+        # rate-limit and silently drop the feed.
+        _new_set = frozenset(all_symbols)
+        if _new_set == self._last_sub_ok_set and not getattr(self, "_needs_reconnect", False):
+            # Symbols unchanged — still update primary tracking vars
+            # from the rebuilt _ticker_flows entry.
+            with self._lock:
+                primary_info = self._ticker_flows.get(self._symbol)
+                if primary_info:
+                    self._subscribed_call_sym = primary_info.get("call_sym")
+                    self._subscribed_put_sym = primary_info.get("put_sym")
+            return
+
         try:
             await sc.level_one_option_subs(all_symbols)
             self._needs_reconnect = False
@@ -649,7 +694,7 @@ class AtmOptionVolumeService:
             )
             return
 
-        _ok_set = frozenset(all_symbols)
+        _ok_set = _new_set
         if _ok_set != self._last_sub_ok_set:
             print(
                 f"[AtmOptionVolumeService] _do_subscribe OK: "
