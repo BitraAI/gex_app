@@ -129,10 +129,12 @@ class AtmOptionVolumeService:
         # "skipped N ticker(s)" notice is only printed when the set changes,
         # not on every re-subscribe.
         self._last_skipped_no_spot = None
+        self._last_sub_ok_set = None
 
         # Per-ticker flow tracking (all tracked tickers including primary)
-        # _ticker_flows: display_symbol -> {stream_symbol, spot, call_sym, put_sym,
-        #   call_bid, call_ask, put_bid, put_ask, bullish, bearish}
+        # _ticker_flows: display_symbol -> {stream_symbol, spot, atm_strike,
+        #   call_sym, put_sym, call_bid, call_ask, put_bid, put_ask,
+        #   bullish, bearish}
         self._ticker_flows: dict[str, dict] = {}
         # Reverse lookup: option_symbol -> display_symbol
         self._sym_to_ticker: dict[str, str] = {}
@@ -256,6 +258,7 @@ class AtmOptionVolumeService:
             self._subscribed_put_sym = None
             self._ticker_flows.clear()
             self._sym_to_ticker.clear()
+            self._last_sub_ok_set = None
 
         self._symbol = symbol
         self._expiration = expiration
@@ -290,6 +293,7 @@ class AtmOptionVolumeService:
                 self._ticker_flows[sym] = {
                     "stream_symbol": stream_sym,
                     "spot": 0.0,
+                    "atm_strike": 0.0,
                     "call_sym": None,
                     "put_sym": None,
                     "call_bid": None,
@@ -329,6 +333,7 @@ class AtmOptionVolumeService:
             self._ticker_flows[display_symbol] = {
                 "stream_symbol": stream_symbol,
                 "spot": spot,
+                "atm_strike": 0.0,
                 "call_sym": None,
                 "put_sym": None,
                 "call_bid": None,
@@ -373,6 +378,49 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return None, None
             return ticker["bullish"], ticker["bearish"]
+
+    def get_ticker_option_prices(self, display_symbol: str) -> dict:
+        """Return {call_price, put_price} mid-market for a tracked ticker,
+        or {} if not tracked.  Returns bid/ask mid if both sides are
+        available, else the single available side."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return {}
+            result = {}
+            cb, ca = ticker.get("call_bid"), ticker.get("call_ask")
+            if cb is not None and ca is not None and ca > 0:
+                result["call_price"] = round((cb + ca) / 2, 2)
+            elif cb is not None:
+                result["call_price"] = round(cb, 2)
+            elif ca is not None:
+                result["call_price"] = round(ca, 2)
+            pb, pa = ticker.get("put_bid"), ticker.get("put_ask")
+            if pb is not None and pa is not None and pa > 0:
+                result["put_price"] = round((pb + pa) / 2, 2)
+            elif pb is not None:
+                result["put_price"] = round(pb, 2)
+            elif pa is not None:
+                result["put_price"] = round(pa, 2)
+            return result
+
+    def get_ticker_spot(self, display_symbol: str) -> float | None:
+        """Return the live spot price for a tracked ticker,
+        or None if not tracked / no spot known yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None or ticker["spot"] <= 0:
+                return None
+            return ticker["spot"]
+
+    def get_ticker_atm_strike(self, display_symbol: str) -> float | None:
+        """Return the front-expiration ATM strike for a tracked ticker,
+        or None if not tracked / no spot known yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None or ticker["atm_strike"] <= 0:
+                return None
+            return ticker["atm_strike"]
 
     def update_ticker_spot(self, display_symbol: str, spot: float):
         """Update the spot price for a tracked ticker and trigger re-subscription
@@ -541,6 +589,7 @@ class AtmOptionVolumeService:
                 all_symbols.append(put_sym)
                 info["call_sym"] = call_sym
                 info["put_sym"] = put_sym
+                info["atm_strike"] = atm
                 # For SPX/RUT/NDX index options the display symbol
                 # (e.g. "$SPX") differs from the ETF proxy used as the
                 # stream symbol ("SPY"). Map back to the *display* symbol
@@ -580,11 +629,14 @@ class AtmOptionVolumeService:
             )
             return
 
-        print(
-            f"[AtmOptionVolumeService] _do_subscribe OK: "
-            f"subscribed {len(all_symbols)} option symbols "
-            f"({len(tickers) - len(skipped_no_spot)} ticker(s))"
-        )
+        _ok_set = frozenset(all_symbols)
+        if _ok_set != self._last_sub_ok_set:
+            print(
+                f"[AtmOptionVolumeService] _do_subscribe OK: "
+                f"subscribed {len(all_symbols)} option symbols "
+                f"({len(tickers) - len(skipped_no_spot)} ticker(s))"
+            )
+            self._last_sub_ok_set = _ok_set
 
         # Update primary subscribed symbols for backward compatibility
         with self._lock:

@@ -121,8 +121,15 @@ def render_atm_order_flow_grid():
         else:
             status = "Cached"
         net = (bullish - bearish) if has_data else None
+        opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
+        atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
+        spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
         rows.append({
             "Ticker": t_upper,
+            "Spot": spot,
+            "ATM Strike": atm_strike,
+            "Call Price": opt_prices.get("call_price"),
+            "Put Price": opt_prices.get("put_price"),
             "Bullish Flow": bullish if has_data else 0,
             "Bearish Flow": bearish if has_data else 0,
             "Net Flow": net if has_data else 0,
@@ -181,6 +188,10 @@ def render_atm_order_flow_grid():
         _styler = _styler.applymap(_status_color, subset=["Status"])
         _styler = _styler.applymap(_net_flow_color, subset=["Net Flow"])
     styled = _styler.format({
+        "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
+        "ATM Strike": lambda v: f"${v:,.2f}" if v is not None else "",
+        "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
+        "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Bullish Flow": "{:,.0f}",
         "Bearish Flow": "{:,.0f}",
         "Net Flow": "{:,.0f}",
