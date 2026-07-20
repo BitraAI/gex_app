@@ -11,6 +11,11 @@ tracked ticker:
 | Column | Meaning |
 | --- | --- |
 | **Ticker** | Display symbol (index symbols like `SPX` kept as-is; streamed via ETF proxy `SPY`/`IWM`/`QQQ`). |
+| **Spot** | Latest spot price (REST pre-fetch or live equity stream). |
+| **ATM Strike** | Nearest strike to spot, computed by `calculate_atm_strike` (strike spacing by price band). |
+| **Trend** | Direction of net flow momentum over the last 60 seconds (see below). |
+| **Call Price** | Mid price of the ATM call option. |
+| **Put Price** | Mid price of the ATM put option. |
 | **Bullish Flow** | Cumulative option volume classified as bullish. |
 | **Bearish Flow** | Cumulative option volume classified as bearish. |
 | **Net Flow** | `Bullish − Bearish`. Green when positive, red when negative, grey when zero. |
@@ -29,6 +34,24 @@ updates every 2 seconds.
 | **No Data** | No flow received yet for this ticker. | Grey |
 
 Market-hours detection lives in `flow_page.is_market_open()`.
+
+### Trend
+
+Trend reflects the **direction of net-flow momentum** over the last 60 seconds,
+not the absolute level. It is computed in `AtmOptionVolumeService._snapshot_flow`
+(option_streaming_service.py:742) and exposed via `get_ticker_trend`.
+
+How it works:
+
+1. Every ~10 trades, a snapshot of `(timestamp, net_flow)` is appended to a
+   per-ticker `flow_history` list.
+2. Snapshots older than 60 seconds are pruned.
+3. If fewer than 4 snapshots exist the trend is **flat** (not enough data).
+4. The history is split in half. The average net flow of the older half is
+   compared to the average of the newer half:
+   - `newer_avg > older_avg` → **up** (green arrow)
+   - `newer_avg < older_avg` → **down** (red arrow)
+   - equal → **flat** (grey arrow)
 
 ## Data pipeline
 
@@ -81,7 +104,7 @@ automatically via `ensure_atm_streaming`.
 
 | File | Role |
 | --- | --- |
-| `flow_page.py` | Shared rendering: `render_atm_order_flow_grid`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. |
+| `flow_page.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. |
 | `option_streaming_service.py` | `AtmOptionVolumeService` — WebSocket handling, Lee-Ready classification, per-ticker flow. |
 | `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. |
 | `client.py` | `fetch_quotes` — REST spot pre-fetch for all tickers. |

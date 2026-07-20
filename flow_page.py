@@ -5,10 +5,23 @@ Kept free of any st.set_page_config / global app setup so it can be imported
 safely from either entry point without re-running app.py's top-level code.
 """
 
+import asyncio
 import pandas as pd
 import streamlit as st
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+
+def _ensure_async_loop() -> asyncio.AbstractEventLoop:
+    """Get or create the shared asyncio event loop (must match app.py)."""
+    _ASYNC_LOOP = getattr(_ensure_async_loop, "_loop", None)
+    if _ASYNC_LOOP is None:
+        import threading
+        _ASYNC_LOOP = asyncio.new_event_loop()
+        t = threading.Thread(target=_ASYNC_LOOP.run_forever, daemon=True)
+        t.start()
+        _ensure_async_loop._loop = _ASYNC_LOOP
+    return _ASYNC_LOOP
 
 
 def is_market_open() -> bool:
@@ -71,10 +84,35 @@ def update_flow_cache():
 
     tracked = atm_svc.tracked_tickers()
     _spot_map = {}
+    _need_fetch = []
     for t_sym in tracked:
         t_upper = t_sym.upper().lstrip("$")
         if t_upper in s.spot_cache:
             _spot_map[t_upper] = s.spot_cache[t_upper]
+        else:
+            svc_spot = atm_svc.get_ticker_spot(t_upper)
+            if svc_spot is not None and svc_spot > 0:
+                _spot_map[t_upper] = svc_spot
+            else:
+                _need_fetch.append(t_upper)
+    # Fetch missing spots via REST
+    if _need_fetch and s.get("client"):
+        try:
+            from client import fetch_quotes
+            _stream_map = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
+            _fetch_syms = [_stream_map.get(sym, sym) for sym in _need_fetch]
+            loop = _ensure_async_loop()
+            fut = asyncio.run_coroutine_threadsafe(fetch_quotes(s.client, _fetch_syms), loop)
+            quote_resp = fut.result()
+            for disp_sym, _sym in zip(_need_fetch, _fetch_syms):
+                qd = quote_resp.get(_sym, {}) or {}
+                quote = qd.get("quote", {}) or qd.get(_sym, {})
+                last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                if last is not None and float(last) > 0:
+                    _spot_map[disp_sym] = float(last)
+                    s.spot_cache[disp_sym] = float(last)
+        except Exception:
+            pass
     if _spot_map:
         atm_svc.bulk_update_spots(_spot_map)
 
@@ -85,12 +123,55 @@ def update_flow_cache():
                 s.flow_cache[t_sym] = {"bullish": bf, "bearish": brf}
 
 
+_STATUS_COLORS = {
+    "Live": "#00cc96",
+    "Closed": "#E69500",
+    "Cached": "#1E90FF",
+    "No Data": "#808080",
+}
+
+
+def render_flow_legend_and_style():
+    """Render the static legend and dataframe style block for the Order Flow grid.
+
+    Called once per outer-fragment tick (every ~10 s) instead of every 2 s
+    to prevent HTML-DOM flicker caused by re-injecting the same markup.
+    """
+    _items = list(_STATUS_COLORS.items())
+    _legend_html = "".join(
+        f'<span style="display:inline-flex;align-items:center;'
+        f'margin-left:16px;">'
+        f'<span style="font-size:25px;line-height:25px;'
+        f'color:{c};margin-right:6px;">\u25cf</span>{name}</span>'
+        for name, c in _items
+    )
+    st.markdown(
+        f'<div style="margin-bottom:8px;font-size:0.9rem;display:flex;'
+        f'justify-content:flex-end;">{_legend_html}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("""
+    <style>
+    div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
+    div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 def render_atm_order_flow_grid():
     """Render the ATM Order Flow as a Streamlit dataframe (mirrors the style of
     the main app's Options Data table): one row per tracked ticker with
     Bullish / Bearish flow, a coloured Status cell, and formatted numbers.
 
     Used by the Order Flow tab in the main app (wrapped in a refresh fragment).
+    The legend and CSS style are rendered separately via
+    ``render_flow_legend_and_style`` so they are not re-injected every tick.
+
+    The styled DataFrame is cached in session state and only rebuilt when the
+    underlying data actually changes.  A fixed Styler UUID prevents pandas
+    from generating unique CSS class names per instance, which would cause
+    Streamlit to see a "change" and re-render the DOM even when the data
+    is identical.
     """
     s = st.session_state
     current_sym = s.get("symbol", "").upper().lstrip("$")
@@ -124,10 +205,12 @@ def render_atm_order_flow_grid():
         opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
         atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
         spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
+        trend = atm_svc.get_ticker_trend(t_upper) if atm_svc else "flat"
         rows.append({
             "Ticker": t_upper,
             "Spot": spot,
             "ATM Strike": atm_strike,
+            "Trend": trend,
             "Call Price": opt_prices.get("call_price"),
             "Put Price": opt_prices.get("put_price"),
             "Bullish Flow": bullish if has_data else 0,
@@ -140,38 +223,27 @@ def render_atm_order_flow_grid():
         st.info("No tickers tracked yet. Add tickers on the main GammaEx page first.")
         return
 
+    # Hash the row data to detect whether anything actually changed.
+    data_key = tuple(
+        (r["Ticker"], r["Spot"], r["ATM Strike"], r["Trend"],
+         r["Call Price"], r["Put Price"], r["Bullish Flow"],
+         r["Bearish Flow"], r["Net Flow"], r["Status"])
+        for r in rows
+    )
+    data_hash = hash(data_key)
+
+    cached_hash = s.get("_flow_styled_hash")
+    cached_styled = s.get("_flow_styled")
+    if data_hash == cached_hash and cached_styled is not None:
+        st.dataframe(cached_styled, height=700, width="stretch")
+        return
+
     df = pd.DataFrame(rows)
 
-    # Static colour key for the Status column (non-interactive legend).
-    _status_colors = {
-        "Live": "#00cc96",
-        "Closed": "#E69500",
-        "Cached": "#1E90FF",
-        "No Data": "#808080",
-    }
-    _items = list(_status_colors.items())
-    _legend_html = "".join(
-        f'<span style="display:inline-flex;align-items:center;'
-        f'margin-left:16px;">'
-        f'<span style="font-size:25px;line-height:25px;'
-        f'color:{c};margin-right:6px;">\u25cf</span>{name}</span>'
-        for name, c in _items
-    )
-    st.markdown(
-        f'<div style="margin-bottom:8px;font-size:0.9rem;display:flex;'
-        f'justify-content:flex-end;">{_legend_html}</div>',
-        unsafe_allow_html=True,
-    )
-
-    # Status column shows the colour-key only (no background fill, no text).
-    # The cell background is white/transparent and holds a centered coloured
-    # dot; the text is hidden so only the colour conveys status (see legend).
     def _status_color(val):
-        color = _status_colors.get(val, "#808080")
+        color = _STATUS_COLORS.get(val, "#808080")
         return f"color: {color}; font-size: 25px; text-align: center;"
 
-    # Net Flow colouring: green when net bullish, red when net bearish,
-    # neutral grey when zero.  Colour the text so the row stays readable.
     def _net_flow_color(val):
         if val > 0:
             return "color: #00cc96; font-weight: bold;"
@@ -179,17 +251,25 @@ def render_atm_order_flow_grid():
             return "color: #ef5350; font-weight: bold;"
         return "color: #808080;"
 
-    _styler = df.style
-    # pandas >= 2.1 renamed Styler.applymap -> Styler.map; support both.
+    def _trend_color(val):
+        return {
+            "up": "color: #00cc96; font-weight: bold;",
+            "down": "color: #ef5350; font-weight: bold;",
+        }.get(val, "color: #808080;")
+
+    _styler = df.style.set_uuid("flow_grid")
     if hasattr(_styler, "map"):
         _styler = _styler.map(_status_color, subset=["Status"])
         _styler = _styler.map(_net_flow_color, subset=["Net Flow"])
+        _styler = _styler.map(_trend_color, subset=["Trend"])
     else:
         _styler = _styler.applymap(_status_color, subset=["Status"])
         _styler = _styler.applymap(_net_flow_color, subset=["Net Flow"])
+        _styler = _styler.applymap(_trend_color, subset=["Trend"])
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
         "ATM Strike": lambda v: f"${v:,.2f}" if v is not None else "",
+        "Trend": lambda v: {"up": "↑", "down": "↓", "flat": "→"}.get(v, "→"),
         "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Bullish Flow": "{:,.0f}",
@@ -198,10 +278,6 @@ def render_atm_order_flow_grid():
         "Status": lambda v: "\u25cf",
     })
 
-    st.markdown("""
-    <style>
-    div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
-    div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
-    </style>
-    """, unsafe_allow_html=True)
+    s._flow_styled_hash = data_hash
+    s._flow_styled = styled
     st.dataframe(styled, height=700, width="stretch")
