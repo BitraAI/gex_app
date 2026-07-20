@@ -2083,6 +2083,9 @@ def _flow_grid():
     Defined at module level (not nested inside render_flow_frag) so its
     identity is stable across parent-fragment re-runs and it is not
     destroyed / recreated every 10 s by render_tabs_frag.
+
+    Includes a watchdog: if no option ticks arrive for 60 s while the
+    market is open, the feed is assumed dead and a reconnection is forced.
     """
     s = st.session_state
     if not s.get("client"):
@@ -2090,6 +2093,17 @@ def _flow_grid():
     stream_symbol = s.get("symbol", "SPY").upper().lstrip("$")
     _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
     mapped = _STREAM_SYMBOL_MAP.get(stream_symbol, stream_symbol)
+
+    # Watchdog: detect a silently dead option feed.  If the market is
+    # open and no ticks have arrived for 60 s, force re-registration
+    # so the next ensure_atm_streaming cycle re-subscribes everything.
+    from flow_page import is_market_open
+    atm_svc = s.get("atm_option_service")
+    if atm_svc and is_market_open() and atm_svc.is_running:
+        if atm_svc.is_feed_stale(max_age_seconds=60):
+            print("[_flow_grid] watchdog: feed stale >60 s, forcing reconnect")
+            atm_svc._needs_reconnect = True
+
     ensure_atm_streaming(mapped)
     render_atm_order_flow_grid()
 
