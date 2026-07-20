@@ -210,12 +210,12 @@ def render_atm_order_flow_grid():
             "Ticker": t_upper,
             "Spot": spot,
             "ATM Strike": atm_strike,
-            "Trend": trend,
             "Call Price": opt_prices.get("call_price"),
             "Put Price": opt_prices.get("put_price"),
             "Bullish Flow": bullish if has_data else 0,
             "Bearish Flow": bearish if has_data else 0,
             "Net Flow": net if has_data else 0,
+            "Trend": trend,
             "Status": status,
         })
 
