@@ -69,7 +69,7 @@ Each directional strategy follows a multi-step pipeline. Pre-filters are no long
 | **Long Calls** | Bullish | `CALL strike > spot` (OTM) | 30–45 | lowest VRP across expirations | `> 0` | `|Δ| 0.35–0.55` | lowest (IV − SSVI IV) | `Buy Call @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
 | **Long Puts** | Bearish | `PUT strike < spot` (OTM) | 30–45 | lowest VRP across expirations | `< 0` | `|Δ| 0.35–0.55` | lowest (IV − SSVI IV) | `Buy Put @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
 | **Short Calls** | Bearish | `CALL strike > spot` (OTM) | 30–45 | highest VRP across expirations | `< 0` | `|Δ| 0.15–0.20` | highest (IV − SSVI IV) | `Sell Call @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
-| **Short Puts** | Bullish | `PUT strike > spot` (ITM) | 30–45 | highest VRP across expirations | `> 0` | `|Δ| 0.15–0.20` | highest (IV − SSVI IV) | `Sell Put @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
+| **Short Puts** | Bullish | `PUT strike < spot` (OTM) | 30–45 | highest VRP across expirations | `> 0` | `|Δ| 0.15–0.20` | highest (IV − SSVI IV) | `Sell Put @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
 
 **Pipeline (all four):**
 1. Check GEX Bias matches the strategy direction (skip with message if mismatch)
@@ -97,7 +97,7 @@ Each directional strategy follows a multi-step pipeline. Pre-filters are no long
 | Strategy | Logic |
 |---|---|
 | **Short Calls** | GEX Bearish → OTM calls (`strike > spot`) DTE 30–45 → highest-VRP expiration → IV skew `< 0` → `|Δ|` 0.15–0.20 → highest (IV − SSVI IV) → `Sell Call @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
-| **Short Puts** | GEX Bullish → ITM puts (`strike > spot`) DTE 30–45 → highest-VRP expiration → IV skew `> 0` → `|Δ|` 0.15–0.20 → highest (IV − SSVI IV) → `Sell Put @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
+| **Short Puts** | GEX Bullish → OTM puts (`strike < spot`) DTE 30–45 → highest-VRP expiration → IV skew `> 0` → `|Δ|` 0.15–0.20 → highest (IV − SSVI IV) → `Sell Put @ K (MM-DD) — VRP X.X%, (IV - SSVI IV) +X.XX%, 25Δ Skew +X.XX%` |
 | **Call Credit Spread** | Sell lowest OTM call / Buy higher OTM call, same expiration; picks the pair with the highest avg score |
 | **Put Credit Spread** | Sell highest OTM put / Buy lower OTM put, same expiration; picks the pair with the highest avg score |
 | **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes, with long protection legs at the highest-scored OTM strikes beyond them. Falls back to symmetric wings if walls unavailable |
@@ -114,7 +114,7 @@ Each directional strategy follows a multi-step pipeline. Pre-filters are no long
 - **Per-strategy pre-filters** (applied before scoring, removed from `sd2`):
 - **Buy Premium:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 60–90 — Long Calls: gate `iv_skew > 0` & selected-exp VRP `< 0`, strike CALL `> spot` (OTM), lowest SSVI richness; Long Puts: gate `iv_skew < 0` & selected-exp VRP `> 0`, strike PUT `< spot` (OTM), lowest SSVI richness
 - **Long LEAPS:** delta `|Δ|` 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
-- **Sell Premium:** delta `|Δ|` 0.15–0.20, VRP > 0.05 (>5pp), IV Richness > 0, DTE 30–45 — Short Calls: gate `iv_skew < 0` & selected-exp VRP `> 0`, strike CALL `> spot` (OTM), highest SSVI richness; Short Puts: gate `iv_skew > 0` & selected-exp VRP `< 0`, strike PUT `> spot` (ITM put → bullish exposure), highest SSVI richness
+- **Sell Premium:** delta `|Δ|` 0.15–0.20, VRP > 0.05 (>5pp), IV Richness > 0, DTE 30–45 — Short Calls: gate `iv_skew < 0` & selected-exp VRP `> 0`, strike CALL `> spot` (OTM), highest SSVI richness; Short Puts: gate `iv_skew > 0` & selected-exp VRP `< 0`, strike PUT `< spot` (OTM), highest SSVI richness
 
 ---
 

@@ -346,7 +346,7 @@ def generate_recommendations(
             src = all_data if all_data else scored
             candidates = [
                 e for e in src
-                if e.get("type") == "PUT" and (e.get("strike", 0) or 0) > spot
+                if e.get("type") == "PUT" and (e.get("strike", 0) or 0) < spot
                 and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
             ]
             if not candidates:
