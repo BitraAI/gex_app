@@ -301,9 +301,7 @@ def fetch_data(symbol: str) -> bool:
         st.session_state.analytics["ssvi_skew"] = etf_analytics.get("ssvi_skew")
         if st.session_state.analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
             st.session_state.analytics["atm_iv"] = etf_analytics["atm_iv"]
-    st.session_state.iv_rank = compute_iv_rank(
-        symbol, atm_iv=st.session_state.analytics.get("atm_iv")
-    )
+    st.session_state.iv_rank = compute_iv_rank(symbol)
     check_alerts(st.session_state.analytics, spot)
     return True
 
@@ -550,31 +548,15 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
     ssvi_surf = analytics.get("ssvi_surface")
     dtes = [e.get("dte", 0) for e in st.session_state.get("by_exp_all", [])]
     ir_tte = _compute_ssvi_tte(dtes) if ssvi_surf and dtes else None
+    bias, _ = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))
     alerts = []
-    buy_sd = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55]
-    buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - rv < 0]
-    buy_sd = [e for e in buy_sd if 60 <= (e.get("days_to_exp", 0) or 0) <= 90]
-    if ssvi_surf and ir_tte:
-        buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
-    if buy_sd:
-        sc = score_options(buy_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
-        buy_recs = [r for r in generate_recommendations(sc, spot, strategy="Long Calls", all_data=buy_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte) if "No strong" not in r]
-        if buy_recs:
-            alerts.append("Buy Premium:")
-            for r in buy_recs[:3]:
-                alerts.append(f"  • {r}")
-    sell_sd = [e for e in sd2 if 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20]
-    sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - rv > 0.05]
-    sell_sd = [e for e in sell_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
-    if ssvi_surf and ir_tte:
-        sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) > 0]
-    if sell_sd:
-        sc = score_options(sell_sd, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
-        sell_recs = [r for r in generate_recommendations(sc, spot, strategy="Short Calls", all_data=sell_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte) if "No strong" not in r]
-        if sell_recs:
-            alerts.append("Sell Premium:")
-            for r in sell_recs[:3]:
-                alerts.append(f"  • {r}")
+    sc = score_options(sd2, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"))
+    recs = generate_recommendations(sc, spot, strategy="All", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias)
+    recs = [r for r in recs if "No strong" not in r and "skip" not in r]
+    if recs:
+        alerts.append("Trade Signals:")
+        for r in recs[:5]:
+            alerts.append(f"  • {r}")
     return alerts
 
 
@@ -680,7 +662,7 @@ def prefetch_daily_candles(symbol: str):
         st.session_state.candle_last_fetch[key] = datetime.now(timezone.utc)
 
 
-def compute_iv_rank(symbol: str, atm_iv: float | None = None) -> float | None:
+def compute_iv_rank(symbol: str) -> float | None:
     df = load_candle_cache(symbol, "1d")
     if df.empty or len(df) < 2:
         try:
@@ -696,20 +678,11 @@ def compute_iv_rank(symbol: str, atm_iv: float | None = None) -> float | None:
     closes = df["close"].tolist()
 
     returns = [(closes[i] / closes[i-1] - 1) for i in range(1, len(closes))]
-    rv_values = []
-    for i in range(19, len(returns)):
-        rv_20d = np.std(returns[i-19:i+1]) * (252 ** 0.5)
-        rv_values.append(rv_20d)
-
-    if not rv_values:
+    if len(returns) < 2:
         return None
 
-    recent_252 = rv_values[-252:]
-
-    if atm_iv is not None and atm_iv > 0:
-        current = atm_iv
-    else:
-        current = rv_values[-1]
+    recent_252 = returns[-252:]
+    current = returns[-1]
 
     lo = min(recent_252)
     hi = max(recent_252)
@@ -1553,11 +1526,10 @@ def render_volatility_frag():
         if not s.get("show_otm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
         raw = _filter_strikes_near_atm(raw, s.spot)
         vk = aggregate_by_strike(raw, s.spot, show_calls=s.show_calls, show_puts=s.show_puts)
-        _iv_rank = s.get("iv_rank")
         _ssvi_tte = _compute_ssvi_tte([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
         if tm == "IV":
             if vk:
-                st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=_iv_rank, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
+                st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=s.get("iv_rank"), ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
             else:
                 st.info("No strike data")
         elif tm == "IV Richness (pp)":
@@ -1765,37 +1737,16 @@ def _build_signals(
     _ssvi_surf = analytics.get("ssvi_surface")
     _ir_tte = _compute_ssvi_tte([e.get("dte", 0) for e in by_exp_all]) if (_ssvi_surf is not None and by_exp_all) else None
 
-    if pt == "Buy Premium":
-        sd2 = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0)) <= 0.55]
-        sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - rv < 0]
-        if _ssvi_surf is not None and _ir_tte is not None:
-            sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) < 0]
-        _sk = analytics.get("iv_skew")
-        if stg == "Long Calls" and _sk is not None:
-            sd2 = [e for e in sd2 if _sk > 0]
-            sd2 = [e for e in sd2 if e["type"] == "CALL" and e["strike"] > spot]
-        elif stg == "Long Puts" and _sk is not None:
-            sd2 = [e for e in sd2 if _sk < 0]
-            sd2 = [e for e in sd2 if e["type"] == "PUT" and e["strike"] < spot]
-        if stg != "Long LEAPS":
-            if stg == "Calendar Spread":
-                sd2 = [e for e in sd2 if 30 <= (e.get("days_to_exp", 0) or 0) <= 90]
-            else:
-                sd2 = [e for e in sd2 if 60 <= (e.get("days_to_exp", 0) or 0) <= 90]
-    else:
-        sd2 = [e for e in sd2 if 0.15 <= abs(e.get("delta", 0)) <= 0.20]
-        sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - rv > 0.05]
-        if _ssvi_surf is not None and _ir_tte is not None:
-            sd2 = [e for e in sd2 if (e.get("iv", 0) or 0) - _ssvi_surf.iv(float(e["strike"]), float(_ir_tte)) > 0]
-        sd2 = [e for e in sd2 if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
-        if stg == "Short Calls":
-            sd2 = [e for e in sd2 if e["type"] == "CALL" and e["strike"] < spot]
-        elif stg == "Short Puts":
-            sd2 = [e for e in sd2 if e["type"] == "PUT" and e["strike"] > spot]
+    if stg in ("Long Calls", "Long Puts", "Call Debit Spread", "Put Debit Spread"):
+        sd2 = [e for e in sd2 if e["type"] == "CALL"] if "Call" in stg else [e for e in sd2 if e["type"] == "PUT"]
+    if stg in ("Short Calls", "Call Credit Spread"):
+        sd2 = [e for e in sd2 if e["type"] == "CALL"]
+    if stg in ("Short Puts", "Put Credit Spread"):
+        sd2 = [e for e in sd2 if e["type"] == "PUT"]
 
-    _iv_rank = analytics.get("iv_rank")
-    sc = score_options(sd2, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), iv_rank=_iv_rank)
-    rc = generate_recommendations(sc, spot, strategy=_rec_stg, all_data=sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte)
+    bias, _ = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))
+    sc = score_options(sd2, spot, rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), iv_rank=analytics.get("iv_rank"))
+    rc = generate_recommendations(sc, spot, strategy=_rec_stg, all_data=sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte, bias=bias)
     return rc
 
 
@@ -1823,7 +1774,7 @@ def render_trade_signals_frag():
         if not s.get("strikes"):
             return
         with st.expander("How to read these signals", expanded=False):
-            st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+2% option expensive. &lt;-2% option cheap.\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where ATM IV sits in the trailing 1Y range of 20d realized vol. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Scoring** &mdash; Sell Premium (>= +1), Buy Premium (<= -1), Neutral.\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
+            st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+2% option expensive. &lt;-2% option cheap.\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where the latest daily return ranks in the trailing 52-week range of daily returns. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Scoring** &mdash; Sell Premium (>= +1), Buy Premium (<= -1), Neutral.\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
 
         scan_all = st.checkbox("Scan all tickers in ticker_history.json", value=False, key="scan_all_tickers")
 

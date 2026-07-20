@@ -295,7 +295,6 @@ def create_vrp_by_strike(
     strikes: list[dict[str, Any]],
     spot: float,
     rv: float = 0.0,
-    iv_rank: float | None = None,
 ) -> go.Figure:
     tmpl = _get_template()
     fig = go.Figure()
@@ -1206,7 +1205,7 @@ def create_iv_richness_pct_by_expiration(
 
     richness_pct = []
     for m, s in zip(atm_ivs, ssvi_ivs):
-        if s and s > 0:
+        if s and s > 0 and m > 0:
             richness_pct.append((m - s) / s * 100)
         else:
             richness_pct.append(0.0)
@@ -1405,7 +1404,7 @@ def create_iv_richness_by_strike(
         for s in strikes_sorted
     ]
     ssvi_iv = [ssvi_surface.iv(float(k), float(ssvi_tte)) for k in x]
-    richness = [m - s for m, s in zip(market_iv, ssvi_iv)]
+    richness = [m - s if m > 0 and s > 0 else 0.0 for m, s in zip(market_iv, ssvi_iv)]
 
     def _richness_pp_color(v: float) -> str:
         if v < -0.03:

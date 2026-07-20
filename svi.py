@@ -30,7 +30,7 @@ Public API:
   "skew": float|None, "atm_iv": float|None}`` suitable for storing in
   ``analytics["ssvi_surface"]`` / ``analytics["ssvi_skew"]``.
 * ``SSVISurface.iv(strike, tte)`` —IMPLIED VOL (decimal) at any
-  (strike, time-to-expiry-in-years). Used for the IV Rank chart overlay.
+  (strike, time-to-expiry-in-years).
 """
 
 from __future__ import annotations

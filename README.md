@@ -24,7 +24,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - OI/Vol by Strike (grouped bars, toggle OI or Volume)
     - IV by Expiration (bar chart, toggle ATM IV / VRP — ATM IV colored by IV magnitude with RV horizontal line; VRP colored by ±10pp buckets with a Buy Premium → Sell Premium legend)
     - IV by Strike (bar chart, toggle IV / IV Richness (pp) — IV with SSVI fitted smile overlay and Spot/ATM marker; IV Richness (pp) colored by ±5pp buckets with a Cheap → Expensive legend)
-  - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP/VRP Ratio, expandable via slider, x-axis locked)
+  - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP, expandable via slider, x-axis locked)
   - Strategy Signals (scored options with automated trade recommendations)
 - **Analytics Panel:**
   - Call Wall (highest call GEX above spot), Put Wall (highest put GEX below spot)
@@ -32,7 +32,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Max +GEX, Max -GEX
   - Dealer Position (Long/Short Gamma)
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
-  - IV Rank — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
+   - IV Rank — Where the latest daily return sits in the trailing 52-week range of daily returns. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
    - **Bullish/Bearish Flow** — Real-time ATM option flow metrics from the shared equity WebSocket stream, shown in a dedicated **Order Flow** tab and the separate **ATM Order Flow** page (`/atm_order_flow`). Subscribes to the front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming. Trade direction is inferred by comparing trade price to the bid-ask midpoint. Bullish Flow = `call_buy_vol + put_sell_vol`; Bearish Flow = `call_sell_vol + put_buy_vol`. Net Flow (bullish − bearish) is colour-coded green/red. Streaming is started by the main app's ticker **Refresh** (which also drives the candlestick chart); the Order Flow page reads the shared `flow_cache` and refreshes every 2 seconds.
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
@@ -61,7 +61,6 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - **Red OI cells** — Max Pain strike OI columns
   - **Orange Call GEX cell** — Call Wall strike Call GEX
   - **Green Put GEX cell** — Put Wall strike Put GEX
-  - **RV** — 20-day annualized realized volatility of the underlying (population std of log returns, × √(252 × n/(n−1)))
   - **SSVI IV** — Model IV from the SSVI volatility surface at the front-month TTE
   - **IV (pp)** — IV Richness in percentage points = IV - SSVI IV
   - **Call/Put Delta** — Option delta at the front expiration (used for the Trade Signals delta filters)
@@ -318,7 +317,7 @@ Where:
 - Put options → Negative GEX (dealers sell hedging)
 - VEX and CEX follow the same sign convention (negative for puts)
 
-**Realized Volatility (RV):**
+**Realized Volatility (RV):** - RV measures the underlying's realized price volatility over the trailing 20 days, annualized.
 ```
 r_i = ln(close_i / close_{i-1})
 σ = √( Σ(r_i - r̄)² / n )
@@ -333,7 +332,6 @@ Where:
 - **σ** — Population standard deviation of daily log returns (divides by n)
 - **252** — Trading days per year
 - **n / (n - 1)** — Degrees-of-freedom correction inside the square root
-- RV measures the underlying's realized price volatility over the trailing 20 days, annualized
 
 **Key Metrics:**
 - **Call Wall** — Strike above spot with highest call GEX
@@ -344,15 +342,15 @@ Where:
 - **Max +GEX** — Highest call GEX above spot 
 - **Max -GEX** — Highest put GEX below spot 
 - **Dealer Position** — Long Gamma (net positive) or Short Gamma (net negative)
+- **VEX Magnet** — Strike with highest positive net VEX (most positive vanna exposure). As IV rises, dealer hedging creates buying pressure that attracts price toward this level.
+- **VEX Repellent** — Strike with most negative net VEX. As IV rises, dealer hedging creates selling pressure that pushes price away from this level.
 - **Max Pain** — Strike that minimizes total dollar payout to option holders at expiration. For each strike K in the dataset, not a user-configured range: Total Pain(P) = Σ(S - K) × call_oi (if S > K) + Σ(K - S) × put_oi (if S < K), across all ITM strikes in the full chain.
 - **Expected Move** — Expected price range based on ATM straddle cost
   - `Expected Move = (ATM Call Price + ATM Put Price) × 0.85`
   - Finds the ATM strike (closest to spot), sums the call and put mark prices, multiplies by 0.85 (TastyTrade convention, approximating one standard deviation)
 - **IV Skew (25Δ)** — For the **selected expiration**, OTM put IV minus OTM call IV at 25 delta (OTM strikes only: puts `strike < spot`, calls `strike > spot`). Positive value = puts more expensive (downside skew), negative = calls more expensive (upside skew). Steep put skew combined with short gamma creates explosive downside risk — dealers who are short gamma must sell more into a falling market, and expensive puts amplify the hedging pressure. When the chain lacks usable OTM put/call quotes for the selected expiration it falls back to the SSVI-smoothed 25Δ skew at that tenor, then to the front expiration's market skew, so the metric always displays a value when any expiration carries a valid skew.
-- **IV (Implied Volatility)** — Per strike: uses call IV for strikes ≥ spot and put IV for strikes < spot. Represents the market's expectation of future price volatility over the option's remaining life, derived from option market prices via the Black-Scholes model.
-- **VRP (Volatility Risk Premium)** — Per strike: `VRP = IV - RV`. Computed as `VRP = ATM IV - RV` for each expiration. Measures the spread between implied volatility (option price) and realized volatility. Positive VRP → Options are expensive relative to recent realized movement. Negative VRP → Options are cheap relative to recent realized movement. VRP only tells you whether options (Call/Put) are cheap or expensive, not whether the underlying will go up or down.
-- **VEX Magnet** — Strike with highest positive net VEX (most positive vanna exposure). As IV rises, dealer hedging creates buying pressure that attracts price toward this level.
-- **VEX Repellent** — Strike with most negative net VEX. As IV rises, dealer hedging creates selling pressure that pushes price away from this level.
+- **Volatility** — The market's implied annualized future volatility for that specific strike and expiration.
+- **VRP (Volatility Risk Premium)** — Computed as `VRP = ATM IV - RV` for each expiration. Measures the spread between implied volatility (option price) and realized volatility. Positive VRP → Options are expensive relative to recent realized movement. Negative VRP → Options are cheap relative to recent realized movement.
 - **SSVI Volatility Surface** — A parametric implied volatility surface fit using the Surface Stochastic Volatility Inspired (SSVI) framework. Two-stage calibration:
   1. **Raw SVI**: Per-expiration fit of total variance as a function of log-moneyness: `w(k) = a + b(ρ(k - m) + √((k - m)² + σ²))`. TTE uses the trading-day-aware formula `(DTE + secsLeft/23400)/365`.
   2. **SSVI surface**: Across-expiration fit of ATM total variance `θ(t) = w(0, t)`, then surface-wide `ρ` (average skew), `η` (skew-smile decay), and `γ` (power-law exponent) parameters, giving a fully arbitrage-free surface.
@@ -363,7 +361,7 @@ Where:
     - **Negative Skew (ρ ≪ 0)**: Common in equity indexes like SPY, where puts are expensive. Use the SSVI surface to locate the specific put strike where the skew slope begins to decay, creating an optimal entry for Put Ratio Spreads.
   - **Skew-smile decay (η)**: Controls how quickly the skew term fades as time-to-expiration grows. Higher `η` means the skew-smile shape decays faster across expirations.
 - **SSVI IV / Skew** — Once calibrated, the surface provides cleaner `iv(strike, tte)` queries and a model-based 25Δ skew via root-finding on Black-Scholes delta. Stored as `ssvi_surface` and `ssvi_skew` in analytics.
-- **IV Rank** — Where current ATM implied volatility sits in the trailing 1-year range of 20-day realized volatilities. The 20-day RV for each trailing day is computed as `σ × √252` where `σ` is the population standard deviation of the 20 most recent daily log returns. The current ATM IV (from the front-month option chain) is then ranked against the 252 trailing RV values. If ATM IV is unavailable, the latest 20-day RV is used as a fallback. Formula: `round((current - min_rv_252d) / (max_rv_252d - min_rv_252d) × 100, 2)`. Values >70 indicate options are expensive relative to history (favor selling premium), values <30 indicate options are cheap (favor buying premium). The IV by Strike chart's IV Rank view overlays the SSVI fitted surface (green line+markers) on the same strikes at the front-month tenor.
+- **IV Rank** — Where the latest daily return (not annualized) sits in the trailing 52-week range of daily returns. For each trading day, the daily simple return is `r_i = close_i / close_{i-1} - 1`. The most recent 252 daily returns form the trailing range. The latest daily return is ranked against this range. Formula: `IV Rank = round((current_return - min_return_252d) / (max_return_252d - min_return_252d) × 100, 2)`. Values >70 indicate the underlying is at the high end of its yearly return range (high vol regime, favor selling premium), values <30 indicate it's at the low end (low vol regime, favor buying premium). The IV by Strike chart's IV Rank view overlays the SSVI fitted surface (green line+markers) on the same strikes at the front-month tenor.
 - **Bullish Flow** — `call_buy_vol + put_sell_vol` from ATM option streaming. Both buying calls and selling puts express bullish conviction. Subscribes to the front expiration ATM call and put contracts via LEVELONE_OPTIONS WebSocket streaming. Trade direction is inferred by comparing the trade price to the bid-ask midpoint: trades at or above mid are classified as buys, trades below mid as sells. When bid/ask data is unavailable, volume is split evenly between buy and sell. Totals accumulate over the streaming session (up to 200 seconds of 1-second aggregated bars) and display in a dedicated fragment refreshing every 1 second. Card turns green when bullish flow exceeds bearish flow.
 - **Bearish Flow** — `call_sell_vol + put_buy_vol` from ATM option streaming. Both selling calls and buying puts express bearish conviction. Uses the same front expiration ATM contracts and direction inference as Bullish Flow. Totals accumulate over the streaming session and display in the metrics panel with 1-second refresh. Card turns red when bearish flow exceeds bullish flow. Note: bearish flow can increase during a price rally — this often reflects traders selling calls into strength or buying protective puts to hedge long positions.
 

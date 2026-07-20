@@ -35,6 +35,14 @@ def assess_market_bias(
             score -= 1
             reasons.append(f"IV Skew (25Δ) negative ({iv_skew:+.2%}) — puts cheap (bearish)")
 
+    if iv_rank is not None:
+        if iv_rank > 70:
+            score -= 1
+            reasons.append(f"IV Rank high ({iv_rank:.0f}%) — options expensive, favor selling")
+        elif iv_rank < 30:
+            score += 1
+            reasons.append(f"IV Rank low ({iv_rank:.0f}%) — options cheap, favor buying")
+
     call_wall = analytics.get("call_wall")
     put_wall = analytics.get("put_wall")
     if call_wall and put_wall and spot > 0:
@@ -46,14 +54,6 @@ def assess_market_bias(
         elif dist_below < dist_above:
             score += 0.5
             reasons.append(f"Put wall closer than call wall (${put_wall:g}) — support near")
-
-    if iv_rank is not None:
-        if iv_rank > 70:
-            score -= 1
-            reasons.append(f"IV Rank high ({iv_rank:.0f}%) — options expensive, favor selling")
-        elif iv_rank < 30:
-            score += 1
-            reasons.append(f"IV Rank low ({iv_rank:.0f}%) — options cheap, favor buying")
 
     if score >= 1:
         bias = "Bullish"
@@ -115,14 +115,6 @@ def score_options(
             score -= 0.5
             reasons.append("Near put wall")
 
-        if iv_skew is not None:
-            if iv_skew > 0 and opt_type == "CALL":
-                score -= 0.5
-                reasons.append(f"25Δ skew +{iv_skew:.1%} → calls cheap")
-            elif iv_skew < 0 and opt_type == "PUT":
-                score += 0.5
-                reasons.append(f"25Δ skew {iv_skew:.1%} → puts cheap")
-
         if iv_rank is not None:
             if iv_rank > 70:
                 score += 0.5
@@ -130,6 +122,14 @@ def score_options(
             elif iv_rank < 30:
                 score -= 0.5
                 reasons.append(f"IV Rank low ({iv_rank:.0f}%) → buy premium")
+
+        if iv_skew is not None:
+            if iv_skew > 0 and opt_type == "CALL":
+                score -= 0.5
+                reasons.append(f"25Δ skew +{iv_skew:.1%} → calls cheap")
+            elif iv_skew < 0 and opt_type == "PUT":
+                score += 0.5
+                reasons.append(f"25Δ skew {iv_skew:.1%} → puts cheap")
 
         if score >= 1:
             signal = "Sell Premium"
@@ -165,6 +165,7 @@ def generate_recommendations(
     iv_skew: float | None = None,
     ssvi_surface: Any = None,
     ssvi_tte: float | None = None,
+    bias: str | None = None,
 ) -> list[str]:
     recs = []
 
@@ -222,76 +223,160 @@ def generate_recommendations(
         pass
 
     if strategy in ("Long Calls",):
-        if iv_skew is not None and iv_skew > 0:
-            calls = [s for s in scored if s["type"] == "CALL" and s["strike"] > spot]
-            if calls:
-                best = min(calls, key=_rich)
-                _sel_vrp = _sel_exp_vrp(best)
-                _richness = _rich(best)
-                if _sel_vrp < 0 and _richness < 0:
-                    recs.append(
-                        f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-                        f"25Δ Skew {iv_skew:+.2%} - Calls cheap; Buy Calls, "
-                        f"VRP {_sel_vrp:.1f}%, SSVI Richness {_richness * 100:+.2f}%."
-                    )
-        elif iv_skew is not None:
-            recs.append(f"25Δ Skew {iv_skew:+.2%} — puts cheap; skip Long Calls.")
+        if not bias or bias != "Bullish":
+            recs.append(f"GEX Bias is {bias or 'N/A'}; skip Long Calls.")
         else:
-            recs.append("No IV skew data available.")
+            src = all_data if all_data else scored
+            candidates = [
+                e for e in src
+                if e.get("type") == "CALL" and (e.get("strike", 0) or 0) > spot
+                and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
+            ]
+            if not candidates:
+                recs.append("No OTM calls in DTE 30-45 range.")
+            else:
+                exp_vrps: dict[str, float] = {}
+                for e in candidates:
+                    raw_iv = e.get("iv", 0) or 0
+                    iv_dec = raw_iv / 100 if raw_iv > 3 else raw_iv
+                    vrp = round((iv_dec - rv) * 100, 1)
+                    ep = e["expiration"]
+                    if ep not in exp_vrps or vrp < exp_vrps[ep]:
+                        exp_vrps[ep] = vrp
+                best_exp = min(exp_vrps, key=exp_vrps.get)
+                if iv_skew is None or iv_skew <= 0:
+                    recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bullish for calls; skip Long Calls.")
+                else:
+                    best_exp_candidates = [
+                        e for e in candidates if e["expiration"] == best_exp
+                        and 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55
+                    ]
+                    if not best_exp_candidates:
+                        recs.append(f"No OTM calls with delta 0.35-0.55 in {best_exp[-5:]}.")
+                    else:
+                        best = min(best_exp_candidates, key=_rich)
+                        recs.append(
+                            f"**Buy Call @ {best['strike']:g}** ({best_exp[-5:]}) — "
+                            f"VRP {exp_vrps[best_exp]:.1f}%, (IV - SSVI IV) {_rich(best) * 100:+.2f}%, "
+                            f"25Δ Skew {iv_skew:+.2%}."
+                        )
 
     if strategy in ("Long Puts",):
-        if iv_skew is not None and iv_skew < 0:
-            puts = [s for s in scored if s["type"] == "PUT" and s["strike"] < spot]
-            if puts:
-                best = max(puts, key=_rich)
-                _sel_vrp = _sel_exp_vrp(best)
-                _richness = _rich(best)
-                if _sel_vrp > 0 and _richness > 0:
-                    recs.append(
-                        f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-                        f"25Δ Skew {iv_skew:+.2%} - Puts cheap; Buy Puts, "
-                        f"VRP {_sel_vrp:.1f}%, SSVI Richness {_richness * 100:+.2f}%."
-                    )
-        elif iv_skew is not None:
-            recs.append(f"25Δ Skew {iv_skew:+.2%} — puts not cheap; skip Long Puts.")
+        if not bias or bias != "Bearish":
+            recs.append(f"GEX Bias is {bias or 'N/A'}; skip Long Puts.")
         else:
-            recs.append("No IV skew data available.")
+            src = all_data if all_data else scored
+            candidates = [
+                e for e in src
+                if e.get("type") == "PUT" and (e.get("strike", 0) or 0) < spot
+                and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
+            ]
+            if not candidates:
+                recs.append("No OTM puts in DTE 30-45 range.")
+            else:
+                exp_vrps: dict[str, float] = {}
+                for e in candidates:
+                    raw_iv = e.get("iv", 0) or 0
+                    iv_dec = raw_iv / 100 if raw_iv > 3 else raw_iv
+                    vrp = round((iv_dec - rv) * 100, 1)
+                    ep = e["expiration"]
+                    if ep not in exp_vrps or vrp < exp_vrps[ep]:
+                        exp_vrps[ep] = vrp
+                best_exp = min(exp_vrps, key=exp_vrps.get)
+                if iv_skew is None or iv_skew >= 0:
+                    recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bearish for puts; skip Long Puts.")
+                else:
+                    best_exp_candidates = [
+                        e for e in candidates if e["expiration"] == best_exp
+                        and 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55
+                    ]
+                    if not best_exp_candidates:
+                        recs.append(f"No OTM puts with delta 0.35-0.55 in {best_exp[-5:]}.")
+                    else:
+                        best = min(best_exp_candidates, key=_rich)
+                        recs.append(
+                            f"**Buy Put @ {best['strike']:g}** ({best_exp[-5:]}) — "
+                            f"VRP {exp_vrps[best_exp]:.1f}%, (IV - SSVI IV) {_rich(best) * 100:+.2f}%, "
+                            f"25Δ Skew {iv_skew:+.2%}."
+                        )
 
     if strategy in ("Short Calls",):
-        if iv_skew is not None and iv_skew < 0:
-            calls = [s for s in scored if s["type"] == "CALL" and s["strike"] < spot]
-            if calls:
-                best = max(calls, key=_rich)
-                _sel_vrp = _sel_exp_vrp(best)
-                _richness = _rich(best)
-                if _sel_vrp > 0 and _richness > 0:
-                    recs.append(
-                        f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-                        f"25Δ Skew {iv_skew:+.2%} - Calls expensive; Sell Calls, "
-                        f"VRP {_sel_vrp:.1f}%, SSVI Richness {_richness * 100:+.2f}%."
-                    )
-        elif iv_skew is not None:
-            recs.append(f"25Δ Skew {iv_skew:+.2%} — calls not rich; skip Short Calls.")
+        if not bias or bias != "Bearish":
+            recs.append(f"GEX Bias is {bias or 'N/A'}; skip Short Calls.")
         else:
-            recs.append("No IV skew data available.")
+            src = all_data if all_data else scored
+            candidates = [
+                e for e in src
+                if e.get("type") == "CALL" and (e.get("strike", 0) or 0) > spot
+                and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
+            ]
+            if not candidates:
+                recs.append("No OTM calls in DTE 30-45 range.")
+            else:
+                exp_vrps: dict[str, float] = {}
+                for e in candidates:
+                    raw_iv = e.get("iv", 0) or 0
+                    iv_dec = raw_iv / 100 if raw_iv > 3 else raw_iv
+                    vrp = round((iv_dec - rv) * 100, 1)
+                    ep = e["expiration"]
+                    if ep not in exp_vrps or vrp > exp_vrps[ep]:
+                        exp_vrps[ep] = vrp
+                best_exp = max(exp_vrps, key=exp_vrps.get)
+                if iv_skew is None or iv_skew >= 0:
+                    recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bearish for calls; skip Short Calls.")
+                else:
+                    best_exp_candidates = [
+                        e for e in candidates if e["expiration"] == best_exp
+                        and 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20
+                    ]
+                    if not best_exp_candidates:
+                        recs.append(f"No OTM calls with delta 0.15-0.20 in {best_exp[-5:]}.")
+                    else:
+                        best = max(best_exp_candidates, key=_rich)
+                        recs.append(
+                            f"**Sell Call @ {best['strike']:g}** ({best_exp[-5:]}) — "
+                            f"VRP {exp_vrps[best_exp]:.1f}%, (IV - SSVI IV) {_rich(best) * 100:+.2f}%, "
+                            f"25Δ Skew {iv_skew:+.2%}."
+                        )
 
     if strategy in ("Short Puts",):
-        if iv_skew is not None and iv_skew > 0:
-            puts = [s for s in scored if s["type"] == "PUT" and s["strike"] > spot]
-            if puts:
-                best = min(puts, key=_rich)
-                _sel_vrp = _sel_exp_vrp(best)
-                _richness = _rich(best)
-                if _sel_vrp < 0 and _richness < 0:
-                    recs.append(
-                        f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-                        f"25Δ Skew {iv_skew:+.2%} - Puts expensive; Sell Puts, "
-                        f"VRP {_sel_vrp:.1f}%, SSVI Richness {_richness * 100:+.2f}%."
-                    )
-        elif iv_skew is not None:
-            recs.append(f"25Δ Skew {iv_skew:+.2%} — puts not rich; skip Short Puts.")
+        if not bias or bias != "Bullish":
+            recs.append(f"GEX Bias is {bias or 'N/A'}; skip Short Puts.")
         else:
-            recs.append("No IV skew data available.")
+            src = all_data if all_data else scored
+            candidates = [
+                e for e in src
+                if e.get("type") == "PUT" and (e.get("strike", 0) or 0) > spot
+                and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
+            ]
+            if not candidates:
+                recs.append("No OTM puts in DTE 30-45 range.")
+            else:
+                exp_vrps: dict[str, float] = {}
+                for e in candidates:
+                    raw_iv = e.get("iv", 0) or 0
+                    iv_dec = raw_iv / 100 if raw_iv > 3 else raw_iv
+                    vrp = round((iv_dec - rv) * 100, 1)
+                    ep = e["expiration"]
+                    if ep not in exp_vrps or vrp > exp_vrps[ep]:
+                        exp_vrps[ep] = vrp
+                best_exp = max(exp_vrps, key=exp_vrps.get)
+                if iv_skew is None or iv_skew <= 0:
+                    recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bullish for puts; skip Short Puts.")
+                else:
+                    best_exp_candidates = [
+                        e for e in candidates if e["expiration"] == best_exp
+                        and 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20
+                    ]
+                    if not best_exp_candidates:
+                        recs.append(f"No OTM puts with delta 0.15-0.20 in {best_exp[-5:]}.")
+                    else:
+                        best = max(best_exp_candidates, key=_rich)
+                        recs.append(
+                            f"**Sell Put @ {best['strike']:g}** ({best_exp[-5:]}) — "
+                            f"VRP {exp_vrps[best_exp]:.1f}%, (IV - SSVI IV) {_rich(best) * 100:+.2f}%, "
+                            f"25Δ Skew {iv_skew:+.2%}."
+                        )
 
     if strategy in ("Call Debit Spread",):
         calls = sorted(

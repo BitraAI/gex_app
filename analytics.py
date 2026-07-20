@@ -198,6 +198,8 @@ def _calculate_iv_skew(data: list[dict[str, Any]], spot: float, expiration: str 
 
     put_iv_raw = put["iv"]
     call_iv_raw = call["iv"]
+    if put_iv_raw <= 0 or call_iv_raw <= 0:
+        return None
     put_iv = put_iv_raw / 100 if put_iv_raw > 3 else put_iv_raw
     call_iv = call_iv_raw / 100 if call_iv_raw > 3 else call_iv_raw
 
