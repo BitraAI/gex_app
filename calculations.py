@@ -215,6 +215,8 @@ def _extract_option_fields(
         iv = opt.get("volatility")
         if iv is not None:
             iv = float(iv)
+        if iv is not None and iv < 0:
+            iv = 0.0
 
         mark = opt.get("mark", 0)
         if mark is None:
@@ -423,7 +425,10 @@ def aggregate_by_expiration(
         if entries and spot > 0:
             atm_entry = min(entries, key=lambda e: abs(e["strike"] - spot))
             raw_iv = atm_entry.get("iv", 0.0) or 0.0
-            item["atm_iv"] = round(raw_iv / 100, 4) if raw_iv > 3 else round(raw_iv, 4)
+            if raw_iv <= 0:
+                item["atm_iv"] = 0.0
+            else:
+                item["atm_iv"] = round(raw_iv / 100, 4) if raw_iv > 3 else round(raw_iv, 4)
             item["dte"] = atm_entry.get("days_to_exp", 0)
         else:
             item["atm_iv"] = 0.0
