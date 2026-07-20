@@ -837,11 +837,20 @@ def ensure_atm_streaming(stream_symbol: str):
     # Register reconnect callback once so ATM options re-subscribe
     # automatically after the equity WebSocket reconnects.
     if svc and atm_svc and not getattr(atm_svc, "_reconnect_registered", False):
+        async def _delayed_resubscribe(sc):
+            """Wait briefly for the re-logged-in WebSocket to settle, then
+            re-subscribe ATM options.  If that fails with a dead-connection
+            error the flag will trigger a full re-registration on the next
+            ensure_atm_streaming cycle."""
+            await asyncio.sleep(2)
+            if atm_svc.is_running:
+                await atm_svc._do_subscribe(sc)
+
         def _on_equity_reconnect():
             sc = svc.get_stream_client()
             if sc is not None and atm_svc.is_running:
                 asyncio.run_coroutine_threadsafe(
-                    atm_svc._do_subscribe(sc), atm_svc._loop,
+                    _delayed_resubscribe(sc), atm_svc._loop,
                 )
         svc.on_reconnect(_on_equity_reconnect)
         atm_svc._reconnect_registered = True
@@ -859,33 +868,41 @@ def ensure_atm_streaming(stream_symbol: str):
         s.selected_expiration = [_front_exp]
 
     if svc and svc.is_connected and atm_svc and _first_exp:
-        # Pre-fetch spots for ALL tickers every cycle so bulk_update_spots
-        # always has fresh data to feed into the ATM service.
         _all_tickers = s.get("ticker_history", [])
-        _stream_symbols = [
-            _STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$"))
-            for t in _all_tickers
-        ]
-        try:
-            from client import fetch_quotes
-            quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
-            for disp_sym, _sym in zip(_all_tickers, _stream_symbols):
-                qd = quote_resp.get(_sym, {}) or {}
-                quote = qd.get("quote", {}) or qd.get(_sym, {})
-                last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                if last is not None and float(last) > 0:
-                    s.spot_cache[disp_sym.upper().lstrip("$")] = float(last)
-        except Exception as e:
-            print(f"[ensure_atm_streaming] spot pre-fetch failed: {e}")
+
+        # Pre-fetch spots via REST only every ~10 s to avoid blocking the
+        # Streamlit thread on every 2-second fragment tick.  Between fetches
+        # we feed whatever is already in spot_cache.
+        import time as _time
+        _last_fetch_ts = s.get("_spot_fetch_ts", 0.0)
+        if _time.time() - _last_fetch_ts >= 10:
+            s["_spot_fetch_ts"] = _time.time()
+            _stream_symbols = [
+                _STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$"))
+                for t in _all_tickers
+            ]
+            try:
+                from client import fetch_quotes
+                quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
+                for disp_sym, _sym in zip(_all_tickers, _stream_symbols):
+                    qd = quote_resp.get(_sym, {}) or {}
+                    quote = qd.get("quote", {}) or qd.get(_sym, {})
+                    last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                    if last is not None and float(last) > 0:
+                        s.spot_cache[disp_sym.upper().lstrip("$")] = float(last)
+            except Exception as e:
+                print(f"[ensure_atm_streaming] spot pre-fetch failed: {e}")
 
         _need_register = (
             not atm_svc.is_running
             or atm_svc.symbol != stream_symbol
             or getattr(atm_svc, "_expiration", None) != _first_exp
+            or getattr(atm_svc, "_needs_reconnect", False)
         )
         if _need_register:
             sc = svc.get_stream_client()
             if sc is not None:
+                atm_svc._needs_reconnect = False
                 atm_svc.register(sc, stream_symbol, _first_exp)
                 atm_svc.start()
 
@@ -2059,30 +2076,42 @@ window.addEventListener('load', fixTabColors);
     with st.container(): render_options_data_frag()
 
 
+@st.fragment(run_every=2)
+def _flow_grid():
+    """Auto-refreshing fragment for the Order Flow dataframe.
+
+    Defined at module level (not nested inside render_flow_frag) so its
+    identity is stable across parent-fragment re-runs and it is not
+    destroyed / recreated every 10 s by render_tabs_frag.
+    """
+    s = st.session_state
+    if not s.get("client"):
+        return
+    stream_symbol = s.get("symbol", "SPY").upper().lstrip("$")
+    _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
+    mapped = _STREAM_SYMBOL_MAP.get(stream_symbol, stream_symbol)
+    ensure_atm_streaming(mapped)
+    render_atm_order_flow_grid()
+
+
 def render_flow_frag():
-    """Render the ATM Order Flow grid directly inside the Order Flow tab."""
+    """Render the ATM Order Flow tab.
+
+    Static elements (subheader, legend, style) are rendered here so they
+    are only injected when the parent fragment re-runs (~10 s), not on
+    every 2-second data tick.  The dataframe itself lives inside the
+    ``_flow_grid`` fragment which refreshes independently.
+    """
     s = st.session_state
     if not s.get("client"):
         st.info("Initialize authentication to load data")
         return
 
-    flow_container = st.container()
-    with flow_container:
-        st.subheader("Order Flow")
+    from flow_page import render_flow_legend_and_style
 
-        @st.fragment(run_every=2)
-        def _flow_grid():
-            s = st.session_state
-            if not s.get("client"):
-                st.info("Initialize authentication to load data")
-                return
-            stream_symbol = s.get("symbol", "SPY").upper().lstrip("$")
-            _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
-            mapped = _STREAM_SYMBOL_MAP.get(stream_symbol, stream_symbol)
-            ensure_atm_streaming(mapped)
-            render_atm_order_flow_grid()
-
-        _flow_grid()
+    st.subheader("Order Flow")
+    render_flow_legend_and_style()
+    _flow_grid()
 
 
 def main():

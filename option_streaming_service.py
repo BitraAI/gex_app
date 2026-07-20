@@ -131,10 +131,15 @@ class AtmOptionVolumeService:
         self._last_skipped_no_spot = None
         self._last_sub_ok_set = None
 
+        # Set by _do_subscribe when the WebSocket session is dead (e.g.
+        # error 20 "STREAM CONNECTION NOT FOUND").  ensure_atm_streaming
+        # checks this and calls register() again to re-establish the feed.
+        self._needs_reconnect = False
+
         # Per-ticker flow tracking (all tracked tickers including primary)
         # _ticker_flows: display_symbol -> {stream_symbol, spot, atm_strike,
         #   call_sym, put_sym, call_bid, call_ask, put_bid, put_ask,
-        #   bullish, bearish}
+        #   bullish, bearish, flow_history, trend}
         self._ticker_flows: dict[str, dict] = {}
         # Reverse lookup: option_symbol -> display_symbol
         self._sym_to_ticker: dict[str, str] = {}
@@ -302,6 +307,8 @@ class AtmOptionVolumeService:
                     "put_ask": None,
                     "bullish": 0,
                     "bearish": 0,
+                    "flow_history": [],
+                    "trend": "flat",
                 }
 
     def _get_stream_client(self):
@@ -342,6 +349,8 @@ class AtmOptionVolumeService:
                 "put_ask": None,
                 "bullish": 0,
                 "bearish": 0,
+                "flow_history": [],
+                "trend": "flat",
             }
         # Trigger a full re-subscription to include the new ticker
         if self._running and self._expiration:
@@ -615,6 +624,7 @@ class AtmOptionVolumeService:
 
         try:
             await sc.level_one_option_subs(all_symbols)
+            self._needs_reconnect = False
         except Exception as e:
             # ConnectionClosedOK (1000) is a normal WebSocket close during
             # reconnect — the next _do_subscribe cycle will retry automatically.
@@ -623,9 +633,19 @@ class AtmOptionVolumeService:
             # Surface subscription failures instead of swallowing them
             # silently. A silent failure leaves _sym_to_ticker populated
             # but the feed is dead, so ticks never arrive.
+            _err_str = str(e).lower()
+            _is_dead = (
+                "connection not found" in _err_str
+                or "stream connection" in _err_str
+                or type(e).__name__ == "ConnectionClosedError"
+                or type(e).__name__ == "ConnectionClosed"
+            )
+            if _is_dead:
+                self._needs_reconnect = True
             print(
                 f"[AtmOptionVolumeService] _do_subscribe FAILED: "
                 f"{type(e).__name__}: {e} (symbols={len(all_symbols)})"
+                f"{' — will reconnect' if _is_dead else ''}"
             )
             return
 
@@ -725,6 +745,44 @@ class AtmOptionVolumeService:
                     bar["put_buy_vol"] += half
                     bar["put_sell_vol"] += rem
 
+    def get_ticker_trend(self, display_symbol: str) -> str:
+        """Return the Trend direction for a tracked ticker:
+        'up', 'down', or 'flat'.
+        None if not tracked."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return "flat"
+            return ticker.get("trend", "flat")
+
+    def _snapshot_flow(self, ticker: dict):
+        """Record a flow snapshot for windowed trend computation.
+        Called with self._lock held."""
+        import time as _time
+        now = _time.time()
+        net = ticker["bullish"] - ticker["bearish"]
+        ticker["flow_history"].append((now, net))
+        # Keep last 60 seconds
+        cutoff = now - 60
+        while ticker["flow_history"] and ticker["flow_history"][0][0] < cutoff:
+            ticker["flow_history"].pop(0)
+
+        history = ticker["flow_history"]
+        if len(history) < 4:
+            ticker["trend"] = "flat"
+            return
+
+        mid = len(history) // 2
+        older_avg = sum(v for _, v in history[:mid]) / mid
+        newer_avg = sum(v for _, v in history[mid:]) / (len(history) - mid)
+        diff = newer_avg - older_avg
+        if diff > 0:
+            ticker["trend"] = "up"
+        elif diff < 0:
+            ticker["trend"] = "down"
+        else:
+            ticker["trend"] = "flat"
+
     def _process_trade_ticker(self, ticker: dict | None, price: float, size: int, opt_type: str):
         """Accumulate a trade into a per-ticker flow total (cumulative,
         not a rolling window).  Called with self._lock held."""
@@ -750,6 +808,11 @@ class AtmOptionVolumeService:
             half = size // 2
             ticker["bullish"] += half
             ticker["bearish"] += size - half
+
+        # Snapshot flow every ~10 ticks for trend computation
+        total = ticker["bullish"] + ticker["bearish"]
+        if total % 10 == 0:
+            self._snapshot_flow(ticker)
 
     def _infer_dir(self, price: float, bid: float | None, ask: float | None) -> str:
         if bid is not None and ask is not None:
