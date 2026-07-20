@@ -72,40 +72,79 @@ Key points:
 
 ## How to open it
 
-Two entry points, both sharing `st.session_state` (so streaming started on one
-is visible on the other):
-
-1. **Order Flow tab** on the main page
-   (`app.py` → `render_tabs_frag`, tab7 → `_render_flow_link`). The link is
-   rendered as an `st.iframe` with an inline `target="_blank"` anchor, so it
-   opens **`http://localhost:8501/atm_order_flow` in a new browser tab**
-   (Streamlit strips `target="_blank"` from `st.markdown`, hence the iframe).
-
-2. **Dedicated page** `pages/atm_order_flow.py` at
-   `http://localhost:8501/atm_order_flow`. It does **not** start streaming
-   itself — streaming is owned by the main app (the ticker Refresh button calls
-   `fetch_data` → `render_candlesticks` → `ensure_atm_streaming`, which starts
-   the WebSocket feed). On open the page:
-   - calls `ensure_session_defaults()` (initialises `spot_cache`,
-     `flow_cache`, `ticker_history`, etc., since pages run as a separate script;
-     `ticker_history` is loaded from `ticker_history.json` so the grid always
-     has its row list),
-   - if the ATM option service is not yet running, shows a hint to open the main
-     page and click **Refresh**,
-   - renders the grid via `render_atm_order_flow_grid`, reading the shared
-     `flow_cache` that the main app's stream populates.
-
-You must start streaming from the main GammaEx page (Refresh a ticker) first;
-the ATM Order Flow page then displays that live data.
+Open the **Order Flow** tab on the main page
+(`app.py` → `render_tabs_frag`, tab7 → `render_flow_frag`).
+The tab renders the ATM Order Flow grid directly and starts streaming
+automatically via `ensure_atm_streaming`.
 
 ## Files
 
 | File | Role |
 | --- | --- |
-| `pages/atm_order_flow.py` | Dedicated page; reads shared session state and renders the grid. |
 | `flow_page.py` | Shared rendering: `render_atm_order_flow_grid`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. |
 | `option_streaming_service.py` | `AtmOptionVolumeService` — WebSocket handling, Lee-Ready classification, per-ticker flow. |
-| `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `_render_flow_link`, Order Flow tab. |
+| `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. |
+| `client.py` | `fetch_quotes` — REST spot pre-fetch for all tickers. |
+
+## Architecture: streaming & spot feeding
+
+### Shared StreamClient
+
+Both the equity stream (`StreamingService`) and ATM option flow
+(`AtmOptionVolumeService`) share a single `schwab.streaming.StreamClient`
+and therefore a single WebSocket connection. The equity service owns the
+connection and runs the `handle_message()` loop; the ATM service registers
+its handler via `add_level_one_option_handler` and subscribes via
+`level_one_option_subs`.
+
+### Spot price feeding
+
+Non-primary tickers (IWM, QQQ, NVDA, etc.) need spot prices to calculate
+their ATM strikes, but they don't have their own equity stream. Spot prices
+are fed via a two-step process:
+
+1. **REST pre-fetch**: `ensure_atm_streaming` calls `fetch_quotes` (from
+   `client.py`) for all tickers every 2 seconds. The `fetch_quotes` function
+   returns `client.get_quotes()` parsed as JSON — note that the Schwab
+   `AsyncClient.get_quotes()` returns a raw `Response` object, so `.json()`
+   must be called on it.
+2. **Bulk feed**: After pre-fetch, `bulk_update_spots(spot_map)` sets all
+   spots in `_ticker_flows` in a single lock acquisition, then triggers one
+   `_do_subscribe` to re-subscribe with correct ATM strikes.
+
+### Registration & subscription order
+
+`ensure_atm_streaming` runs **inside** the `@st.fragment(run_every=2)`
+body (not outside it), because code outside a fragment does not re-run on
+fragment timer ticks. The flow on each cycle:
+
+1. Pre-fetch spots via `fetch_quotes` → `spot_cache`
+2. If `_need_register` is True (first run, symbol change, or expiration
+   change): call `register()` which clears `_ticker_flows`, re-initializes
+   all tickers with spot=0, and registers the handler. **Critically,
+   `register()` does NOT call `_do_subscribe`** — the caller does.
+3. Feed live spot from equity stream for the primary ticker.
+4. `bulk_update_spots(spot_map)` sets spots from `spot_cache` and triggers
+   `_do_subscribe`.
+
+The reason `register()` does not subscribe is a threading race: if it queued
+`_do_subscribe` on the event loop, the event-loop thread could pick it up
+**before** `bulk_update_spots` on the main thread has set the spots — so
+all non-primary tickers would see spot=0 and be skipped.
+
+### Schwab SDK field mapping
+
+The Schwab streaming SDK's `_Handler.label_message()` renames certain fields.
+For LEVELONE_OPTIONS messages, the option symbol is in the **`key`** field,
+not `SYMBOL`. The handler uses `c.get("key", "") or c.get("SYMBOL", "")` to
+handle both formats.
+
+### Reconnection
+
+When the equity WebSocket disconnects and reconnects (handled by
+`StreamingService._run`), the ATM service is notified via
+`StreamingService.on_reconnect()` callbacks. The ATM service re-subscribes
+its option chain after the equity feed is back online.
 
 ## Notes / limitations
 
@@ -117,3 +156,6 @@ the ATM Order Flow page then displays that live data.
   subscription (the primary symbol's front expiration).
 - `ensure_session_defaults` reuses `app._SESSION_DEFAULTS` so the page and main
   app never drift apart.
+- The REST pre-fetch (`fetch_quotes`) runs every fragment tick (2 s). This is
+  a lightweight call but does hit the Schwab API. Rate limiting is not expected
+  for a single user session.

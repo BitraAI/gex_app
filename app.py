@@ -69,9 +69,9 @@ from charts import (
 )
 
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
-# imported by a Streamlit *page* (pages/atm_order_flow.py) — calling it twice
-# raises StreamlitAPIException.  Guard it so the module is safely importable
-# for its helper functions (ensure_atm_streaming, fetch_data, etc.).
+# imported by another module — calling it twice raises StreamlitAPIException.
+# Guard it so the module is safely importable for its helper functions
+# (ensure_atm_streaming, fetch_data, etc.).
 _initial_d = st.session_state.get("theme", "light") == "dark"
 try:
     st.set_page_config(
@@ -543,7 +543,7 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
         return []
     aks = sorted(set(e["strike"] for e in data))
     atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
-    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
+    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and (e.get("iv", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
     sd2 = _filter_strikes_near_atm(sd, spot)
     ssvi_surf = analytics.get("ssvi_surface")
     dtes = [e.get("dte", 0) for e in st.session_state.get("by_exp_all", [])]
@@ -834,6 +834,17 @@ def ensure_atm_streaming(stream_symbol: str):
             svc.start(stream_symbol)
 
     atm_svc = s.get("atm_option_service")
+    # Register reconnect callback once so ATM options re-subscribe
+    # automatically after the equity WebSocket reconnects.
+    if svc and atm_svc and not getattr(atm_svc, "_reconnect_registered", False):
+        def _on_equity_reconnect():
+            sc = svc.get_stream_client()
+            if sc is not None and atm_svc.is_running:
+                asyncio.run_coroutine_threadsafe(
+                    atm_svc._do_subscribe(sc), atm_svc._loop,
+                )
+        svc.on_reconnect(_on_equity_reconnect)
+        atm_svc._reconnect_registered = True
     _sel_exp = s.get("selected_expiration", [])
     if isinstance(_sel_exp, str):
         _sel_exp = [_sel_exp]
@@ -848,6 +859,25 @@ def ensure_atm_streaming(stream_symbol: str):
         s.selected_expiration = [_front_exp]
 
     if svc and svc.is_connected and atm_svc and _first_exp:
+        # Pre-fetch spots for ALL tickers every cycle so bulk_update_spots
+        # always has fresh data to feed into the ATM service.
+        _all_tickers = s.get("ticker_history", [])
+        _stream_symbols = [
+            _STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$"))
+            for t in _all_tickers
+        ]
+        try:
+            from client import fetch_quotes
+            quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
+            for disp_sym, _sym in zip(_all_tickers, _stream_symbols):
+                qd = quote_resp.get(_sym, {}) or {}
+                quote = qd.get("quote", {}) or qd.get(_sym, {})
+                last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                if last is not None and float(last) > 0:
+                    s.spot_cache[disp_sym.upper().lstrip("$")] = float(last)
+        except Exception as e:
+            print(f"[ensure_atm_streaming] spot pre-fetch failed: {e}")
+
         _need_register = (
             not atm_svc.is_running
             or atm_svc.symbol != stream_symbol
@@ -856,29 +886,23 @@ def ensure_atm_streaming(stream_symbol: str):
         if _need_register:
             sc = svc.get_stream_client()
             if sc is not None:
-                # Pre-fetch spots for ALL tickers before registering
-                _all_tickers = s.get("ticker_history", [])
-                _stream_symbols = [
-                    _STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$"))
-                    for t in _all_tickers
-                ]
-                try:
-                    from client import fetch_quotes
-                    quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
-                    for disp_sym, _sym in zip(_all_tickers, _stream_symbols):
-                        qd = quote_resp.get(_sym, {}) or {}
-                        quote = qd.get("quote", {}) or qd.get(_sym, {})
-                        last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                        if last is not None and float(last) > 0:
-                            s.spot_cache[disp_sym.upper().lstrip("$")] = float(last)
-                except Exception:
-                    pass
                 atm_svc.register(sc, stream_symbol, _first_exp)
                 atm_svc.start()
+
         # Feed live spot so ATM strike tracking stays current
         if svc.last_price and svc.last_price > 0:
             atm_svc.update_spot(svc.last_price)
             s.spot_cache[stream_symbol] = svc.last_price
+
+        # Feed pre-fetched spots from spot_cache into ATM service for all
+        # tracked tickers.
+        _spot_map = {}
+        for _t in _all_tickers:
+            _t_upper = _t.upper().lstrip("$")
+            if _t_upper in s.spot_cache:
+                _spot_map[_t_upper] = s.spot_cache[_t_upper]
+        if _spot_map:
+            atm_svc.bulk_update_spots(_spot_map)
 
 
 def render_candlesticks():
@@ -1717,7 +1741,7 @@ def _build_signals(
     """
     aks = sorted(set(e["strike"] for e in data))
     atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
-    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
+    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and (e.get("iv", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
     if atm_range > 0 and sd and spot > 0:
         sk = sorted(set(e["strike"] for e in sd)); ak = min(sk, key=lambda k: abs(k - spot)); ai = sk.index(ak)
         nb = min(atm_range, ai); na = min(atm_range, len(sk) - 1 - ai)
@@ -1825,7 +1849,7 @@ def render_trade_signals_frag():
                             rc = _build_signals(
                                 res["data"], res["spot"], res["analytics"], res["rv"], pt, stg,
                                 atm_range=s.get("strikes_atm_range", 20),
-                                by_exp_all=[e for e in aggregate_by_expiration(res["data"], spot=res["spot"]) if e.get("call_oi", 0) + e.get("put_oi", 0) > 0 or e.get("atm_iv", 0) > 0],
+                                by_exp_all=[e for e in aggregate_by_expiration(res["data"], spot=res["spot"]) if e.get("atm_iv", 0) > 0],
                             )
                             _no_sig = "No strong signals" in " ".join(rc)
                             if rc and not _no_sig:
@@ -2031,37 +2055,34 @@ window.addEventListener('load', fixTabColors);
     with tab4: render_heatmaps_frag()
     with tab5: render_trade_signals_frag()
     with tab6: render_candlesticks()
-    with tab7: _render_flow_link()
+    with tab7: render_flow_frag()
     with st.container(): render_options_data_frag()
 
 
-def _render_flow_link():
-    """Render a link to the dedicated ATM Order Flow page that opens in a NEW
-    browser tab.
+def render_flow_frag():
+    """Render the ATM Order Flow grid directly inside the Order Flow tab."""
+    s = st.session_state
+    if not s.get("client"):
+        st.info("Initialize authentication to load data")
+        return
 
-    Streamlit's built-in page navigation always opens in the same tab, and
-    st.markdown strips target="_blank" from anchors.  So we embed the anchor
-    as a raw HTML string via st.iframe (it auto-detects HTML content); the
-    target="_blank" is preserved inside the iframe and opens a new tab.
-    """
-    link_html = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head><meta charset="utf-8"><style>
-      html, body { margin: 0; padding: 0; }
-      a {
-        display: block; width: 100%; text-align: center; padding: 8px 0;
-        border-radius: 6px; background-color: #1E90FF; color: white;
-        font-weight: bold; font-family: sans-serif; text-decoration: none;
-        box-sizing: border-box;
-      }
-    </style></head>
-    <body>
-      <a href="http://localhost:8501/atm_order_flow" target="_blank" rel="noopener noreferrer">Open ATM Order Flow ↗</a>
-    </body>
-    </html>
-    """
-    st.iframe(link_html, width="stretch", height=44)
+    flow_container = st.container()
+    with flow_container:
+        st.subheader("Order Flow")
+
+        @st.fragment(run_every=2)
+        def _flow_grid():
+            s = st.session_state
+            if not s.get("client"):
+                st.info("Initialize authentication to load data")
+                return
+            stream_symbol = s.get("symbol", "SPY").upper().lstrip("$")
+            _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
+            mapped = _STREAM_SYMBOL_MAP.get(stream_symbol, stream_symbol)
+            ensure_atm_streaming(mapped)
+            render_atm_order_flow_grid()
+
+        _flow_grid()
 
 
 def main():

@@ -1,5 +1,5 @@
-"""Shared ATM order-flow rendering used by both the main app page (as a link)
-and the dedicated pages/atm_order_flow.py page.
+"""Shared ATM order-flow rendering used by both the main app page and the
+dedicated Order Flow tab.
 
 Kept free of any st.set_page_config / global app setup so it can be imported
 safely from either entry point without re-running app.py's top-level code.
@@ -70,16 +70,19 @@ def update_flow_cache():
                 s.flow_cache[current_sym] = {"bullish": bf, "bearish": brf}
 
     tracked = atm_svc.tracked_tickers()
+    _spot_map = {}
     for t_sym in tracked:
         t_upper = t_sym.upper().lstrip("$")
         if t_upper in s.spot_cache:
-            atm_svc.update_ticker_spot(t_sym, s.spot_cache[t_upper])
+            _spot_map[t_upper] = s.spot_cache[t_upper]
+    if _spot_map:
+        atm_svc.bulk_update_spots(_spot_map)
+
+    for t_sym in tracked:
         bf, brf = atm_svc.get_ticker_flow(t_sym)
         if bf is not None and brf is not None:
             if t_sym not in s.flow_cache or s.flow_cache[t_sym]["bullish"] is not None:
                 s.flow_cache[t_sym] = {"bullish": bf, "bearish": brf}
-        if t_sym in s.spot_cache:
-            atm_svc.update_ticker_spot(t_sym, s.spot_cache[t_sym])
 
 
 def render_atm_order_flow_grid():
@@ -87,7 +90,7 @@ def render_atm_order_flow_grid():
     the main app's Options Data table): one row per tracked ticker with
     Bullish / Bearish flow, a coloured Status cell, and formatted numbers.
 
-    Used by the dedicated /atm_order_flow page (wrapped in a refresh fragment).
+    Used by the Order Flow tab in the main app (wrapped in a refresh fragment).
     """
     s = st.session_state
     current_sym = s.get("symbol", "").upper().lstrip("$")

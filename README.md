@@ -7,7 +7,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 ## Features
 
 - **Real-time Option Chain Data** — Fetches live options data via the Schwab API. For index symbols (`$SPX`, `$RUT`, `$NDX`), the ETF proxy chain (`SPY`, `IWM`, `QQQ`) is automatically fetched as a fallback: when the index chain returns zero gamma or open interest (common with Schwab's index data), delta-matched values from the ETF chain backfill the missing fields so GEX calculations remain meaningful.
-- **Candlestick Charts** — Interactive OHLCV charts with SMA/EMA overlays, Trend, Volume (buy/sell pressure with streaming delta), Volume Profile (VPVR — client-side per-bar volume binned at each visible price level with buy/sell split, POC highlighted, recomputes on every pan/zoom), Anchored VWAP (session-reset line, anchored at each 09:30 ET boundary), Andean Oscillator, and EMA 50 Squeeze indicators. Live ticks from the equity WebSocket are merged into the current bar every second (see `CANDLESTICS.md`). The separate **Order Flow** tab / `/atm_order_flow` page shows the real-time ATM option flow.
+- **Candlestick Charts** — Interactive OHLCV charts with SMA/EMA overlays, Trend, Volume (buy/sell pressure with streaming delta), Volume Profile (VPVR — client-side per-bar volume binned at each visible price level with buy/sell split, POC highlighted, recomputes on every pan/zoom), Anchored VWAP (session-reset line, anchored at each 09:30 ET boundary), Andean Oscillator, and EMA 50 Squeeze indicators. Live ticks from the equity WebSocket are merged into the current bar every second (see `CANDLESTICS.md`). The **Order Flow** tab shows the real-time ATM option flow.
 - **Candlestick Chart Interactions** — TradingView-style dual-axis pan and zoom:
   - **Drag in the chart body** pans BOTH the time (X) and price (Y) axes together vertically and horizontally (custom body-drag handler pans Y; LWC handles X natively).
   - **Drag the price-scale labels** (right edge) or **drag the time-scale labels** (bottom) zooms each respective axis natively.
@@ -33,7 +33,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Dealer Position (Long/Short Gamma)
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
    - IV Rank — Where the latest daily return sits in the trailing 52-week range of daily returns. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
-   - **Bullish/Bearish Flow** — Real-time ATM option flow metrics from the shared equity WebSocket stream, shown in a dedicated **Order Flow** tab and the separate **ATM Order Flow** page (`/atm_order_flow`). Subscribes to the front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming. Trade direction is inferred by comparing trade price to the bid-ask midpoint. Bullish Flow = `call_buy_vol + put_sell_vol`; Bearish Flow = `call_sell_vol + put_buy_vol`. Net Flow (bullish − bearish) is colour-coded green/red. Streaming is started by the main app's ticker **Refresh** (which also drives the candlestick chart); the Order Flow page reads the shared `flow_cache` and refreshes every 2 seconds.
+   - **Bullish/Bearish Flow** — Real-time ATM option flow metrics from the shared equity WebSocket stream, shown in the **Order Flow** tab. Subscribes to the front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming. Trade direction is inferred by comparing trade price to the bid-ask midpoint. Bullish Flow = `call_buy_vol + put_sell_vol`; Bearish Flow = `call_sell_vol + put_buy_vol`. Net Flow (bullish − bearish) is colour-coded green/red. Streaming is started by the main app's ticker **Refresh** (which also drives the candlestick chart); the Order Flow tab reads the shared `flow_cache` and refreshes every 2 seconds.
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
@@ -226,7 +226,7 @@ You can then open the app in your local browser.
 
 1. Enter a ticker symbol (e.g., SPY, AAPL, TSLA, $SPX) in the sidebar
 2. Click **Refresh** to load the option chain (the app works best during regular US market trading hours)
-3. Explore the visualization tabs (Market Structure, Positioning, Volatility, Heatmaps, Trade Signals, Candlesticks, Order Flow) with GEX analytics. The **Candlesticks** tab is where live WebSocket streaming starts when you Refresh a ticker; open the **Order Flow** tab (or the `/atm_order_flow` page) for real-time ATM option flow.
+3. Explore the visualization tabs (Market Structure, Positioning, Volatility, Heatmaps, Trade Signals, Candlesticks, Order Flow) with GEX analytics. The **Candlesticks** tab is where live WebSocket streaming starts when you Refresh a ticker; open the **Order Flow** tab for real-time ATM option flow.
 4. Use the sidebar expiration selector to filter the Options Data table (charts use sliders to control expiration count)
 5. Light theme indicator in the sidebar
 6. Use sliders in GEX by Expiration, IV by Strike, IV by Expiration, Heatmaps, and Gamma Surface tabs to control expiration count
@@ -235,7 +235,7 @@ You can then open the app in your local browser.
    - **Drag the price-scale labels** (right edge) to zoom the Y-axis, or the **time-scale labels** (bottom) to zoom the X-axis.
    - **Scroll the mouse wheel** to zoom the X-axis (bar spacing).
    - The Y zoom persists across the live 1-second streaming updates — drag it to where you want and the chart stays there.
- 8. **Bullish/Bearish Flow** — open the **Order Flow** tab, or the dedicated **ATM Order Flow** page (`/atm_order_flow`, opens in a new tab from the Order Flow tab link), to see real-time ATM option flow for every ticker in `ticker_history.json`. The table shows Bullish Flow, Bearish Flow, Net Flow (green/red), and a Status (Live during market hours / Closed after hours / Cached / No Data). Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
+ 8. **Bullish/Bearish Flow** — open the **Order Flow** tab to see real-time ATM option flow for every ticker in `ticker_history.json`. The table shows Bullish Flow, Bearish Flow, Net Flow (green/red), and a Status (Live during market hours / Closed after hours / Cached / No Data). Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
 
 ## Architecture
 
@@ -243,8 +243,6 @@ You can then open the app in your local browser.
 gex_app/
 ├── app.py                 # Main Streamlit application
 ├── flow_page.py           # Shared ATM Order Flow rendering (grid, session defaults, market-hours check)
-├── pages/
-│   └── atm_order_flow.py  # Dedicated ATM Order Flow page (/atm_order_flow)
 ├── analytics.py           # Analytical calculations (walls, flip, skew, etc.)
 ├── calculations.py        # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
 ├── charts.py              # Plotly chart generators
