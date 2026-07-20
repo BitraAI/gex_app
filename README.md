@@ -25,7 +25,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
     - IV by Expiration (bar chart, toggle ATM IV / VRP — ATM IV colored by IV magnitude with RV horizontal line; VRP colored by ±10pp buckets with a Buy Premium → Sell Premium legend)
     - IV by Strike (bar chart, toggle IV / IV Richness (pp) — IV with SSVI fitted smile overlay and Spot/ATM marker; IV Richness (pp) colored by ±5pp buckets with a Cheap → Expensive legend)
   - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP, expandable via slider, x-axis locked)
-  - Strategy Signals (scored options with automated trade recommendations)
+  - Strategy Signals (automated trade recommendations from the option chain)
 - **Analytics Panel:**
   - Call Wall (highest call GEX above spot), Put Wall (highest put GEX below spot)
   - Gamma Flip (cumulative net GEX zero-crossing with 1% threshold), Max Pain
