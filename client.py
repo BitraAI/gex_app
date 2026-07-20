@@ -93,6 +93,10 @@ async def fetch_quotes(
 ) -> dict[str, Any]:
     try:
         result = await client.get_quotes(symbols)
+        if hasattr(result, "json"):
+            result = result.json()
+        if not isinstance(result, dict):
+            return {}
         return result
     except Exception as e:
         logger.exception(f"Failed to fetch quotes for {symbols}")

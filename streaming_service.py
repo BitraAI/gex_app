@@ -28,6 +28,11 @@ class StreamingService:
         self._connected = False
         self._last_error: str | None = None
 
+        # Callbacks invoked after a successful re-login + re-subscribe
+        # so other services (ATM option flow) can re-subscribe on the
+        # same StreamClient.
+        self._on_reconnect_cbs: list = []
+
         # Aggregated 1-second OHLCV DataFrame — index = bucket start (ms)
         self._df: pd.DataFrame = pd.DataFrame(
             columns=["open", "high", "low", "close", "volume", "buy_vol", "sell_vol"]
@@ -313,8 +318,6 @@ class StreamingService:
                 if self._running and self._symbol:
                     try:
                         await sc.login()
-                        with self._lock:
-                            self._connected = True
                         # Re-subscribe
                         while self._running and self._symbol:
                             try:
@@ -327,6 +330,14 @@ class StreamingService:
                             break
                         with self._lock:
                             self._connected = True
+                        # Notify listeners (e.g. ATM option service)
+                        for cb in self._on_reconnect_cbs:
+                            try:
+                                result = cb()
+                                if asyncio.iscoroutine(result):
+                                    asyncio.ensure_future(result)
+                            except Exception:
+                                pass
                     except Exception as e2:
                         with self._lock:
                             self._connected = False
@@ -346,6 +357,12 @@ class StreamingService:
         flow) can add handlers and subscribe on the same WebSocket connection."""
         with self._lock:
             return self._sc
+
+    def on_reconnect(self, callback):
+        """Register a callback (sync or async) to invoke after a successful
+        re-login and re-subscription.  Used by AtmOptionVolumeService to
+        re-subscribe its LEVELONE_OPTIONS after the equity feed reconnects."""
+        self._on_reconnect_cbs.append(callback)
 
     def get_stats(self) -> dict:
         """Return current streaming stats for monitoring."""

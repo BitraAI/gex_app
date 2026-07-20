@@ -107,5 +107,4 @@ load_candle_cache (parquet)                    ▼
 - Streaming requires the ticker to have been Refreshed on the main page; if the
   service isn't running, the chart falls back to the historical cache only.
 - `buy_vol`/`sell_vol` from the equity stream are merged alongside OHLCV; the
-  ATM option flow (separate pipeline) is surfaced on the **Order Flow** tab /
-  `/atm_order_flow` page.
+  ATM option flow (separate pipeline) is surfaced on the **Order Flow** tab.

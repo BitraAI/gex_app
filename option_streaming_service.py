@@ -268,10 +268,12 @@ class AtmOptionVolumeService:
         # Register handler on the shared StreamClient
         stream_client.add_level_one_option_handler(self._make_handler())
 
-        # Subscribe to ALL tickers in ONE call
-        asyncio.run_coroutine_threadsafe(
-            self._do_subscribe(stream_client), self._loop,
-        )
+        # NOTE: We do NOT call _do_subscribe here.  The caller
+        # (ensure_atm_streaming) will call bulk_update_spots() which sets
+        # spot prices for all tickers and then triggers _do_subscribe.
+        # If we subscribed here, _do_subscribe would run on the event-loop
+        # thread before bulk_update_spots() has set any spots on the main
+        # thread, so all tickers would be skipped with "unknown spot".
 
         self._running = True
 
@@ -391,6 +393,24 @@ class AtmOptionVolumeService:
                 self._do_subscribe(sc), self._loop,
             )
 
+    def bulk_update_spots(self, spot_map: dict[str, float]):
+        """Set spot prices for multiple tickers at once and trigger a single
+        re-subscription.  Avoids the race where per-ticker update_ticker_spot
+        calls each schedule separate _do_subscribe coroutines that run before
+        all spots are set."""
+        sc = None
+        with self._lock:
+            for display_symbol, spot in spot_map.items():
+                ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+                if ticker is not None:
+                    ticker["spot"] = spot
+            if self._running and self._expiration:
+                sc = self._stream_client
+        if sc is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._do_subscribe(sc), self._loop,
+            )
+
     # ------------------------------------------------------------------ #
     # Internal: handler & subscription
     # ------------------------------------------------------------------ #
@@ -403,7 +423,7 @@ class AtmOptionVolumeService:
             subs = {self._subscribed_call_sym, self._subscribed_put_sym}
             primary_root = (self._symbol or "").ljust(6)[:6]
             for c in msg.get("content", []):
-                sym = c.get("SYMBOL", "")
+                sym = c.get("key", "") or c.get("SYMBOL", "")
                 if not sym:
                     continue
 
@@ -547,6 +567,10 @@ class AtmOptionVolumeService:
         try:
             await sc.level_one_option_subs(all_symbols)
         except Exception as e:
+            # ConnectionClosedOK (1000) is a normal WebSocket close during
+            # reconnect — the next _do_subscribe cycle will retry automatically.
+            if type(e).__name__ == "ConnectionClosedOK":
+                return
             # Surface subscription failures instead of swallowing them
             # silently. A silent failure leaves _sym_to_ticker populated
             # but the feed is dead, so ticks never arrive.
