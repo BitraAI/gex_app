@@ -801,39 +801,63 @@ class AtmOptionVolumeService:
             return ticker.get("trend", "flat")
 
     def _snapshot_flow(self, ticker: dict):
-        """Record a flow snapshot for windowed trend computation.
+        """Enhanced flow snapshot combining OPTIONS_BOOK with flow momentum for trend detection.
         Called with self._lock held."""
         import time as _time
         now = _time.time()
         net = ticker["bullish"] - ticker["bearish"]
         ticker["flow_history"].append((now, net))
-        # Keep last 60 seconds
+        
+        # Calculate and store book imbalance for enhanced trend detection
+        bid_size = ticker.get("current_bid_size")
+        ask_size = ticker.get("current_ask_size")
+        if bid_size is not None and ask_size is not None:
+            book_imbalance = self._calculate_book_imbalance(bid_size, ask_size)
+            ticker["book_imbalance"] = book_imbalance
+            ticker["book_imbalance_history"].append((now, book_imbalance))
+        
+        # Keep last 60 seconds of data
         cutoff = now - 60
         while ticker["flow_history"] and ticker["flow_history"][0][0] < cutoff:
             ticker["flow_history"].pop(0)
+        while ticker.get("book_imbalance_history") and ticker["book_imbalance_history"][0][0] < cutoff:
+            ticker["book_imbalance_history"].pop(0)
 
+        # Enhanced trend detection using both flow momentum and book imbalance
         history = ticker["flow_history"]
         if len(history) < 2:
             ticker["trend"] = "flat"
             ticker["trend_reversal"] = None
-            ticker["flow_speed"] = 0
             return
 
-        # Extract first points from older and newer segments for compact flow speed calculation
+        # Calculate flow momentum (net change in bullish/bearish volume)
         segment_size = len(history) // 2
         older_first = history[0][1]
         newer_first = history[-segment_size][1]
-
-        diff = newer_first - older_first
-        if diff > 0:
+        flow_diff = newer_first - older_first
+        
+        # Determine base trend from flow momentum
+        if flow_diff > 0:
             current_trend = "up"
-        elif diff < 0:
+        elif flow_diff < 0:
             current_trend = "down"
         else:
             current_trend = "flat"
         
-        # Detect trend reversal
+        # Enhanced trend detection: apply book imbalance pressure
+        # This detects when strong book imbalance can override pure flow signals
         previous_trend = ticker.get("trend", None)
+        book_imbalance = ticker.get("book_imbalance", 0.0)
+        
+        if abs(book_imbalance) > 0.3:  # Strong book imbalance threshold
+            # Book imbalance bullish and trend is flat/down - upgrade to bullish
+            if book_imbalance > 0.3 and current_trend != "up":
+                current_trend = "up"
+            # Book imbalance bearish and trend is flat/up - downgrade to bearish
+            elif book_imbalance < -0.3 and current_trend != "down":
+                current_trend = "down"
+        
+        # Detect trend reversal
         if previous_trend is None:
             reversal = None
         elif previous_trend != current_trend:
@@ -848,9 +872,6 @@ class AtmOptionVolumeService:
         
         ticker["trend"] = current_trend
         ticker["trend_reversal"] = reversal
-        
-        # Store flow speed for UI display
-        ticker["flow_speed"] = diff
 
     def _process_trade_ticker(self, ticker: dict | None, price: float, size: int, opt_type: str):
         """Accumulate a trade into a per-ticker flow total (cumulative,

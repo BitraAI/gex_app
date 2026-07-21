@@ -210,20 +210,43 @@ def render_atm_order_flow_grid():
         
         # Get trend reversal from ticker data
         trend_reversal = None
+        book_imbalance = None
         if atm_svc:
             ticker_data = _find_flow_for_display(atm_svc._ticker_flows, t_upper)
-            if ticker_data and "trend_reversal" in ticker_data:
-                trend_reversal = ticker_data["trend_reversal"]
+            if ticker_data:
+                trend_reversal = ticker_data.get("trend_reversal")
+                book_imbalance = ticker_data.get("book_imbalance")
         
-        # Format Trend column to include 📈/📉 emojis for reversal indicators
-        # According to FLOW.md: "↑ 📈" (bullish reversal), "↓ 📉" (bearish reversal)
-        if trend_reversal == "bullish":
-            trend_display = "↑ 📈"
-        elif trend_reversal == "bearish":
-            trend_display = "↓ 📉"
+        # Format Trend column - enhanced with liquidity pressure indicators
+        # Keep visual indicators without emojis
+        if book_imbalance is not None:
+            if book_imbalance > 0.3:
+                # Strong bullish pressure
+                if trend_reversal == "bullish":
+                    trend_display = "↑↑"  # Double bullish
+                elif trend == "up":
+                    trend_display = "↑"   # Normal bullish
+                else:
+                    trend_display = "→→" # Building bullish momentum
+            elif book_imbalance < -0.3:
+                # Strong bearish pressure
+                if trend_reversal == "bearish":
+                    trend_display = "↓↓"  # Double bearish
+                elif trend == "down":
+                    trend_display = "↓"   # Normal bearish
+                else:
+                    trend_display = "←←" # Building bearish momentum
+            else:
+                # Normal pressure
+                trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
         else:
-            # Map to standard arrows
-            trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
+            # Standard trend display
+            if trend_reversal == "bullish":
+                trend_display = "↑"
+            elif trend_reversal == "bearish":
+                trend_display = "↓"
+            else:
+                trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
         
         rows.append({
             "Ticker": t_upper,
