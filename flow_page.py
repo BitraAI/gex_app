@@ -261,7 +261,7 @@ def render_atm_order_flow_grid():
 
     def _status_color(val):
         color = _STATUS_COLORS.get(val, "#808080")
-        return f"color: {color}; font-size: 35px; text-align: center;"
+        return f"color: {color}; font-size: 35px; line-height: 35px; text-align: center;"
 
     def _net_flow_color(val):
         if val > 0:
@@ -296,7 +296,7 @@ def render_atm_order_flow_grid():
         "Bullish Flow": "{:,.0f}",
         "Bearish Flow": "{:,.0f}",
         "Net Flow": "{:,.0f}",
-        "Status": lambda v: "•",
+        "Status": lambda v: "●",
     })
 
     s._flow_styled_hash = data_hash

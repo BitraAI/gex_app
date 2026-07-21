@@ -19,19 +19,25 @@ tracked ticker:
 | **Bullish Flow** | Cumulative option volume classified as bullish. |
 | **Bearish Flow** | Cumulative option volume classified as bearish. |
 | **Net Flow** | `Bullish − Bearish`. Green when positive, red when negative, grey when zero. |
-| **Status** | `Live` / `Closed` / `Cached` / `No Data` (see below). |
+| **Status** | `Live` / `Closed` / `Cached` / `No Data` (see below). Amber (`Closed`) doubles as the "market open but no ticks yet" warning colour. |
 
-Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)`, so it
-updates every 2 seconds.
+Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
+module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
+parent `render_tabs_frag` runs every 10 s and renders the legend / CSS
+once per outer tick via `flow_page.render_flow_legend_and_style()` so the
+static HTML is not re-injected on every 2-second data tick (avoids DOM
+flicker). `_flow_grid` is defined at module scope (not nested inside
+`render_flow_frag`) so Streamlit does not destroy and recreate it every
+10 s.
 
 ### Status legend
 
 | Status | Meaning | Colour |
 | --- | --- | --- |
-| **Live** | Ticker is subscribed and US regular trading hours are open (09:30–16:00 ET, Mon–Fri, excluding New Year's / Independence / Christmas). | Green |
-| **Closed** | Ticker is subscribed but the market is currently closed (after hours, weekend, or holiday). Flow values are frozen from the last session. | Grey |
-| **Cached** | Ticker is known but not currently subscribed/streaming. | Blue |
-| **No Data** | No flow received yet for this ticker. | Grey |
+| **Live** | Ticker is subscribed and US regular trading hours are open (09:30–16:00 ET, Mon–Fri, excluding New Year's / Independence / Christmas). | Green (`#00cc96`) |
+| **Closed** | Ticker is subscribed but the market is currently closed (after hours, weekend, or holiday). Flow values are frozen from the last session. Also briefly visible while the market is open but no ticks have arrived yet (watchdog grace window). | Amber (`#E69500`) |
+| **Cached** | Ticker is known but not currently subscribed/streaming. | Blue (`#1E90FF`) |
+| **No Data** | No flow received yet for this ticker. | Grey (`#808080`) |
 
 Market-hours detection lives in `flow_page.is_market_open()`.
 
@@ -39,14 +45,14 @@ Market-hours detection lives in `flow_page.is_market_open()`.
 
 Trend reflects the **direction of net-flow momentum** over the last 60 seconds,
 not the absolute level. It is computed in `AtmOptionVolumeService._snapshot_flow`
-(option_streaming_service.py:803-854) and exposed via `get_ticker_trend`.
+(option_streaming_service.py:803-853) and exposed via `get_ticker_trend`.
 
 How it works:
 
 1. Every ~10 trades (line 883 in option_streaming_service.py), a snapshot of
    `(timestamp, net_flow)` is appended to a per-ticker `flow_history` list.
 2. Snapshots older than 60 seconds are pruned (line 811-813 in option_streaming_service.py).
-3. If fewer than 4 snapshots exist the trend is **flat** (line 816-820 in option_streaming_service.py).
+3. If fewer than 2 snapshots exist the trend is **flat** (line 816-820 in option_streaming_service.py). The `len(history) < 2` guard also clears `trend_reversal` and resets `flow_speed` to 0.
 4. The history is split in half. The first points from each segment are extracted:
    - `older_first = history[0][1]` (first point from entire history)
    - `newer_first = history[-segment_size][1]` (first point from newer half)
@@ -54,13 +60,16 @@ How it works:
    - `diff > 0` → **up** (green arrow)
    - `diff < 0` → **down** (red arrow)
    - `diff == 0` → **flat** (grey arrow)
-5. **Trend reversal detection** (lines 836-850 in option_streaming_service.py):
+5. **Trend reversal detection** (lines 835-850 in option_streaming_service.py):
    - Compares `previous_trend` with `current_trend`
    - If trend changed from **up → down**, sets `trend_reversal = "bearish"`
    - If trend changed from **down → up**, sets `trend_reversal = "bullish"`
    - Otherwise no reversal (`trend_reversal = None`)
+6. **Flow speed** is stored on the ticker dict as `flow_speed = diff` (the
+   segment-first delta). It is available for UI display but is not currently
+   rendered in the grid.
 
-**Visual trend indicators** in the Trend column (flow_page.py:213-222):
+**Visual trend indicators** in the Trend column (flow_page.py:213-226):
 
 | Condition | Display |
 |-----------|---------|
@@ -146,11 +155,14 @@ Non-primary tickers (IWM, QQQ, NVDA, etc.) need spot prices to calculate
 their ATM strikes, but they don't have their own equity stream. Spot prices
 are fed via a two-step process:
 
-1. **REST pre-fetch**: `ensure_atm_streaming` calls `fetch_quotes` (from
-   `client.py`) for all tickers every 2 seconds. The `fetch_quotes` function
-   returns `client.get_quotes()` parsed as JSON — note that the Schwab
-   `AsyncClient.get_quotes()` returns a raw `Response` object, so `.json()`
-   must be called on it.
+1. **REST pre-fetch (throttled)**: `ensure_atm_streaming` calls `fetch_quotes` (from
+   `client.py`) for all tickers, but only every ~10 seconds — the fragment
+   itself ticks every 2 s, but the REST call is gated by
+   `s["_spot_fetch_ts"]` so the Streamlit thread isn't blocked on every
+   cycle. The `fetch_quotes` function returns `client.get_quotes()` parsed
+   as JSON — note that the Schwab `AsyncClient.get_quotes()` returns a raw
+   `Response` object, so `.json()` must be called on it. Between REST
+   fetches, spots already cached in `s.spot_cache` are fed to the service.
 2. **Bulk feed**: After pre-fetch, `bulk_update_spots(spot_map)` sets all
    spots in `_ticker_flows` in a single lock acquisition, then triggers one
    `_do_subscribe` to re-subscribe with correct ATM strikes.
@@ -175,6 +187,25 @@ The reason `register()` does not subscribe is a threading race: if it queued
 **before** `bulk_update_spots` on the main thread has set the spots — so
 all non-primary tickers would see spot=0 and be skipped.
 
+`_need_register` is also tripped when the watchdog sets
+`atm_svc._needs_reconnect = True` (see "Watchdog / stale-feed detection"
+below). On the next cycle `ensure_atm_streaming` clears the flag and calls
+`register()` to re-establish the WebSocket handler with a fresh
+`_last_tick_time`.
+
+### Watchdog / stale-feed detection
+
+`AtmOptionVolumeService.is_feed_stale(max_age_seconds=60)` (in
+`option_streaming_service.py`) returns True when no option ticks have been
+received for `max_age_seconds`. The `_flow_grid` fragment in `app.py`
+checks this every 2 s while the market is open; if stale, it sets
+`atm_svc._needs_reconnect = True` so the next `ensure_atm_streaming` cycle
+fully re-registers the handler (see "Registration & subscription order").
+
+`_last_tick_time` is updated on every received option message by
+`_option_handler` and reset to "now" inside `register()` so the watchdog
+does not immediately re-fire after a re-registration.
+
 ### Schwab SDK field mapping
 
 The Schwab streaming SDK's `_Handler.label_message()` renames certain fields.
@@ -184,10 +215,30 @@ handle both formats.
 
 ### Reconnection
 
-When the equity WebSocket disconnects and reconnects (handled by
-`StreamingService._run`), the ATM service is notified via
-`StreamingService.on_reconnect()` callbacks. The ATM service re-subscribes
-its option chain after the equity feed is back online.
+There are two cooperative mechanisms:
+
+1. **Equity-stream reconnect callback**: when the equity WebSocket
+   disconnects and reconnects (driven by `StreamingService._run` calling
+   every callback registered via `StreamingService.on_reconnect`), the ATM
+   service re-subscribes its option chain after the equity feed is back
+   online. The callback is registered once in `ensure_atm_streaming`
+   (`app.py`) as `_on_equity_reconnect` and schedules
+   `_delayed_resubscribe(sc)` on the ATM service's event loop, which
+   awaits `asyncio.sleep(2)` for the re-logged-in WebSocket to settle
+   before calling `atm_svc._do_subscribe(sc)`.
+
+2. **Subscription-time dead connection**: when `_do_subscribe` raises a
+   `ConnectionClosedError`, `ConnectionClosed`, or a Schwab
+   "connection not found / stream connection" error, the service sets
+   `self._needs_reconnect = True`. `ensure_atm_streaming` includes this
+   flag in its `_need_register` condition, so the next cycle calls
+   `register()` (clearing it) to recreate the handler and re-subscribe.
+
+Either path ends with the same `_do_subscribe` building all per-ticker
+ATM option symbols and re-issuing `level_one_option_subs`. Subscription
+requests are deduplicated against `_last_sub_ok_set` so identical symbol
+sets are not re-sent — re-sending identical subscription requests every
+2 s causes the Schwab server to rate-limit and silently drop the feed.
 
 ## Notes / limitations
 
@@ -199,6 +250,8 @@ its option chain after the equity feed is back online.
   subscription (the primary symbol's front expiration).
 - `ensure_session_defaults` reuses `app._SESSION_DEFAULTS` so the page and main
   app never drift apart.
-- The REST pre-fetch (`fetch_quotes`) runs every fragment tick (2 s). This is
-  a lightweight call but does hit the Schwab API. Rate limiting is not expected
-  for a single user session.
+- The REST pre-fetch (`fetch_quotes`) runs every ~10 s (gated by
+  `s["_spot_fetch_ts"]`), even though the fragment ticks every 2 s. This is
+  a lightweight call but does hit the Schwab API; rate limiting is not
+  expected for a single user session. Between fetches, cached spots from
+  `s.spot_cache` (fed by the equity stream and prior REST calls) are used.

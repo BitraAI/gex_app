@@ -84,6 +84,8 @@ def generate_recommendations(
     ssvi_surface: Any = None,
     ssvi_tte: float | None = None,
     bias: str | None = None,
+    dte_min: int = 30,
+    dte_max: int = 45,
 ) -> list[str]:
     recs = []
 
@@ -151,10 +153,10 @@ def generate_recommendations(
             candidates = [
                 e for e in src
                 if e.get("type") == "CALL" and (e.get("strike", 0) or 0) > spot
-                and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
+                and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
             ]
             if not candidates:
-                recs.append("No OTM calls in DTE 30-45 range.")
+                recs.append(f"No OTM calls in DTE {dte_min}-{dte_max} range.")
             else:
                 exp_vrps: dict[str, float] = {}
                 for e in candidates:
@@ -178,7 +180,7 @@ def generate_recommendations(
                         best = min(best_exp_candidates, key=_rich)
                         recs.append(
                             f"**Buy Call @ {best['strike']:g}** ({best_exp[-5:]}) — "
-                            f"VRP {exp_vrps[best_exp]:.1f}%, (IV - SSVI IV) {_rich(best) * 100:+.2f}%, "
+                            f"VRP {exp_vrps[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
                             f"25Δ Skew {iv_skew:+.2%}."
                         )
 
@@ -190,10 +192,10 @@ def generate_recommendations(
             candidates = [
                 e for e in src
                 if e.get("type") == "PUT" and (e.get("strike", 0) or 0) < spot
-                and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
+                and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
             ]
             if not candidates:
-                recs.append("No OTM puts in DTE 30-45 range.")
+                recs.append(f"No OTM puts in DTE {dte_min}-{dte_max} range.")
             else:
                 exp_vrps: dict[str, float] = {}
                 for e in candidates:
@@ -217,7 +219,7 @@ def generate_recommendations(
                         best = min(best_exp_candidates, key=_rich)
                         recs.append(
                             f"**Buy Put @ {best['strike']:g}** ({best_exp[-5:]}) — "
-                            f"VRP {exp_vrps[best_exp]:.1f}%, (IV - SSVI IV) {_rich(best) * 100:+.2f}%, "
+                            f"VRP {exp_vrps[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
                             f"25Δ Skew {iv_skew:+.2%}."
                         )
 
@@ -229,10 +231,10 @@ def generate_recommendations(
             candidates = [
                 e for e in src
                 if e.get("type") == "CALL" and (e.get("strike", 0) or 0) > spot
-                and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
+                and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
             ]
             if not candidates:
-                recs.append("No OTM calls in DTE 30-45 range.")
+                recs.append(f"No OTM calls in DTE {dte_min}-{dte_max} range.")
             else:
                 exp_vrps: dict[str, float] = {}
                 for e in candidates:
@@ -256,7 +258,7 @@ def generate_recommendations(
                         best = max(best_exp_candidates, key=_rich)
                         recs.append(
                             f"**Sell Call @ {best['strike']:g}** ({best_exp[-5:]}) — "
-                            f"VRP {exp_vrps[best_exp]:.1f}%, (IV - SSVI IV) {_rich(best) * 100:+.2f}%, "
+                            f"VRP {exp_vrps[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
                             f"25Δ Skew {iv_skew:+.2%}."
                         )
 
@@ -268,10 +270,10 @@ def generate_recommendations(
             candidates = [
                 e for e in src
                 if e.get("type") == "PUT" and (e.get("strike", 0) or 0) < spot
-                and 30 <= (e.get("days_to_exp", 0) or 0) <= 45
+                and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
             ]
             if not candidates:
-                recs.append("No OTM puts in DTE 30-45 range.")
+                recs.append(f"No OTM puts in DTE {dte_min}-{dte_max} range.")
             else:
                 exp_vrps: dict[str, float] = {}
                 for e in candidates:
@@ -295,7 +297,7 @@ def generate_recommendations(
                         best = max(best_exp_candidates, key=_rich)
                         recs.append(
                             f"**Sell Put @ {best['strike']:g}** ({best_exp[-5:]}) — "
-                            f"VRP {exp_vrps[best_exp]:.1f}%, (IV - SSVI IV) {_rich(best) * 100:+.2f}%, "
+                            f"VRP {exp_vrps[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
                             f"25Δ Skew {iv_skew:+.2%}."
                         )
 
