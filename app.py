@@ -61,10 +61,8 @@ from charts import (
     create_atm_iv_histogram,
     create_vrp_chart,
     create_vol_surface_2d,
-    create_vrp_by_strike,
     create_iv_by_strike,
     create_iv_richness_by_strike,
-    create_iv_richness_pct_by_expiration,
 )
 
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
@@ -777,12 +775,6 @@ def render_sidebar():
         st.session_state.show_otm = st.checkbox("Show OTM", True)
 
 
-def render_indicators_panel():
-    with st.expander("Indicators", expanded=False):
-        st.markdown("## Indicators")
-        st.info("Indicator code preserved - available for future enhancements")
-
-
 TIMEFRAMES = {
     "1m": "1min", "2m": "2min", "5m": "5min", "15m": "15min",
     "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1D", "1w": "1W", "1M": "1ME",
@@ -936,8 +928,6 @@ def render_candlesticks():
             indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "Andean Osc"]
             selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Osc", "EMA 50 Squeeze", "Trend"], label_visibility="collapsed")
         
-        from client import load_candle_cache
-
         # Refresh the cache from the API when the existing on-disk bars are
         # stale relative to the user's chosen timeframe. The chart fragment
         # renders every 1s, so we need a gate that doesn't hammer the TDA REST
@@ -1281,7 +1271,6 @@ def render_candlesticks():
         s.candlestick_label = chart_label
 
         # --- Render lightweight-charts streaming candlestick ---
-        d = False
         df = s.candlestick_data
 
         # Build the candle list for chart_component.render_chart. Keep datetime as
@@ -1411,7 +1400,7 @@ def render_metrics_frag():
 
 
 def render_market_structure_frag():
-    s = st.session_state; d = False
+    s = st.session_state
     if not s.get("strikes"):
         return
 
@@ -1444,7 +1433,7 @@ def render_market_structure_frag():
 
 
 def render_positioning_frag():
-    s = st.session_state; d = False
+    s = st.session_state
     if not s.get("strikes"):
         return
 
@@ -1497,7 +1486,7 @@ def render_positioning_frag():
 
 
 def render_volatility_frag():
-    s = st.session_state; d = False
+    s = st.session_state
     if not s.get("strikes"):
         return
 
@@ -1597,7 +1586,7 @@ def render_volatility_frag():
 
 
 def render_heatmaps_frag():
-    s = st.session_state; d = False
+    s = st.session_state
     if not s.get("strikes"):
         return
 
@@ -1791,7 +1780,7 @@ def _strategy_side(stg: str) -> str | None:
 
 
 def render_trade_signals_frag():
-    s = st.session_state; d = False
+    s = st.session_state
 
     st.subheader("Trade Signals")
 
@@ -1978,11 +1967,10 @@ def render_table():
     max_pain_bg = "#ffcccc"
     call_wall_bg = "#ffcccc"
     put_wall_bg = "#ccffcc"
+    atm_strike = df.iloc[(df["Strike"] - spot).abs().argsort()[:1]]["Strike"].values[0]
 
     def highlight_atm(row):
-        is_atm = abs(row["Strike"] - spot) == min(
-            abs(df["Strike"] - spot)
-        )
+        is_atm = row["Strike"] == atm_strike
         styles = [f"background-color: {atm_bg}"] * len(row) if is_atm else [""] * len(row)
         if row.name == max_pin_idx:
             col_idx = list(row.index)

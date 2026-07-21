@@ -2,7 +2,6 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 _CONFIG_PATH = Path(__file__).parent / "config.toml"
@@ -41,9 +40,6 @@ CLIENT_ID = os.environ.get("SCHWAB_CLIENT_ID", CLIENT_ID)
 CLIENT_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", CLIENT_SECRET)
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", BOT_TOKEN)
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", CHAT_ID)
-
-DEFAULT_STRIKE_COUNT = 50
-DEFAULT_EXPIRATION_WINDOW = 90
 
 
 @dataclass
