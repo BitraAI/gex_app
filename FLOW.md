@@ -13,7 +13,7 @@ tracked ticker:
 | **Ticker** | Display symbol (index symbols like `SPX` kept as-is; streamed via ETF proxy `SPY`/`IWM`/`QQQ`). |
 | **Spot** | Latest spot price (REST pre-fetch or live equity stream). |
 | **ATM Strike** | Nearest strike to spot, computed by `calculate_atm_strike` (strike spacing by price band). |
-| **Trend** | Direction of net flow momentum over the last 60 seconds (see below). Shows standard arrows (↑/↓/→). **Visual reversal indicators**: **↑ 📈** (bullish reversal), **↓ 📉** (bearish reversal). |
+| **Trend** | Direction of net flow momentum over the last 60 seconds (see below). Enhanced indicators: **↑↑** (strong bullish with OPTIONS_BOOK), **↓↓** (strong bearish with OPTIONS_BOOK), **→→** (building bullish momentum), **←←** (building bearish momentum), **↑** (normal bullish), **↓** (normal bearish), **→** (balanced/flat). |
 | **Call Price** | Mid price of the ATM call option. |
 | **Put Price** | Mid price of the ATM put option. |
 | **Bullish Flow** | Cumulative option volume classified as bullish. |
@@ -69,18 +69,23 @@ How it works:
    segment-first delta). It is available for UI display but is not currently
    rendered in the grid.
 
-**Visual trend indicators** in the Trend column (flow_page.py:213-226):
+**Enhanced trend indicators** in the Trend column (flow_page.py:213-226):
 
 | Condition | Display |
 |-----------|---------|
-| Normal **up** trend | `↑` |
-| Normal **down** trend | `↓` |
-| **flat** trend | `→` |
-| **bullish** reversal | `↑ 📈` (up arrow + bullish emoji) |
-| **bearish** reversal | `↓ 📉` (down arrow + bearish emoji) |
+| **up** trend (bullish) | `↑` |
+| **down** trend (bearish) | `↓` |
+| **flat** trend (balanced) | `→` |
+| **bullish reversal** | `↑↑` (strong bullish with OPTIONS_BOOK) |
+| **bearish reversal** | `↓↓` (strong bearish with OPTIONS_BOOK) |
+| **building bullish momentum** | `→→` (momentum building) |
+| **building bearish momentum** | `←←` (momentum building) |
 
-The trend reversal emojis are added without creating new columns, keeping
-the display clean while highlighting significant momentum shifts.
+The enhanced trend indicators incorporate OPTIONS_BOOK liquidity pressure:
+- **Strong bullish**: `↑↑` when book imbalance > 0.3
+- **Strong bearish**: `↓↓` when book imbalance < -0.3
+- **Neutral trends**: `↑`, `↓`, `→` for standard trend cases
+
 
 ## Data pipeline
 
