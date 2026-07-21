@@ -1533,7 +1533,8 @@ def render_volatility_frag():
                 f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
                 unsafe_allow_html=True,
             )
-            st.plotly_chart(create_vrp_chart(ivd, _rv), config={"scrollZoom": True}, width='stretch', key="vrp_chart")
+            # VRP chart has been removed - use IV by Expiration instead
+            st.info("VRP chart removed - use IV by Expiration for expiration-based VRP data")
         else: st.info("No RV data")
     else:
         tm = st.radio("View", ["IV", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
