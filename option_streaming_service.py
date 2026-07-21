@@ -827,7 +827,7 @@ class AtmOptionVolumeService:
         history = ticker["flow_history"]
         if len(history) < 2:
             ticker["trend"] = "flat"
-            ticker["trend_reversal"] = None
+            ticker["flow_speed"] = 0
             return
 
         # Calculate flow momentum (net change in bullish/bearish volume)
@@ -835,7 +835,10 @@ class AtmOptionVolumeService:
         older_first = history[0][1]
         newer_first = history[-segment_size][1]
         flow_diff = newer_first - older_first
-        
+
+        # Store flow speed for UI display
+        ticker["flow_speed"] = flow_diff
+
         # Determine base trend from flow momentum
         if flow_diff > 0:
             current_trend = "up"
@@ -869,6 +872,12 @@ class AtmOptionVolumeService:
                 reversal = None
         else:
             reversal = None
+        
+        # Apply book imbalance pressure to trend assignment
+        if book_imbalance > 0.3 and current_trend != "up":
+            current_trend = "up"
+        elif book_imbalance < -0.3 and current_trend != "down":
+            current_trend = "down"
         
         ticker["trend"] = current_trend
         ticker["trend_reversal"] = reversal

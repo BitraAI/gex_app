@@ -38,7 +38,7 @@ from client import create_client, fetch_option_chain, get_yield, get_interest_ra
 from streaming_service import StreamingService
 from option_streaming_service import AtmOptionVolumeService
 from chart_component import render_chart
-from flow_page import render_atm_order_flow_grid
+from flow import render_atm_order_flow_grid
 from calculations import (
     aggregate_by_strike,
     aggregate_by_expiration,
@@ -2055,7 +2055,7 @@ def _flow_grid():
     # Watchdog: detect a silently dead option feed.  If the market is
     # open and no ticks have arrived for 60 s, force re-registration
     # so the next ensure_atm_streaming cycle re-subscribes everything.
-    from flow_page import is_market_open
+    from flow import is_market_open
     atm_svc = s.get("atm_option_service")
     if atm_svc and is_market_open() and atm_svc.is_running:
         if atm_svc.is_feed_stale(max_age_seconds=60):
@@ -2079,7 +2079,7 @@ def render_flow_frag():
         st.info("Initialize authentication to load data")
         return
 
-    from flow_page import render_flow_legend_and_style
+    from flow import render_flow_legend_and_style
 
     st.subheader("ATM Order Flow")
     render_flow_legend_and_style()

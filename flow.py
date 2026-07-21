@@ -208,14 +208,14 @@ def render_atm_order_flow_grid():
         spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
         trend = atm_svc.get_ticker_trend(t_upper) if atm_svc else "flat"
         
-        # Get trend reversal from ticker data
-        trend_reversal = None
+        # Get book imbalance and trend reversal from ticker data
         book_imbalance = None
+        trend_reversal = None
         if atm_svc:
             ticker_data = _find_flow_for_display(atm_svc._ticker_flows, t_upper)
             if ticker_data:
-                trend_reversal = ticker_data.get("trend_reversal")
                 book_imbalance = ticker_data.get("book_imbalance")
+                trend_reversal = ticker_data.get("trend_reversal")
         
         # Format Trend column - enhanced with liquidity pressure indicators
         # Keep visual indicators without emojis

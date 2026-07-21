@@ -1,6 +1,6 @@
 """Shared async event loop for the GEX application.
 
-Both app.py and flow_page.py import from here to ensure they use the
+Both app.py and flow.py import from here to ensure they use the
 *same* event loop — avoiding the "bound to a different event loop"
 RuntimeError that occurs when an httpx AsyncClient is dispatched on
 multiple loops.
