@@ -1741,6 +1741,7 @@ def _build_signals(
     data: list[dict], spot: float, analytics: dict, rv: float,
     pt: str, stg: str, atm_range: int = 20, by_exp_all: list | None = None,
     selected_expirations: list[str] | None = None,
+    dte_min: int = 30, dte_max: int = 45,
 ) -> list[str]:
     """Build trade-signal recommendations for a single ticker's option data.
 
@@ -1761,7 +1762,7 @@ def _build_signals(
 
     _rec_stg = stg
     if stg == "Long LEAPS":
-        sd2 = [e for e in sd2 if 90 <= (e.get("days_to_exp", 0) or 0) <= 365]
+        sd2 = [e for e in sd2 if dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max]
         _rec_stg = "Long Calls"
 
     _ssvi_surf = analytics.get("ssvi_surface")
@@ -1775,7 +1776,7 @@ def _build_signals(
         sd2 = [e for e in sd2 if e["type"] == "PUT"]
 
     bias, _ = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))
-    rc = generate_recommendations(sd2, spot, strategy=_rec_stg, all_data=sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte, bias=bias)
+    rc = generate_recommendations(sd2, spot, strategy=_rec_stg, all_data=sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte, bias=bias, dte_min=dte_min, dte_max=dte_max)
     return rc
 
 
@@ -1811,6 +1812,12 @@ def render_trade_signals_frag():
         with c1:
             pt = st.radio("Premium Type", ["Buy Premium", "Sell Premium"], horizontal=True, key="premium_type")
             stg = st.selectbox("Strategy", ["Long Calls", "Long Puts", "Call Debit Spread", "Put Debit Spread", "Long LEAPS", "Long Straddles", "Long Strangles", "Calendar Spread"] if pt == "Buy Premium" else ["Short Calls", "Short Puts", "Call Credit Spread", "Put Credit Spread", "Iron Condor", "Butterfly", "Broken Wing Butterfly", "Jade Lizard"])
+            _dte_col1, _dte_col2 = st.columns(2)
+            _leaps = stg == "Long LEAPS"
+            with _dte_col1:
+                dte_min = st.number_input("DTE Min", min_value=1, max_value=365, value=90 if _leaps else 30, step=1, key="dte_min")
+            with _dte_col2:
+                dte_max = st.number_input("DTE Max", min_value=1, max_value=365, value=365 if _leaps else 45, step=1, key="dte_max")
 
         with c2:
             if not scan_all:
@@ -1822,6 +1829,7 @@ def render_trade_signals_frag():
                     s.filtered_data, s.spot, s.analytics, _rv, pt, stg,
                     atm_range=s.get("strikes_atm_range", 20), by_exp_all=s.get("by_exp_all"),
                     selected_expirations=[e for e in s.get("selected_expiration", []) if isinstance(e, str)] or None,
+                    dte_min=dte_min, dte_max=dte_max,
                 )
                 if rc:
                     for r in rc:
@@ -1857,6 +1865,7 @@ def render_trade_signals_frag():
                                 res["data"], res["spot"], res["analytics"], res["rv"], pt, stg,
                                 atm_range=s.get("strikes_atm_range", 20),
                                 by_exp_all=[e for e in aggregate_by_expiration(res["data"], spot=res["spot"]) if e.get("atm_iv", 0) > 0],
+                                dte_min=dte_min, dte_max=dte_max,
                             )
                             _no_sig = "No strong signals" in " ".join(rc)
                             if rc and not _no_sig:
