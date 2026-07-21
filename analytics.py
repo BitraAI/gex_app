@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool = True, show_puts: bool = True, data_full: list[dict[str, Any]] | None = None, r: float = 0.0, q: float = 0.0, expiration: str | None = None) -> dict[str, Any]:
     strikes = aggregate_by_strike(data, spot, show_calls=show_calls, show_puts=show_puts)
-    by_exp = aggregate_by_expiration(data, show_calls=show_calls, show_puts=show_puts)
+    by_exp = aggregate_by_expiration(data, show_calls=show_calls, show_puts=show_puts, spot=spot)
     totals = compute_totals(data)
 
     analytics = {}
@@ -212,7 +212,7 @@ def _calculate_iv_skew(data: list[dict[str, Any]], spot: float, expiration: str 
 
 
 def _calculate_expected_move(data: list[dict[str, Any]], spot: float) -> Optional[dict[str, float]]:
-    valid = [e for e in data if e.get("mark", 0) or 0 > 0]
+    valid = [e for e in data if (e.get("mark", 0) or 0) > 0]
     if not valid or spot <= 0:
         return None
 

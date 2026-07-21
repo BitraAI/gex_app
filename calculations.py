@@ -5,9 +5,7 @@ from zoneinfo import ZoneInfo
 
 
 def get_strike_spacing(price: float) -> float:
-    if price <= 5:
-        return 0.5
-    elif price <= 25:
+    if price <= 25:
         return 0.5
     elif price <= 200:
         return 1.0
@@ -68,6 +66,7 @@ def parse_option_chain(raw: dict[str, Any], r: float = 0.0, q: float = 0.0,
 
     call_exp_map = raw.get("callExpDateMap", {})
     put_exp_map = raw.get("putExpDateMap", {})
+    _now = datetime.now()
 
     for exp_key, strikes in call_exp_map.items():
         exp_date = _parse_exp_key(exp_key)
@@ -80,7 +79,7 @@ def parse_option_chain(raw: dict[str, Any], r: float = 0.0, q: float = 0.0,
                 if opt.get("putCall", "").upper() != "CALL":
                     continue
                 fb = _find_fallback(fallback_greeks, exp_date, float(opt.get("delta", 0) or 0), "CALL")
-                entry = _extract_option_fields(opt, "CALL", strike, exp_date, spot_price, r, q, fallback=fb)
+                entry = _extract_option_fields(opt, "CALL", strike, exp_date, spot_price, r, q, fallback=fb, _now=_now)
                 if entry:
                     results.append(entry)
 
@@ -95,7 +94,7 @@ def parse_option_chain(raw: dict[str, Any], r: float = 0.0, q: float = 0.0,
                 if opt.get("putCall", "").upper() != "PUT":
                     continue
                 fb = _find_fallback(fallback_greeks, exp_date, float(opt.get("delta", 0) or 0), "PUT")
-                entry = _extract_option_fields(opt, "PUT", strike, exp_date, spot_price, r, q, fallback=fb)
+                entry = _extract_option_fields(opt, "PUT", strike, exp_date, spot_price, r, q, fallback=fb, _now=_now)
                 if entry:
                     results.append(entry)
 
@@ -177,6 +176,7 @@ def _extract_option_fields(
     r: float = 0.0,
     q: float = 0.0,
     fallback: dict[str, float] | None = None,
+    _now: datetime | None = None,
 ) -> Optional[dict[str, Any]]:
     try:
         gamma = opt.get("gamma")
@@ -228,7 +228,7 @@ def _extract_option_fields(
 
         try:
             exp_dt = datetime.strptime(expiration, "%Y-%m-%d")
-            days_to_exp = (exp_dt - datetime.now()).days
+            days_to_exp = (exp_dt - (_now or datetime.now())).days
         except (ValueError, TypeError):
             days_to_exp = 0
 
@@ -450,31 +450,6 @@ def compute_totals(
         "total_put_gex": round(total_put_gex, 2),
         "net_gex": round(net_gex, 2),
     }
-
-
-def calculate_call_wall(data: list[dict[str, Any]], spot: float) -> Optional[float]:
-    strikes = aggregate_by_strike(data, spot)
-    above = [s for s in strikes if s["strike"] >= spot and s["call_gex"] != 0]
-    if not above:
-        return None
-    return max(above, key=lambda s: abs(s["call_gex"]))["strike"]
-
-
-def calculate_put_wall(data: list[dict[str, Any]], spot: float) -> Optional[float]:
-    strikes = aggregate_by_strike(data, spot)
-    below = [s for s in strikes if s["strike"] <= spot and s["put_gex"] != 0]
-    if not below:
-        return None
-    return max(below, key=lambda s: abs(s["put_gex"]))["strike"]
-
-
-def calculate_gamma_flip(data: list[dict[str, Any]], spot: float) -> Optional[float]:
-    strikes = aggregate_by_strike(data, spot)
-    net_gex_above = sum(s["net_gex"] for s in strikes if s["strike"] > spot)
-    net_gex_below = sum(s["net_gex"] for s in strikes if s["strike"] < spot)
-    if net_gex_above == 0:
-        return None
-    return round(net_gex_below / net_gex_above, 4)
 
 
 def dealer_position(data: list[dict[str, Any]], spot: float) -> str:

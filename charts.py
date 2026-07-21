@@ -1,6 +1,5 @@
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 from typing import Any, Optional
 
@@ -484,8 +483,6 @@ def create_gamma_surface(
             else:
                 z[s_idx, e_idx] = val
 
-    X, Y = np.meshgrid(range(len(expirations)), range(len(strikes)))
-
     fig = go.Figure(data=[go.Surface(
         x=exp_labels,
         y=strikes,
@@ -541,8 +538,6 @@ def create_vol_surface(
             if iv > 3:
                 iv = iv / 100
             z[s_idx, e_idx] = iv
-
-    X, Y = np.meshgrid(range(len(expirations)), range(len(strikes)))
 
     fig = go.Figure(data=[go.Surface(
         x=exp_labels,
@@ -1720,18 +1715,15 @@ def create_candlestick_chart(
     cd.sort(key=lambda x: x["time"])
 
     # deduplicate: keep last entry per unique time
-    seen: set[int] = set()
+    time_to_idx: dict[int, int] = {}
     deduped: list[dict] = []
     for c in cd:
-        if c["time"] not in seen:
-            seen.add(c["time"])
-            deduped.append(c)
+        t = c["time"]
+        if t in time_to_idx:
+            deduped[time_to_idx[t]] = c
         else:
-            # Replace existing entry with the new one (keep last)
-            for i, d in enumerate(deduped):
-                if d["time"] == c["time"]:
-                    deduped[i] = c
-                    break
+            time_to_idx[t] = len(deduped)
+            deduped.append(c)
     cd = deduped
 
     closes = [c["close"] for c in cd]
@@ -1796,24 +1788,6 @@ def create_candlestick_chart(
     volume_time_scale = dict(sub_time_scale)
     andean_time_scale = dict(sub_time_scale)
 
-    layout = {
-        "height": 500,
-        "layout": {"background": {"type": "solid", "color": bg}, "textColor": tc},
-        "handleScroll": True,
-        "handleScale": True,
-        "grid": {
-            "vertLines": {"color": grid_col},
-            "horzLines": {"color": grid_col},
-        },
-        "rightPriceScale": {
-            "scaleMargins": {"top": 0.0, "bottom": 0.25},
-            "borderVisible": True,
-        },
-        
-        "timeScale": time_scale,
-        "crosshair": {"mode": 0},
-    }
-
     series: list[dict] = [
         {"type": "Candlestick", "data": cd,
          "options": {
@@ -1826,13 +1800,13 @@ def create_candlestick_chart(
     if call_wall is not None:
         series.append({
             "type": "Line",
-            "data": [{"time": cd[i]["time"], "value": call_wall} for i in range(len(cd))],
+            "data": [{"time": cd[0]["time"], "value": call_wall}, {"time": cd[-1]["time"], "value": call_wall}],
             "options": {"color": "#ef553b", "lineWidth": 1, "lineStyle": 2, "title": "Call Wall"},
         })
     if put_wall is not None:
         series.append({
             "type": "Line",
-            "data": [{"time": cd[i]["time"], "value": put_wall} for i in range(len(cd))],
+            "data": [{"time": cd[0]["time"], "value": put_wall}, {"time": cd[-1]["time"], "value": put_wall}],
             "options": {"color": "#00cc96", "lineWidth": 1, "lineStyle": 2, "title": "Put Wall"},
         })
 

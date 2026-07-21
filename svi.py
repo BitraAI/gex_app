@@ -153,7 +153,7 @@ def _fit_raw_svi(
     if not _ensure_arb_constraints(a, b, rho, sigma):
         try:
             res = least_squares(
-                _raw_svi_residual, np.clip(x0, bounds[0], bounds[1]),
+                _raw_svi_residual, np.clip(res.x, bounds[0], bounds[1]),
                 args=(k, w), bounds=bounds, method="trf",
                 loss="soft_l1", max_nfev=2000,
             )
@@ -266,6 +266,11 @@ def _group_otm_quotes(
     feed the fit (the standard "use liquid OTM wings" choice).
     """
     grouped: dict[str, dict[str, Any]] = {}
+    _ny = ZoneInfo("America/New_York")
+    _ny_now = datetime.now(_ny)
+    _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
+    _secs_since_930 = max(0, min(_secs_since_930, 23400))
+    _secs_left = 23400 - _secs_since_930
     for e in data:
         try:
             iv_raw = float(e.get("iv", 0.0) or 0.0)
@@ -304,11 +309,6 @@ def _group_otm_quotes(
         if iv <= 0.0:
             continue
 
-        _ny = ZoneInfo("America/New_York")
-        _ny_now = datetime.now(_ny)
-        _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
-        _secs_since_930 = max(0, min(_secs_since_930, 23400))
-        _secs_left = 23400 - _secs_since_930
         tte = (dte + _secs_left / 23400) / 365.0
         F = spot * math.exp((r - q) * tte)
         k = math.log(strike / F)

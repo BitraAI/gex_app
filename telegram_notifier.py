@@ -186,7 +186,7 @@ def diff_alerts(
                 new_alerts.append(f"Price approaching Call Wall (${cw:.2f})")
         if pw is not None:
             pw_buf = abs(pw) * _BUFFER
-            if prev_spot <= pw + pw_buf and spot > pw:
+            if prev_spot > pw and spot <= pw + pw_buf:
                 new_alerts.append(f"Price approaching Put Wall (${pw:.2f})")
 
     return new_alerts, cur
