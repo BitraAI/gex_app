@@ -48,7 +48,6 @@ DEFAULT_EXPIRATION_WINDOW = 90
 
 @dataclass
 class AppConfig:
-    theme: str = "light"
     min_open_interest: int = 0
     min_volume: int = 0
     show_calls: bool = True

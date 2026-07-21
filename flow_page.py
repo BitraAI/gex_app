@@ -1,5 +1,5 @@
-"""Shared ATM order-flow rendering used by both the main app page and the
-dedicated Order Flow tab.
+"""Shared ATM order-flow rendering used by both the main app page and
+the dedicated Order Flow tab.
 
 Kept free of any st.set_page_config / global app setup so it can be imported
 safely from either entry point without re-running app.py's top-level code.
@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from option_streaming_service import _find_flow_for_display
 
 
 def _ensure_async_loop() -> asyncio.AbstractEventLoop:
@@ -141,8 +142,8 @@ def render_flow_legend_and_style():
     _legend_html = "".join(
         f'<span style="display:inline-flex;align-items:center;'
         f'margin-left:16px;">'
-        f'<span style="font-size:25px;line-height:25px;'
-        f'color:{c};margin-right:6px;">\u25cf</span>{name}</span>'
+        f'<span style="font-size:35px;line-height:35px;'
+        f'color:{c};margin-right:6px;">•</span>{name}</span>'
         for name, c in _items
     )
     st.markdown(
@@ -206,6 +207,14 @@ def render_atm_order_flow_grid():
         atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
         spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
         trend = atm_svc.get_ticker_trend(t_upper) if atm_svc else "flat"
+        
+        # Get trend reversal from ticker data
+        trend_reversal = None
+        if atm_svc:
+            ticker_data = _find_flow_for_display(atm_svc._ticker_flows, t_upper)
+            if ticker_data and "trend_reversal" in ticker_data:
+                trend_reversal = ticker_data["trend_reversal"]
+        
         rows.append({
             "Ticker": t_upper,
             "Spot": spot,
@@ -216,6 +225,7 @@ def render_atm_order_flow_grid():
             "Bearish Flow": bearish if has_data else 0,
             "Net Flow": net if has_data else 0,
             "Trend": trend,
+            "Trend Reversal": trend_reversal,
             "Status": status,
         })
 
@@ -227,7 +237,7 @@ def render_atm_order_flow_grid():
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Trend"],
          r["Call Price"], r["Put Price"], r["Bullish Flow"],
-         r["Bearish Flow"], r["Net Flow"], r["Status"])
+         r["Bearish Flow"], r["Net Flow"], r["Trend Reversal"], r["Status"])
         for r in rows
     )
     data_hash = hash(data_key)
@@ -242,7 +252,45 @@ def render_atm_order_flow_grid():
 
     def _status_color(val):
         color = _STATUS_COLORS.get(val, "#808080")
-        return f"color: {color}; font-size: 25px; text-align: center;"
+        return f"color: {color}; font-size: 35px; text-align: center;"
+
+    def _net_flow_color(val):
+        if val > 0:
+            return "color: #00cc96; font-weight: bold;"
+        if val < 0:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #808080;"
+
+    def _trend_display(row):
+        """Format the trend text for display, adding 📈/📉 for reversals."""
+        trend = row.get("Trend", "flat")
+        reversal = row.get("Trend Reversal")
+        
+        trend_arrow = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
+        
+        if reversal == "bullish":
+            return f"{trend_arrow} 📈"
+        elif reversal == "bearish":
+            return f"{trend_arrow} 📉"
+        else:
+            return trend_arrow
+
+    def _trend_color(val):
+        """Color the trend text (up/down/flat) and reversal indicators based on direction."""
+        if val is None:
+            return "color: #808080;"
+        if "📈" in str(val):
+            return "color: #00cc96; font-weight: bold;"
+        if "📉" in str(val):
+            return "color: #ef5350; font-weight: bold;"
+        return {
+            "up": "color: #00cc96; font-weight: bold;",
+            "down": "color: #ef5350; font-weight: bold;",
+        }.get(val, "color: #808080;")
+
+    def _status_color(val):
+        color = _STATUS_COLORS.get(val, "#808080")
+        return f"color: {color}; font-size: 35px; text-align: center;"
 
     def _net_flow_color(val):
         if val > 0:
@@ -252,30 +300,55 @@ def render_atm_order_flow_grid():
         return "color: #808080;"
 
     def _trend_color(val):
+        """Color the trend text (including reversal indicators)."""
+        if val is None:
+            return "color: #808080;"
+        if "📈" in str(val):
+            return "color: #00cc96; font-weight: bold;"
+        if "📉" in str(val):
+            return "color: #ef5350; font-weight: bold;"
         return {
-            "up": "color: #00cc96; font-weight: bold;",
-            "down": "color: #ef5350; font-weight: bold;",
+            "↑": "color: #00cc96; font-weight: bold;",
+            "↓": "color: #ef5350; font-weight: bold;",
+            "→": "color: #808080;",
         }.get(val, "color: #808080;")
+
+    # Add display trend column with reversal indicators
+    def _add_display_trend(row):
+        trend = row["Trend"]
+        reversal = row.get("Trend Reversal")
+        
+        trend_arrow = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
+        
+        if reversal == "bullish":
+            return f"{trend_arrow} 📈"
+        elif reversal == "bearish":
+            return f"{trend_arrow} 📉"
+        else:
+            return trend_arrow
+    
+    df["Display Trend"] = df.apply(_add_display_trend, axis=1)
 
     _styler = df.style.set_uuid("flow_grid")
     if hasattr(_styler, "map"):
         _styler = _styler.map(_status_color, subset=["Status"])
         _styler = _styler.map(_net_flow_color, subset=["Net Flow"])
-        _styler = _styler.map(_trend_color, subset=["Trend"])
+        _styler = _styler.map(_trend_color, subset=["Display Trend"])
     else:
-        _styler = _styler.applymap(_status_color, subset=["Status"])
-        _styler = _styler.applymap(_net_flow_color, subset=["Net Flow"])
-        _styler = _styler.applymap(_trend_color, subset=["Trend"])
+        _styler = _styler.apply(_status_color, subset=["Status"])
+        _styler = _styler.apply(_net_flow_color, subset=["Net Flow"])
+        _styler = _styler.apply(_trend_color, subset=["Display Trend"])
+
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
         "ATM Strike": lambda v: f"${v:,.2f}" if v is not None else "",
-        "Trend": lambda v: {"up": "↑", "down": "↓", "flat": "→"}.get(v, "→"),
         "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Bullish Flow": "{:,.0f}",
         "Bearish Flow": "{:,.0f}",
         "Net Flow": "{:,.0f}",
-        "Status": lambda v: "\u25cf",
+        "Status": lambda v: "•",
+        "Display Trend": lambda v: v,
     })
 
     s._flow_styled_hash = data_hash

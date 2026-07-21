@@ -12,23 +12,8 @@ TEMPLATE = {
     "grid_color": "#e9eef3",
 }
 
-DARK_TEMPLATE = {
-    "plot_bgcolor": "#dbeafe",
-    "paper_bgcolor": "#dbeafe",
-    "font_color": "#1e293b",
-    "grid_color": "#bfdbfe",
-}
-
-_IS_DARK = False
-
-
-def set_dark(is_dark: bool):
-    global _IS_DARK
-    _IS_DARK = is_dark
-
-
 def _get_template():
-    return DARK_TEMPLATE if _IS_DARK else TEMPLATE
+    return TEMPLATE
 
 
 def create_gex_histogram(
@@ -2038,143 +2023,9 @@ CSS = """
 """
 
 
-def _get_style(is_dark: bool) -> str:
-    return DARK_STYLE if is_dark else STYLE
+def _get_style() -> str:
+    return STYLE
 
 
-def _get_css(is_dark: bool) -> str:
-    return DARK_CSS if is_dark else CSS
-
-
-DARK_STYLE = """
-<style>
-    .stApp > header { display: none; }
-    .main .block-container {
-        padding-top: 1rem !important;
-        padding-bottom: 1rem !important;
-        max-width: 100% !important;
-    }
-    div[data-testid="stMetricValue"] {
-        font-size: 1.5rem !important;
-    }
-    .stSelectbox label, .stMultiSelect label {
-        font-size: 0.85rem !important;
-    }
-    .stAlert, .stSuccess, .stWarning, .stInfo {
-        background: none !important;
-        background-color: transparent !important;
-    }
-    .stApp { background-color: #0f172a; }
-    section[data-testid="stSidebar"],
-    section[data-testid="stSidebar"] > div {
-        background-color: #0b1120 !important;
-    }
-    .stSidebar p, .stSidebar label, .stSidebar span,
-    .stSidebar .stMarkdown { color: #e2e8f0 !important; }
-    .main > div { color: #e2e8f0; }
-    .stSelectbox div[data-baseweb="select"] > div {
-        background-color: #1e293b !important;
-        color: #e2e8f0 !important;
-        border-color: #334155 !important;
-    }
-    section[data-testid="stSidebar"] .stMultiSelect div[data-baseweb="select"] > div {
-        background-color: #ffffff !important;
-        color: #1e293b !important;
-        border-color: #d1d5db !important;
-    }
-    section[data-testid="stSidebar"] .stMultiSelect div[data-baseweb="tag"] {
-        background-color: #e2e8f0 !important;
-        color: #1e293b !important;
-    }
-    section[data-testid="stSidebar"] .stMultiSelect div[data-baseweb="tag"] * { color: #1e293b !important; }
-
-    .main .stMultiSelect div[data-baseweb="select"] > div {
-        background-color: #1a365d !important;
-        color: #e2e8f0 !important;
-        border-color: #2b6cb0 !important;
-    }
-    .main .stMultiSelect div[data-baseweb="tag"] {
-        background-color: #2b6cb0 !important;
-        color: #ffffff !important;
-    }
-    .main .stMultiSelect div[data-baseweb="tag"] * { color: #ffffff !important; }
-    .main .stMultiSelect div[data-baseweb="input"] { color: #e2e8f0 !important; }
-    .main .stMultiSelect div[data-baseweb="input"] input { color: #e2e8f0 !important; }
-    div[role="listbox"] ul { background-color: #1e293b !important; }
-    div[role="listbox"] li { color: #e2e8f0 !important; }
-    div[role="listbox"] li:hover { background-color: #334155 !important; }
-    .stRadio div[role="radiogroup"] label { color: #ffffff !important; }
-    .stRadio div[role="radiogroup"] label * { color: #ffffff !important; }
-    .stRadio div[role="radiogroup"] p { color: #ffffff !important; }
-    .stRadio div[role="radiogroup"] span { color: #ffffff !important; }
-    .stRadio div[role="radiogroup"] div { color: #ffffff !important; }
-    .stToggle label { color: #ffffff !important; }
-    .stToggle label * { color: #ffffff !important; }
-    .stToggle p { color: #ffffff !important; }
-    .stToggle span { color: #ffffff !important; }
-    .stCheckbox label { color: #e2e8f0 !important; }
-    .stNumberInput input {
-        background-color: #1e293b !important;
-        color: #e2e8f0 !important;
-        border-color: #334155 !important;
-    }
-    .stTextInput input {
-        background-color: #1e293b !important;
-        color: #e2e8f0 !important;
-        border-color: #334155 !important;
-    }
-    div[data-testid="stTabs"] [data-baseweb="tab-list"] { background-color: transparent !important; border-bottom-color: #334155 !important; }
-    div[data-testid="stTabs"] [data-baseweb="tab"],
-    div[data-testid="stTabs"] [data-baseweb="tab"] *,
-    div[data-testid="stTabs"] [data-baseweb="tab"] span,
-    div[data-testid="stTabs"] [data-baseweb="tab"] div,
-    div[data-testid="stTabs"] [data-baseweb="tab"] p { color: #ffffff !important; fill: #ffffff !important; }
-    div[data-testid="stTabs"] [data-baseweb="tab"] svg { fill: #ffffff !important; }
-    div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"],
-    div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] * { color: #ffffff !important; fill: #ffffff !important; border-bottom-color: #60a5fa !important; }
-    div[data-testid="stTabs"] [data-baseweb="tab"]:hover,
-    div[data-testid="stTabs"] [data-baseweb="tab"]:hover * { color: #ffffff !important; fill: #ffffff !important; }
-    div[data-testid="stTabs"] [data-baseweb="tab-highlight"] { background-color: #60a5fa !important; }
-    div[data-testid="stTabs"] [data-baseweb="tab-border"] { border-bottom-color: #334155 !important; }
-    [data-baseweb="tab-panel"] { color: #e2e8f0 !important; }
-    div[data-testid="stExpander"] { background-color: #ffffff !important; border-color: #e2e8f0 !important; }
-    div[data-testid="stExpander"] summary { color: #1e293b !important; }
-    div[data-testid="stExpander"] > div { background-color: #ffffff !important; }
-    div[data-testid="stExpander"] p,
-    div[data-testid="stExpander"] li,
-    div[data-testid="stExpander"] span,
-    div[data-testid="stExpander"] h1,
-    div[data-testid="stExpander"] h2,
-    div[data-testid="stExpander"] h3,
-    div[data-testid="stExpander"] h4,
-    div[data-testid="stExpander"] h5,
-    div[data-testid="stExpander"] h6,
-    div[data-testid="stExpander"] strong,
-    div[data-testid="stExpander"] label { color: #1e293b !important; }
-    div[data-testid="stExpander"] strong { color: #0f172a !important; }
-    .stButton button {
-        color: #e2e8f0 !important;
-        background-color: #1e293b !important;
-        border-color: #334155 !important;
-    }
-    .stButton button:hover {
-        background-color: #334155 !important;
-        border-color: #60a5fa !important;
-    }
-    h1, h2, h3, h4, h5, h6 { color: #e2e8f0 !important; }
-    .stSubheader { color: #e2e8f0 !important; }
-    .stCaption { color: #94a3b8 !important; }
-</style>
-"""
-
-DARK_CSS = """
-<style>
-    .gex-metric { background: #1e293b; border-radius: 8px; padding: 12px 16px; border: 1px solid #334155; text-align: center; }
-    .gex-metric .label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
-    .gex-metric .value { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-    .gex-metric .value.positive { color: #34d399; }
-    .gex-metric .value.negative { color: #f87171; }
-    .gex-metric .value.neutral { color: #e2e8f0; }
-    .gex-metric .value.warning { color: #eab308; }
-</style>
-"""
+def _get_css() -> str:
+    return CSS

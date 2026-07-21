@@ -52,7 +52,6 @@ from telegram_notifier import notify_alerts, diff_alerts
 from charts import (
     _get_style,
     _get_css,
-    set_dark,
     create_gex_histogram,
     create_gex_by_expiration,
     create_oi_by_strike,
@@ -72,7 +71,6 @@ from charts import (
 # imported by another module — calling it twice raises StreamlitAPIException.
 # Guard it so the module is safely importable for its helper functions
 # (ensure_atm_streaming, fetch_data, etc.).
-_initial_d = st.session_state.get("theme", "light") == "dark"
 try:
     st.set_page_config(
         page_title="GammaEx - GEX Analytics",
@@ -80,8 +78,7 @@ try:
         initial_sidebar_state="expanded",
     )
 
-    set_dark(_initial_d)
-    st.markdown(_get_style(_initial_d), unsafe_allow_html=True)
+    st.markdown(_get_style(), unsafe_allow_html=True)
 
     st.markdown("""
     <style>
@@ -98,7 +95,6 @@ except Exception:
     pass
 
 _SESSION_DEFAULTS = {
-    "theme": "light",
     "data": [],
     "spot": 0.0,
     "analytics": {},
@@ -163,7 +159,7 @@ for k, v in _SESSION_DEFAULTS.items():
 if not st.session_state.ticker_history:
     st.session_state.ticker_history = _load_ticker_history()
 
-st.markdown(_get_css(_initial_d), unsafe_allow_html=True)
+st.markdown(_get_css(), unsafe_allow_html=True)
 
 # Replace streaming service if it was created with old code (no shared loop)
 if st.session_state.get("client") is not None:
@@ -693,12 +689,6 @@ def compute_iv_rank(symbol: str) -> float | None:
 def render_sidebar():
     with st.sidebar:
         st.markdown("## GammaEx")
-
-        _is_dark = st.session_state.get("theme", "light") == "dark"
-        if st.toggle("Dark theme", value=_is_dark, key="theme_toggle"):
-            st.session_state.theme = "dark"
-        else:
-            st.session_state.theme = "light"
 
         st.markdown("---")
 
@@ -2036,35 +2026,6 @@ def render_tabs_frag():
     s = st.session_state
     if not s.get("data"):
         return
-    if st.session_state.get("theme", "light") == "dark":
-        st.markdown("""
-<style>
-div[data-testid="stTabs"] [role="tab"] { color: #ffffff !important; background-color: transparent !important; }
-div[data-testid="stTabs"] [role="tab"] span { color: #ffffff !important; }
-div[data-testid="stTabs"] [role="tab"] div { color: #ffffff !important; }
-div[data-testid="stTabs"] [role="tab"] p { color: #ffffff !important; }
-div[data-testid="stTabs"] [role="tab"] * { color: #ffffff !important; }
-div[data-testid="stTabs"] [role="tab"][aria-selected="true"] { color: #ffffff !important; }
-div[data-testid="stTabs"] [role="tab"][aria-selected="true"] * { color: #ffffff !important; }
-div[data-testid="stTabs"] [role="tab-highlight"] { background-color: #60a5fa !important; }
-</style>
-<script>
-function fixTabColors() {
-    document.querySelectorAll('div[data-testid="stTabs"] [role="tab"]').forEach(function(el) {
-        el.style.color = '#ffffff';
-        el.style.setProperty('color', '#ffffff', 'important');
-        el.querySelectorAll('*').forEach(function(child) {
-            child.style.color = '#ffffff';
-            child.style.setProperty('color', '#ffffff', 'important');
-        });
-    });
-}
-fixTabColors();
-setTimeout(fixTabColors, 500);
-setTimeout(fixTabColors, 1500);
-window.addEventListener('load', fixTabColors);
-</script>
-""", unsafe_allow_html=True)
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks", "Order Flow"])
     with tab1: render_market_structure_frag()
     with tab2: render_positioning_frag()
@@ -2123,7 +2084,7 @@ def render_flow_frag():
 
     from flow_page import render_flow_legend_and_style
 
-    st.subheader("Order Flow")
+    st.subheader("ATM Order Flow")
     render_flow_legend_and_style()
     _flow_grid()
 
