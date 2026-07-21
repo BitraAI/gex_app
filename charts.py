@@ -275,79 +275,6 @@ def create_oi_by_strike(
     return fig
 
 
-def create_vrp_by_strike(
-    strikes: list[dict[str, Any]],
-    spot: float,
-    rv: float = 0.0,
-) -> go.Figure:
-    tmpl = _get_template()
-    fig = go.Figure()
-
-    strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
-    labels = [f"{s['strike']:g}" for s in strikes_sorted]
-    ivs = [
-        s.get("call_iv", 0) if s["strike"] >= spot else s.get("put_iv", 0)
-        for s in strikes_sorted
-    ]
-    values = [iv - rv for iv in ivs]
-    title = "VRP by Strike"
-    yaxis_title = "VRP (IV - RV)"
-    hovertemplate = "Strike: %{x}<br>VRP: %{y:.2%}<extra></extra>"
-    tickformat = ".0%"
-    ref_line = 0
-
-    def _vrp_color(v: float) -> str:
-        if v <= -0.10:
-            return "#27AE60"
-        elif v < -0.05:
-            return "#2ECC71"
-        elif v < 0:
-            return "#BDC3C7"
-        elif v < 0.05:
-            return "#F4D03F"
-        elif v <= 0.10:
-            return "#F39C12"
-        else:
-            return "#E74C3C"
-    colors = [_vrp_color(v) for v in values]
-
-    fig.add_trace(go.Bar(
-        x=labels,
-        y=values,
-        marker_color=colors,
-        hovertemplate=hovertemplate,
-    ))
-
-    fig.add_hline(y=ref_line, line_dash="dash", line_color="#ab63fa")
-
-    spot_f = float(spot)
-    nearest_label = min(labels, key=lambda x: abs(float(x) - spot_f))
-    nearest_idx = labels.index(nearest_label)
-    fig.add_vline(
-        x=nearest_idx,
-        line_dash="dash",
-        line_color="#ffa15a",
-        annotation_text=f"Spot: ${spot_f:.2f}",
-        annotation_position="top",
-        annotation_font_color="#ffa15a",
-    )
-
-    fig.update_layout(
-        title=title,
-        xaxis_title="Strike",
-        yaxis_title=yaxis_title,
-        hovermode="x unified",
-        plot_bgcolor=tmpl["plot_bgcolor"],
-        paper_bgcolor=tmpl["paper_bgcolor"],
-        font_color=tmpl["font_color"],
-        xaxis=dict(gridcolor=tmpl["grid_color"], type="category"),
-        yaxis=dict(gridcolor=tmpl["grid_color"], tickformat=tickformat),
-        margin=dict(l=40, r=40, t=60, b=40),
-    )
-
-    return fig
-
-
 def create_heatmap(
     data: list[dict[str, Any]],
     value_field: str,
@@ -1250,7 +1177,7 @@ def create_iv_by_strike(
 
     # ATM strike = strike closest to spot; OTM calls = strikes > spot, OTM puts = strikes < spot.
     # Per README: use put IV for strikes below spot (OTM puts) and call IV for strikes >= spot
-    # (OTM calls + ATM), matching the convention used in create_vrp_by_strike.
+    # (OTM calls + ATM), VRP is now expiration-based from signals.py: exp_vrp
     spot_f = float(spot)
     atm_strike = min(x, key=lambda k: abs(k - spot_f)) if x else None
     iv = [
