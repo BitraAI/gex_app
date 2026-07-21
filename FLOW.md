@@ -5,8 +5,8 @@ expiration of every ticker in `~/.local/share/gex_app/ticker_history.json`.
 
 ## What it shows
 
-A Streamlit dataframe (`flow_page.render_atm_order_flow_grid`) with one row per
-tracked ticker:
+A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
+    tracked ticker:
 
 | Column | Meaning |
 | --- | --- |
@@ -24,7 +24,7 @@ tracked ticker:
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
 parent `render_tabs_frag` runs every 10 s and renders the legend / CSS
-once per outer tick via `flow_page.render_flow_legend_and_style()` so the
+once per outer tick via `flow.render_flow_legend_and_style()` so the
 static HTML is not re-injected on every 2-second data tick (avoids DOM
 flicker). `_flow_grid` is defined at module scope (not nested inside
 `render_flow_frag`) so Streamlit does not destroy and recreate it every
@@ -34,25 +34,25 @@ flicker). `_flow_grid` is defined at module scope (not nested inside
 
 | Status | Meaning | Colour |
 | --- | --- | --- |
-| **Live** | Ticker is subscribed and US regular trading hours are open (09:30–16:00 ET, Mon–Fri, excluding New Year's / Independence / Christmas). | Green (`#00cc96`) |
-| **Closed** | Ticker is subscribed but the market is currently closed (after hours, weekend, or holiday). Flow values are frozen from the last session. Also briefly visible while the market is open but no ticks have arrived yet (watchdog grace window). | Amber (`#E69500`) |
-| **Cached** | Ticker is known but not currently subscribed/streaming. | Blue (`#1E90FF`) |
-| **No Data** | No flow received yet for this ticker. | Grey (`#808080`) |
+| **Live** | Ticker is subscribed and US regular trading hours are open (09:30–16:00 ET, Mon–Fri, excluding New Year's / Independence / Christmas). | Green |
+| **Closed** | Ticker is subscribed but the market is currently closed (after hours, weekend, or holiday). Flow values are frozen from the last session. Also briefly visible while the market is open but no ticks have arrived yet (watchdog grace window). | Amber |
+| **Cached** | Ticker is known but not currently subscribed/streaming. | Blue |
+| **No Data** | No flow received yet for this ticker. | Grey |
 
-Market-hours detection lives in `flow_page.is_market_open()`.
+Market-hours detection lives in `flow.is_market_open()`.
 
 ### Trend
 
 Trend reflects the **direction of net-flow momentum** over the last 60 seconds,
 not the absolute level. It is computed in `AtmOptionVolumeService._snapshot_flow`
-(option_streaming_service.py:803-853) and exposed via `get_ticker_trend`.
+(option_streaming_service.py:803-863) and exposed via `get_ticker_trend`.
 
 How it works:
 
 1. Every ~10 trades (line 883 in option_streaming_service.py), a snapshot of
    `(timestamp, net_flow)` is appended to a per-ticker `flow_history` list.
-2. Snapshots older than 60 seconds are pruned (line 811-813 in option_streaming_service.py).
-3. If fewer than 2 snapshots exist the trend is **flat** (line 816-820 in option_streaming_service.py). The `len(history) < 2` guard also clears `trend_reversal` and resets `flow_speed` to 0.
+2. Snapshots older than 60 seconds are pruned (line 811-816 in option_streaming_service.py).
+3. If fewer than 2 snapshots exist the trend is **flat** (line 820-826 in option_streaming_service.py). The `len(history) < 2` guard also resets `flow_speed` to 0.
 4. The history is split in half. The first points from each segment are extracted:
    - `older_first = history[0][1]` (first point from entire history)
    - `newer_first = history[-segment_size][1]` (first point from newer half)
@@ -60,16 +60,16 @@ How it works:
    - `diff > 0` → **up** (green arrow)
    - `diff < 0` → **down** (red arrow)
    - `diff == 0` → **flat** (grey arrow)
-5. **Trend reversal detection** (lines 835-850 in option_streaming_service.py):
+5. **Enhanced trend detection via book imbalance and trend reversal**:
    - Compares `previous_trend` with `current_trend`
    - If trend changed from **up → down**, sets `trend_reversal = "bearish"`
    - If trend changed from **down → up**, sets `trend_reversal = "bullish"`
    - Otherwise no reversal (`trend_reversal = None`)
-6. **Flow speed** is stored on the ticker dict as `flow_speed = diff` (the
-   segment-first delta). It is available for UI display but is not currently
-   rendered in the grid.
+   - If `book_imbalance > 0.3` (strong bullish pressure), trend becomes **up**
+   - If `book_imbalance < -0.3` (strong bearish pressure), trend becomes **down**
+   - Strong book imbalance overrides the flow-diff trend determination
 
-**Enhanced trend indicators** in the Trend column (flow_page.py:213-226):
+**Enhanced trend indicators** in the Trend column (flow.py:218-238):
 
 | Condition | Display |
 |-----------|---------|
@@ -138,7 +138,7 @@ automatically via `ensure_atm_streaming`.
 
 | File | Role |
 | --- | --- |
-| `flow_page.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. |
+| `flow.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. |
 | `option_streaming_service.py` | `AtmOptionVolumeService` — WebSocket handling, Lee-Ready classification, per-ticker flow. |
 | `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. |
 | `client.py` | `fetch_quotes` — REST spot pre-fetch for all tickers. |

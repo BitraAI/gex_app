@@ -242,7 +242,7 @@ You can then open the app in your local browser.
 ```
 gex_app/
 ├── app.py                 # Main Streamlit application
-├── flow_page.py           # Shared ATM Order Flow rendering (grid, session defaults, market-hours check)
+├── flow.py               # Shared ATM Order Flow rendering (grid, session defaults, market-hours check)
 ├── analytics.py           # Analytical calculations (walls, flip, skew, etc.)
 ├── calculations.py        # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
 ├── charts.py              # Plotly chart generators
