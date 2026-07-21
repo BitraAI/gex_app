@@ -49,21 +49,13 @@ from calculations import (
 from analytics import compute_analytics
 from signals import generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
-from charts import (
-    _get_style,
-    _get_css,
-    create_gex_histogram,
-    create_gex_by_expiration,
-    create_oi_by_strike,
-    create_heatmap,
-    create_gamma_surface,
-    create_dealer_gamma_curve,
-    create_atm_iv_histogram,
-    create_vrp_chart,
-    create_vol_surface_2d,
-    create_iv_by_strike,
-    create_iv_richness_by_strike,
-)
+from charts import _get_style, _get_css
+
+# Lazy imports for expensive chart functions to improve startup performance
+# These functions are only imported when render functions are called
+
+# Lazy imports for expensive chart functions to improve startup performance
+# These functions are only imported when render functions are called
 
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
 # imported by another module — calling it twice raises StreamlitAPIException.
@@ -1417,15 +1409,19 @@ def render_market_structure_frag():
     gex_container = st.container()
     with gex_container:
         if ms_view == "GEX by Strike":
+            from charts import create_gex_histogram
             fig = create_gex_histogram(strikes, s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), gamma_flip=s.analytics.get("gamma_flip"), )
             fig.update_layout(dragmode="zoom"); st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="gex_histogram")
         elif ms_view == "GEX by Expiration":
+            from charts import create_gex_by_expiration
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="gex_exp_slider")
             fig = create_gex_by_expiration(s.by_exp_all, max_exps=mx, ); fig.update_layout(dragmode="zoom")
             st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="gex_by_exp")
         elif ms_view == "Gamma Surface":
+            from charts import create_gamma_surface
             fig = create_gamma_surface(s.filtered_data, ); st.plotly_chart(fig, width='stretch', key="gamma_surface")
         else:
+            from charts import create_dealer_gamma_curve
             dm = st.radio("Select", ["GEX", "VEX", "CEX"], horizontal=True, label_visibility="collapsed")
             _dc_strikes = _filter_strikes_near_atm(strikes, s.spot)
             fig = create_dealer_gamma_curve(_dc_strikes, s.spot, mode=dm.lower(), gamma_flip=s.analytics.get("gamma_flip"), call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), vex_magnet=s.analytics.get("vex_magnet"), vex_repellent=s.analytics.get("vex_repellent"))
@@ -1456,16 +1452,17 @@ def render_positioning_frag():
     if not raw_data:
         st.info("No positioning data available")
         return
-    
     raw_data = _filter_strikes_near_atm(raw_data, s.spot)
     positioning_data = aggregate_by_strike(
         raw_data, s.spot, show_calls=s.show_calls, show_puts=s.show_puts
     )
+
     if not positioning_data:
         st.info("No positioning data available")
         return
 
     if selected_view_type == "Open Interest":
+        from charts import create_oi_by_strike
         with st.container():
             fig = create_oi_by_strike(
                 positioning_data, s.spot, mode="oi", 
@@ -1475,6 +1472,7 @@ def render_positioning_frag():
                 fig, config={"scrollZoom": True}, width="stretch", key="oi_chart"
             )
     elif selected_view_type == "Volume":
+        from charts import create_oi_by_strike
         with st.container():
             fig = create_oi_by_strike(
                 positioning_data, s.spot, mode="volume", 
@@ -1503,6 +1501,7 @@ def render_volatility_frag():
     )
 
     if vol_view == "IV by Expiration":
+        from charts import create_atm_iv_histogram
         mo = st.radio("View", ["ATM IV", "VRP"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
         mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="iv_exp_slider")
         ivd = s.by_exp_all[:mx]
