@@ -215,6 +215,16 @@ def render_atm_order_flow_grid():
             if ticker_data and "trend_reversal" in ticker_data:
                 trend_reversal = ticker_data["trend_reversal"]
         
+        # Format Trend column to include 📈/📉 emojis for reversal indicators
+        # According to FLOW.md: "↑ 📈" (bullish reversal), "↓ 📉" (bearish reversal)
+        if trend_reversal == "bullish":
+            trend_display = "↑ 📈"
+        elif trend_reversal == "bearish":
+            trend_display = "↓ 📉"
+        else:
+            # Map to standard arrows
+            trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
+        
         rows.append({
             "Ticker": t_upper,
             "Spot": spot,
@@ -224,8 +234,7 @@ def render_atm_order_flow_grid():
             "Bullish Flow": bullish if has_data else 0,
             "Bearish Flow": bearish if has_data else 0,
             "Net Flow": net if has_data else 0,
-            "Trend": trend,
-            "Trend Reversal": trend_reversal,
+            "Trend": trend_display,
             "Status": status,
         })
 
@@ -237,7 +246,7 @@ def render_atm_order_flow_grid():
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Trend"],
          r["Call Price"], r["Put Price"], r["Bullish Flow"],
-         r["Bearish Flow"], r["Net Flow"], r["Trend Reversal"], r["Status"])
+         r["Bearish Flow"], r["Net Flow"], r["Status"])
         for r in rows
     )
     data_hash = hash(data_key)
@@ -261,94 +270,33 @@ def render_atm_order_flow_grid():
             return "color: #ef5350; font-weight: bold;"
         return "color: #808080;"
 
-    def _trend_display(row):
-        """Format the trend text for display, adding 📈/📉 for reversals."""
-        trend = row.get("Trend", "flat")
-        reversal = row.get("Trend Reversal")
-        
-        trend_arrow = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
-        
-        if reversal == "bullish":
-            return f"{trend_arrow} 📈"
-        elif reversal == "bearish":
-            return f"{trend_arrow} 📉"
-        else:
-            return trend_arrow
-
     def _trend_color(val):
-        """Color the trend text (up/down/flat) and reversal indicators based on direction."""
-        if val is None:
-            return "color: #808080;"
-        if "📈" in str(val):
-            return "color: #00cc96; font-weight: bold;"
-        if "📉" in str(val):
-            return "color: #ef5350; font-weight: bold;"
+        """Color the trend text (up/down/flat) based on trend direction."""
         return {
             "up": "color: #00cc96; font-weight: bold;",
             "down": "color: #ef5350; font-weight: bold;",
         }.get(val, "color: #808080;")
 
-    def _status_color(val):
-        color = _STATUS_COLORS.get(val, "#808080")
-        return f"color: {color}; font-size: 35px; text-align: center;"
-
-    def _net_flow_color(val):
-        if val > 0:
-            return "color: #00cc96; font-weight: bold;"
-        if val < 0:
-            return "color: #ef5350; font-weight: bold;"
-        return "color: #808080;"
-
-    def _trend_color(val):
-        """Color the trend text (including reversal indicators)."""
-        if val is None:
-            return "color: #808080;"
-        if "📈" in str(val):
-            return "color: #00cc96; font-weight: bold;"
-        if "📉" in str(val):
-            return "color: #ef5350; font-weight: bold;"
-        return {
-            "↑": "color: #00cc96; font-weight: bold;",
-            "↓": "color: #ef5350; font-weight: bold;",
-            "→": "color: #808080;",
-        }.get(val, "color: #808080;")
-
-    # Add display trend column with reversal indicators
-    def _add_display_trend(row):
-        trend = row["Trend"]
-        reversal = row.get("Trend Reversal")
-        
-        trend_arrow = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
-        
-        if reversal == "bullish":
-            return f"{trend_arrow} 📈"
-        elif reversal == "bearish":
-            return f"{trend_arrow} 📉"
-        else:
-            return trend_arrow
-    
-    df["Display Trend"] = df.apply(_add_display_trend, axis=1)
-
     _styler = df.style.set_uuid("flow_grid")
     if hasattr(_styler, "map"):
         _styler = _styler.map(_status_color, subset=["Status"])
         _styler = _styler.map(_net_flow_color, subset=["Net Flow"])
-        _styler = _styler.map(_trend_color, subset=["Display Trend"])
+        _styler = _styler.map(_trend_color, subset=["Trend"])
     else:
         _styler = _styler.apply(_status_color, subset=["Status"])
         _styler = _styler.apply(_net_flow_color, subset=["Net Flow"])
-        _styler = _styler.apply(_trend_color, subset=["Display Trend"])
+        _styler = _styler.apply(_trend_color, subset=["Trend"])
 
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
         "ATM Strike": lambda v: f"${v:,.2f}" if v is not None else "",
+        "Trend": lambda v: v,
         "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Bullish Flow": "{:,.0f}",
         "Bearish Flow": "{:,.0f}",
         "Net Flow": "{:,.0f}",
         "Status": lambda v: "•",
-        "Display Trend": lambda v: v,
     })
 
     s._flow_styled_hash = data_hash

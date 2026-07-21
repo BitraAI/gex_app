@@ -39,19 +39,39 @@ Market-hours detection lives in `flow_page.is_market_open()`.
 
 Trend reflects the **direction of net-flow momentum** over the last 60 seconds,
 not the absolute level. It is computed in `AtmOptionVolumeService._snapshot_flow`
-(option_streaming_service.py:742) and exposed via `get_ticker_trend`.
+(option_streaming_service.py:803-854) and exposed via `get_ticker_trend`.
 
 How it works:
 
-1. Every ~10 trades, a snapshot of `(timestamp, net_flow)` is appended to a
-   per-ticker `flow_history` list.
-2. Snapshots older than 60 seconds are pruned.
-3. If fewer than 4 snapshots exist the trend is **flat** (not enough data).
-4. The history is split in half. The average net flow of the older half is
-   compared to the average of the newer half:
-   - `newer_avg > older_avg` → **up** (green arrow)
-   - `newer_avg < older_avg` → **down** (red arrow)
-   - equal → **flat** (grey arrow)
+1. Every ~10 trades (line 883 in option_streaming_service.py), a snapshot of
+   `(timestamp, net_flow)` is appended to a per-ticker `flow_history` list.
+2. Snapshots older than 60 seconds are pruned (line 811-813 in option_streaming_service.py).
+3. If fewer than 4 snapshots exist the trend is **flat** (line 816-820 in option_streaming_service.py).
+4. The history is split in half. The first points from each segment are extracted:
+   - `older_first = history[0][1]` (first point from entire history)
+   - `newer_first = history[-segment_size][1]` (first point from newer half)
+   - The difference `diff = newer_first - older_first` determines the trend
+   - `diff > 0` → **up** (green arrow)
+   - `diff < 0` → **down** (red arrow)
+   - `diff == 0` → **flat** (grey arrow)
+5. **Trend reversal detection** (lines 836-850 in option_streaming_service.py):
+   - Compares `previous_trend` with `current_trend`
+   - If trend changed from **up → down**, sets `trend_reversal = "bearish"`
+   - If trend changed from **down → up**, sets `trend_reversal = "bullish"`
+   - Otherwise no reversal (`trend_reversal = None`)
+
+**Visual trend indicators** in the Trend column (flow_page.py:213-222):
+
+| Condition | Display |
+|-----------|---------|
+| Normal **up** trend | `↑` |
+| Normal **down** trend | `↓` |
+| **flat** trend | `→` |
+| **bullish** reversal | `↑ 📈` (up arrow + bullish emoji) |
+| **bearish** reversal | `↓ 📉` (down arrow + bearish emoji) |
+
+The trend reversal emojis are added without creating new columns, keeping
+the display clean while highlighting significant momentum shifts.
 
 ## Data pipeline
 
