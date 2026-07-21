@@ -65,13 +65,6 @@ def assess_market_bias(
     return bias, "; ".join(reasons)
 
 
-def _option_vrp(opt: dict[str, Any], rv: float) -> float:
-    iv = opt.get("iv", 0) or 0
-    if iv > 3:
-        iv = iv / 100
-    return round((iv - rv) * 100, 1)
-
-
 def generate_recommendations(
     options: list[dict[str, Any]],
     spot: float,
@@ -89,31 +82,30 @@ def generate_recommendations(
 ) -> list[str]:
     recs = []
 
-    # Normalize raw option data, enriching each entry with a VRP (in pp).
-    scored = [{**o, "vrp": _option_vrp(o, rv)} for o in options]
+    scored = list(options)
 
-    sell_candidates = sorted(
-        [s for s in scored if s["vrp"] >= 2],
-        key=lambda s: s["vrp"], reverse=True,
-    )
-    buy_candidates = sorted(
-        [s for s in scored if s["vrp"] <= -2],
-        key=lambda s: s["vrp"],
-    )
-
-    # Expiration-level VRP — represent each expiration by the VRP of the option
-    # closest to spot (ATM-like). Used to favor the cheapest expiration for buy
-    # premium and the richest expiration for sell premium.
+    # Build expiration-level VRP from the full chain — each expiration
+    # represented by the VRP of the option closest to spot (ATM-like).
+    _src = all_data if all_data else scored
     exp_vrp: dict[str, float] = {}
     exp_strike: dict[str, float] = {}
-    for s in scored:
+    for s in _src:
+        raw_iv = s.get("iv", 0) or 0
+        iv = raw_iv / 100 if raw_iv > 3 else raw_iv
+        vrp = (iv - rv) * 100
         ep = s["expiration"]
         if ep not in exp_vrp or abs(s["strike"] - spot) < abs(exp_strike[ep] - spot):
-            exp_vrp[ep] = s["vrp"]
+            exp_vrp[ep] = vrp
             exp_strike[ep] = s["strike"]
 
-    def _exp_vrp(opt: dict[str, Any]) -> float:
-        return exp_vrp.get(opt["expiration"], opt["vrp"])
+    sell_candidates = sorted(
+        [s for s in scored if exp_vrp.get(s["expiration"], 0) >= 2],
+        key=lambda s: exp_vrp.get(s["expiration"], 0), reverse=True,
+    )
+    buy_candidates = sorted(
+        [s for s in scored if exp_vrp.get(s["expiration"], 0) <= -2],
+        key=lambda s: exp_vrp.get(s["expiration"], 0),
+    )
 
     # Per-strike SSVI IV — used to pick the cheapest (lowest SSVI) strike for
     # buy premium and the richest (highest SSVI) strike for sell premium within
@@ -135,10 +127,10 @@ def generate_recommendations(
         return iv_dec - s
 
     def _sell_key(opt: dict[str, Any]) -> tuple[float, float]:
-        return (-_exp_vrp(opt), -_ssvi_iv(opt))
+        return (-exp_vrp.get(opt["expiration"], 0), -_ssvi_iv(opt))
 
     def _buy_key(opt: dict[str, Any]) -> tuple[float, float]:
-        return (_exp_vrp(opt), _ssvi_iv(opt))
+        return (exp_vrp.get(opt["expiration"], 0), _ssvi_iv(opt))
 
     if strategy in ("Long Calls",):
         if not bias or bias != "Bullish":
@@ -153,15 +145,8 @@ def generate_recommendations(
             if not candidates:
                 recs.append(f"No OTM calls in DTE {dte_min}-{dte_max} range.")
             else:
-                exp_vrps: dict[str, float] = {}
-                for e in candidates:
-                    raw_iv = e.get("iv", 0) or 0
-                    iv_dec = raw_iv / 100 if raw_iv > 3 else raw_iv
-                    vrp = round((iv_dec - rv) * 100, 1)
-                    ep = e["expiration"]
-                    if ep not in exp_vrps or vrp < exp_vrps[ep]:
-                        exp_vrps[ep] = vrp
-                best_exp = min(exp_vrps, key=exp_vrps.get)
+                cand_exps = {e["expiration"] for e in candidates}
+                best_exp = min(cand_exps, key=lambda e: exp_vrp.get(e, 0))
                 if iv_skew is None or iv_skew <= 0:
                     recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bullish for calls; skip Long Calls.")
                 else:
@@ -192,15 +177,8 @@ def generate_recommendations(
             if not candidates:
                 recs.append(f"No OTM puts in DTE {dte_min}-{dte_max} range.")
             else:
-                exp_vrps: dict[str, float] = {}
-                for e in candidates:
-                    raw_iv = e.get("iv", 0) or 0
-                    iv_dec = raw_iv / 100 if raw_iv > 3 else raw_iv
-                    vrp = round((iv_dec - rv) * 100, 1)
-                    ep = e["expiration"]
-                    if ep not in exp_vrps or vrp < exp_vrps[ep]:
-                        exp_vrps[ep] = vrp
-                best_exp = min(exp_vrps, key=exp_vrps.get)
+                cand_exps = {e["expiration"] for e in candidates}
+                best_exp = min(cand_exps, key=lambda e: exp_vrp.get(e, 0))
                 if iv_skew is None or iv_skew >= 0:
                     recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bearish for puts; skip Long Puts.")
                 else:
@@ -231,15 +209,8 @@ def generate_recommendations(
             if not candidates:
                 recs.append(f"No OTM calls in DTE {dte_min}-{dte_max} range.")
             else:
-                exp_vrps: dict[str, float] = {}
-                for e in candidates:
-                    raw_iv = e.get("iv", 0) or 0
-                    iv_dec = raw_iv / 100 if raw_iv > 3 else raw_iv
-                    vrp = round((iv_dec - rv) * 100, 1)
-                    ep = e["expiration"]
-                    if ep not in exp_vrps or vrp > exp_vrps[ep]:
-                        exp_vrps[ep] = vrp
-                best_exp = max(exp_vrps, key=exp_vrps.get)
+                cand_exps = {e["expiration"] for e in candidates}
+                best_exp = max(cand_exps, key=lambda e: exp_vrp.get(e, 0))
                 if iv_skew is None or iv_skew >= 0:
                     recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bearish for calls; skip Short Calls.")
                 else:
@@ -270,15 +241,8 @@ def generate_recommendations(
             if not candidates:
                 recs.append(f"No OTM puts in DTE {dte_min}-{dte_max} range.")
             else:
-                exp_vrps: dict[str, float] = {}
-                for e in candidates:
-                    raw_iv = e.get("iv", 0) or 0
-                    iv_dec = raw_iv / 100 if raw_iv > 3 else raw_iv
-                    vrp = round((iv_dec - rv) * 100, 1)
-                    ep = e["expiration"]
-                    if ep not in exp_vrps or vrp > exp_vrps[ep]:
-                        exp_vrps[ep] = vrp
-                best_exp = max(exp_vrps, key=exp_vrps.get)
+                cand_exps = {e["expiration"] for e in candidates}
+                best_exp = max(cand_exps, key=lambda e: exp_vrp.get(e, 0))
                 if iv_skew is None or iv_skew <= 0:
                     recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bullish for puts; skip Short Puts.")
                 else:
@@ -298,7 +262,7 @@ def generate_recommendations(
 
     if strategy in ("Call Debit Spread",):
         calls = sorted(
-            [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot and s["vrp"] <= 0],
+            [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot and exp_vrp.get(s["expiration"], 0) <= 0],
             key=lambda s: s["strike"],
         )
         if len(calls) >= 2:
@@ -307,12 +271,12 @@ def generate_recommendations(
             width = short_call["strike"] - long_call["strike"]
             recs.append(
                 f"**Call Debit Spread** — Buy {long_call['strike']:g} / Sell {short_call['strike']:g}"
-                f" ({long_call['expiration']}, VRP {long_call['vrp']:.1f}%, ${width:g} wide)"
+                f" ({long_call['expiration']}, VRP {exp_vrp[long_call['expiration']]:.1f}%, ${width:g} wide)"
             )
 
     if strategy in ("Put Debit Spread",):
         puts = sorted(
-            [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot and s["vrp"] <= 0],
+            [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot and exp_vrp.get(s["expiration"], 0) <= 0],
             key=lambda s: s["strike"], reverse=True,
         )
         if len(puts) >= 2:
@@ -321,7 +285,7 @@ def generate_recommendations(
             width = long_put["strike"] - short_put["strike"]
             recs.append(
                 f"**Put Debit Spread** — Buy {long_put['strike']:g} / Sell {short_put['strike']:g}"
-                f" ({long_put['expiration']}, VRP {long_put['vrp']:.1f}%, ${width:g} wide)"
+                f" ({long_put['expiration']}, VRP {exp_vrp[long_put['expiration']]:.1f}%, ${width:g} wide)"
             )
 
     if strategy in ("Sell Premium",) and sell_candidates:
@@ -332,7 +296,7 @@ def generate_recommendations(
         best = max(pool, key=_sell_key)
         recs.append(
             f"**Sell {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-            f"VRP {best['vrp']:.1f}%, GEX {best['net_gex']:,.0f}."
+            f"VRP {exp_vrp[best['expiration']]:.1f}%, GEX {best['net_gex']:,.0f}."
         )
 
     if strategy in ("Buy Premium",) and buy_candidates:
@@ -343,13 +307,13 @@ def generate_recommendations(
         best = min(pool, key=_buy_key)
         recs.append(
             f"**Buy {best['type']} @ {best['strike']:g}** ({best['expiration']}) — "
-            f"VRP {best['vrp']:.1f}% (cheap), GEX {best['net_gex']:,.0f}."
+            f"VRP {exp_vrp[best['expiration']]:.1f}% (cheap), GEX {best['net_gex']:,.0f}."
         )
 
     if strategy in ("Call Credit Spread",):
         calls_by_exp = {}
         for s in scored:
-            if s["type"] == "CALL" and s["strike"] >= spot and s["vrp"] >= 0:
+            if s["type"] == "CALL" and s["strike"] >= spot and exp_vrp.get(s["expiration"], 0) >= 0:
                 calls_by_exp.setdefault(s["expiration"], []).append(s)
         best = None
         for exp, opts in calls_by_exp.items():
@@ -357,20 +321,20 @@ def generate_recommendations(
             if len(opts_sorted) >= 2:
                 short, long_call = opts_sorted[0], opts_sorted[-1]
                 width = long_call["strike"] - short["strike"]
-                avg_vrp = (short["vrp"] + long_call["vrp"]) / 2
+                avg_vrp = exp_vrp.get(short["expiration"], 0)
                 if best is None or avg_vrp > best[0]:
                     best = (avg_vrp, short, long_call, width, exp)
         if best:
             _, short, long_call, width, exp = best
             recs.append(
                 f"**Call Credit Spread** — Sell {short['strike']:g} / Buy {long_call['strike']:g}"
-                f" ({exp}, VRP +{short['vrp']:.1f}%, ${width:g} wide)"
+                f" ({exp}, VRP +{exp_vrp[exp]:.1f}%, ${width:g} wide)"
             )
 
     if strategy in ("Put Credit Spread",):
         puts_by_exp = {}
         for s in scored:
-            if s["type"] == "PUT" and s["strike"] <= spot and s["vrp"] >= 0:
+            if s["type"] == "PUT" and s["strike"] <= spot and exp_vrp.get(s["expiration"], 0) >= 0:
                 puts_by_exp.setdefault(s["expiration"], []).append(s)
         best = None
         for exp, opts in puts_by_exp.items():
@@ -378,14 +342,14 @@ def generate_recommendations(
             if len(opts_sorted) >= 2:
                 short, long_put = opts_sorted[0], opts_sorted[-1]
                 width = short["strike"] - long_put["strike"]
-                avg_vrp = (short["vrp"] + long_put["vrp"]) / 2
+                avg_vrp = exp_vrp.get(short["expiration"], 0)
                 if best is None or avg_vrp > best[0]:
                     best = (avg_vrp, short, long_put, width, exp)
         if best:
             _, short, long_put, width, exp = best
             recs.append(
                 f"**Put Credit Spread** — Sell {short['strike']:g} / Buy {long_put['strike']:g}"
-                f" ({exp}, VRP +{short['vrp']:.1f}%, ${width:g} wide)"
+                f" ({exp}, VRP +{exp_vrp[exp]:.1f}%, ${width:g} wide)"
             )
 
     if strategy in ("Iron Condor",):
@@ -410,7 +374,7 @@ def generate_recommendations(
                 lp = _find_opt(long_put_strike, "PUT", exp) if long_put_strike else None
                 lc = _find_opt(long_call_strike, "CALL", exp) if long_call_strike else None
                 if sp and sc and (lp or lc):
-                    total_vrp = sum(s["vrp"] for s in [sp, sc, lp, lc] if s)
+                    total_vrp = exp_vrp.get(exp, 0) * len([s for s in [sp, sc, lp, lc] if s])
                     if best is None or total_vrp > best[0]:
                         best = (total_vrp, exp, sp, sc, lp, lc)
 
@@ -418,23 +382,23 @@ def generate_recommendations(
                 _, exp, sp, sc, lp, lc = best
                 recs.append(
                     f"**Iron Condor ({exp})** — Sell {sp['type']} {sp['strike']:g}"
-                    f" (VRP {sp['vrp']:.1f}%)"
-                    + (f" / Buy {lp['type']} {lp['strike']:g} (VRP {_option_vrp(lp, rv):.1f}%)" if lp else "")
+                    f" (VRP {exp_vrp[exp]:.1f}%)"
+                    + (f" / Buy {lp['type']} {lp['strike']:g} (VRP {exp_vrp[exp]:.1f}%)" if lp else "")
                     + "  |  "
-                    f"Sell {sc['type']} {sc['strike']:g} (VRP {sc['vrp']:.1f}%)"
-                    + (f" / Buy {lc['type']} {lc['strike']:g} (VRP {_option_vrp(lc, rv):.1f}%)" if lc else "")
+                    f"Sell {sc['type']} {sc['strike']:g} (VRP {exp_vrp[exp]:.1f}%)"
+                    + (f" / Buy {lc['type']} {lc['strike']:g} (VRP {exp_vrp[exp]:.1f}%)" if lc else "")
                 )
             else:
                 recs.append("No strong signals — VRP near zero, dealer gamma balanced.")
         else:
             puts_otm = sorted(
                 [s for s in scored if s["type"] == "PUT" and s["strike"] <= spot
-                 and s["vrp"] >= 0],
+                 and exp_vrp.get(s["expiration"], 0) >= 0],
                 key=lambda s: s["strike"],
             )
             calls_otm = sorted(
                 [s for s in scored if s["type"] == "CALL" and s["strike"] >= spot
-                 and s["vrp"] >= 0],
+                 and exp_vrp.get(s["expiration"], 0) >= 0],
                 key=lambda s: s["strike"],
             )
             if puts_otm and calls_otm:
@@ -462,27 +426,27 @@ def generate_recommendations(
                 if long_put or long_call:
                     recs.append(
                         f"**Iron Condor** — Sell {short_put['type']} {short_put['strike']:g} ({short_put['expiration']}, "
-                        f"VRP {short_put['vrp']:.1f}%)"
+                        f"VRP {exp_vrp[short_put['expiration']]:.1f}%)"
                         + (f" / Buy {long_put['type']} {long_put['strike']:g} ({long_put['expiration'][-5:]}, "
-                           f"VRP {_option_vrp(long_put, rv):.1f}%)" if long_put else "")
+                           f"VRP {exp_vrp[long_put['expiration']]:.1f}%)" if long_put else "")
                         + "  |  "
                         f"Sell {short_call['type']} {short_call['strike']:g} ({short_call['expiration']}, "
-                        f"VRP {short_call['vrp']:.1f}%)"
+                        f"VRP {exp_vrp[short_call['expiration']]:.1f}%)"
                         + (f" / Buy {long_call['type']} {long_call['strike']:g} ({long_call['expiration'][-5:]}, "
-                           f"VRP {_option_vrp(long_call, rv):.1f}%)" if long_call else "")
+                           f"VRP {exp_vrp[long_call['expiration']]:.1f}%)" if long_call else "")
                     )
                 else:
                     width_put = puts_otm[-1]["strike"] - puts_otm[0]["strike"]
                     width_call = calls_otm[-1]["strike"] - calls_otm[0]["strike"]
                     recs.append(
                         f"**Iron Condor** — Sell {short_put['type']} {short_put['strike']:g} ({short_put['expiration']}, "
-                        f"VRP {short_put['vrp']:.1f}%) / "
+                        f"VRP {exp_vrp[short_put['expiration']]:.1f}%) / "
                         f"Buy {puts_otm[-1]['type']} {puts_otm[-1]['strike']:g} ({puts_otm[-1]['expiration']}, "
-                        f"VRP {puts_otm[-1]['vrp']:.1f}%) (${width_put:g})  |  "
+                        f"VRP {exp_vrp[puts_otm[-1]['expiration']]:.1f}%) (${width_put:g})  |  "
                         f"Sell {short_call['type']} {short_call['strike']:g} ({short_call['expiration']}, "
-                        f"VRP {short_call['vrp']:.1f}%) / "
+                        f"VRP {exp_vrp[short_call['expiration']]:.1f}%) / "
                         f"Buy {calls_otm[0]['type']} {calls_otm[0]['strike']:g} ({calls_otm[0]['expiration']}, "
-                        f"VRP {calls_otm[0]['vrp']:.1f}%) (${width_call:g})"
+                        f"VRP {exp_vrp[calls_otm[0]['expiration']]:.1f}%) (${width_call:g})"
                     )
 
     if strategy in ("Calendar Spread",):
@@ -496,16 +460,16 @@ def generate_recommendations(
             if len(opts_sorted) >= 2:
                 front, back = opts_sorted[0], opts_sorted[-1]
                 if front["expiration"] != back["expiration"]:
-                    spread_vrp = front["vrp"] - back["vrp"]
+                    spread_vrp = exp_vrp.get(front["expiration"], 0) - exp_vrp.get(back["expiration"], 0)
                     if best is None or spread_vrp > best[0]:
                         best = (spread_vrp, front, back)
         if best:
             _, front, back = best
             recs.append(
                 f"**Calendar Spread** — Sell {front['type']} {front['strike']:g} ({front['expiration']}, "
-                f"VRP {front['vrp']:.1f}%) / "
+                f"VRP {exp_vrp[front['expiration']]:.1f}%) / "
                 f"Buy {back['type']} {back['strike']:g} ({back['expiration']}, "
-                f"VRP {back['vrp']:.1f}%)"
+                f"VRP {exp_vrp[back['expiration']]:.1f}%)"
             )
 
     if strategy in ("Butterfly",) and len(scored) >= 3:
@@ -545,7 +509,7 @@ def generate_recommendations(
                 upper = calls_higher[0]
                 lower = puts_lower[0]
                 spread = upper["strike"] - lower["strike"]
-                avg_vrp = (call_opt["vrp"] + put_opt["vrp"]) / 2
+                avg_vrp = exp_vrp[exp]
                 recs.append(
                     f"**Iron Butterfly** @ {atm_strike:g} ({exp}) — "
                     f"Sell {call_opt['strike']:g} Call / Sell {put_opt['strike']:g} Put / "
@@ -562,12 +526,12 @@ def generate_recommendations(
             call_opt = next((s for s in atm if s["type"] == "CALL"), None)
             put_opt = next((s for s in atm if s["type"] == "PUT"), None)
             if call_opt and put_opt and call_opt["strike"] == put_opt["strike"]:
-                avg_vrp = (call_opt["vrp"] + put_opt["vrp"]) / 2
-                action = "Sell" if avg_vrp > 0 else "Buy"
                 exp = call_opt["expiration"]
+                avg_vrp = exp_vrp[exp]
+                action = "Sell" if avg_vrp > 0 else "Buy"
                 recs.append(
                     f"**{action} Straddle @ {call_opt['strike']:g} ({exp})** — "
-                    f"{call_opt['type']} VRP {call_opt['vrp']:.1f}%, {put_opt['type']} VRP {put_opt['vrp']:.1f}% ({action.lower()} vol)"
+                    f"{call_opt['type']} VRP {exp_vrp[exp]:.1f}%, {put_opt['type']} VRP {exp_vrp[exp]:.1f}% ({action.lower()} vol)"
                 )
 
     if strategy in ("Long Strangles",):
@@ -584,16 +548,18 @@ def generate_recommendations(
                 continue
             call = min(calls_by_exp[exp], key=lambda s: abs(s["strike"] - spot))
             put = min(puts_by_exp[exp], key=lambda s: abs(s["strike"] - spot))
-            avg_vrp = (call["vrp"] + put["vrp"]) / 2
-            action = "Sell" if avg_vrp > 0 else "Buy"
+            avg_vrp = exp_vrp.get(exp, 0)
+            exp_v = exp_vrp[exp]
+            action = "Sell" if exp_v > 0 else "Buy"
             if best is None or abs(avg_vrp) > abs(best[0]):
                 best = (avg_vrp, call, put, action)
         if best:
             _, call, put, action = best
+            exp = call['expiration']
             recs.append(
                 f"**{action} Strangle** — {call['type']} {call['strike']:g} ({call['expiration']}, "
-                f"VRP {call['vrp']:.1f}%) / {put['type']} {put['strike']:g} ({put['expiration']}, "
-                f"VRP {put['vrp']:.1f}%) ({action.lower()} vol)"
+                f"VRP {exp_vrp[exp]:.1f}%) / {put['type']} {put['strike']:g} ({put['expiration']}, "
+                f"VRP {exp_vrp[put['expiration']]:.1f}%) ({action.lower()} vol)"
             )
 
     if strategy in ("Broken Wing Butterfly",):
@@ -609,7 +575,7 @@ def generate_recommendations(
                 gap1 = body["strike"] - lower["strike"]
                 gap2 = upper["strike"] - body["strike"]
                 if gap2 > gap1:
-                    avg_vrp = (lower["vrp"] + body["vrp"] + upper["vrp"]) / 3
+                    avg_vrp = exp_vrp.get(exp, 0)
                     if best is None or avg_vrp > best[0]:
                         best = (avg_vrp, lower, body, upper, gap1, gap2, exp)
         if best:
@@ -631,7 +597,7 @@ def generate_recommendations(
             for put_short in puts_otm:
                 if put_short["expiration"] != call_short["expiration"]:
                     continue
-                score = (call_short["vrp"] + put_short["vrp"]) / 2
+                score = exp_vrp.get(call_short["expiration"], 0)
                 if best is None or score > best[0]:
                     best = (score, call_short, call_protect, put_short)
         if best:
