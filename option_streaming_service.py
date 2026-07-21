@@ -813,20 +813,44 @@ class AtmOptionVolumeService:
             ticker["flow_history"].pop(0)
 
         history = ticker["flow_history"]
-        if len(history) < 4:
+        if len(history) < 2:
             ticker["trend"] = "flat"
+            ticker["trend_reversal"] = None
+            ticker["flow_speed"] = 0
             return
 
-        mid = len(history) // 2
-        older_avg = sum(v for _, v in history[:mid]) / mid
-        newer_avg = sum(v for _, v in history[mid:]) / (len(history) - mid)
-        diff = newer_avg - older_avg
+        # Extract first points from older and newer segments for compact flow speed calculation
+        segment_size = len(history) // 2
+        older_first = history[0][1]
+        newer_first = history[-segment_size][1]
+
+        diff = newer_first - older_first
         if diff > 0:
-            ticker["trend"] = "up"
+            current_trend = "up"
         elif diff < 0:
-            ticker["trend"] = "down"
+            current_trend = "down"
         else:
-            ticker["trend"] = "flat"
+            current_trend = "flat"
+        
+        # Detect trend reversal
+        previous_trend = ticker.get("trend", None)
+        if previous_trend is None:
+            reversal = None
+        elif previous_trend != current_trend:
+            if previous_trend == "up" and current_trend == "down":
+                reversal = "bearish"
+            elif previous_trend == "down" and current_trend == "up":
+                reversal = "bullish"
+            else:
+                reversal = None
+        else:
+            reversal = None
+        
+        ticker["trend"] = current_trend
+        ticker["trend_reversal"] = reversal
+        
+        # Store flow speed for UI display
+        ticker["flow_speed"] = diff
 
     def _process_trade_ticker(self, ticker: dict | None, price: float, size: int, opt_type: str):
         """Accumulate a trade into a per-ticker flow total (cumulative,

@@ -13,7 +13,7 @@ tracked ticker:
 | **Ticker** | Display symbol (index symbols like `SPX` kept as-is; streamed via ETF proxy `SPY`/`IWM`/`QQQ`). |
 | **Spot** | Latest spot price (REST pre-fetch or live equity stream). |
 | **ATM Strike** | Nearest strike to spot, computed by `calculate_atm_strike` (strike spacing by price band). |
-| **Trend** | Direction of net flow momentum over the last 60 seconds (see below). |
+| **Trend** | Direction of net flow momentum over the last 60 seconds (see below). Shows standard arrows (↑/↓/→). **Visual reversal indicators**: **↑ 📈** (bullish reversal), **↓ 📉** (bearish reversal). |
 | **Call Price** | Mid price of the ATM call option. |
 | **Put Price** | Mid price of the ATM put option. |
 | **Bullish Flow** | Cumulative option volume classified as bullish. |

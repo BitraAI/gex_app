@@ -1382,10 +1382,6 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, force_
     root_id = f"lwc_candlestick_{symbol}"
     json_str = json.dumps(payload)
     total_height = main_height + vol_height + osc_height + iv_skew_height + iv_skew_hist_height
-    from charts import _IS_DARK
-    if _IS_DARK:
-        _bg, _tc, _gc = "#dbeafe", "#1e293b", "#bfdbfe"
-    else:
-        _bg, _tc, _gc = "#ffffff", "#1e293b", "#e9eef3"
+    _bg, _tc, _gc = "#ffffff", "#1e293b", "#e9eef3"
     html = _HTML_TEMPLATE % {"root_id": root_id, "main_height": main_height, "vol_height": vol_height, "osc_height": osc_height, "iv_skew_height": iv_skew_height, "iv_skew_hist_height": iv_skew_hist_height, "total_height": total_height, "lib": _JS_LIB, "json_data": json_str, "bg": _bg, "tc": _tc, "gc": _gc}
     st.html(html, unsafe_allow_javascript=True)
