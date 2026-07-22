@@ -35,6 +35,7 @@ from streaming_service import StreamingService
 from option_streaming_service import AtmOptionVolumeService
 from chart_component import render_chart
 from flow import render_atm_order_flow_grid
+from news_service import NewsService
 from calculations import (
     aggregate_by_strike,
     aggregate_by_expiration,
@@ -118,6 +119,7 @@ _SESSION_DEFAULTS = {
     "prev_flow_state": None,
     "flow_cache": {},
     "spot_cache": {},
+    "news_service": None,
 }
 
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
@@ -187,6 +189,25 @@ def init_client():
         if atm_opt is not None:
             atm_opt.stop()
         st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
+
+    # News service (Yahoo Finance RSS polling)
+    news_svc = st.session_state.get("news_service")
+    if news_svc is None or getattr(news_svc, '_loop', None) is not loop:
+        if news_svc is not None:
+            news_svc.stop()
+        news_svc = NewsService(loop)
+        st.session_state.news_service = news_svc
+        news_svc.start()
+        # Start the background poll loop (runs on the event-loop thread,
+        # does NOT touch st.session_state — tickers are pushed from the
+        # main thread via update_tickers).
+        async def _news_poll_loop():
+            while True:
+                if news_svc._tickers:
+                    await news_svc.poll(news_svc._tickers)
+                await asyncio.sleep(60)
+        asyncio.run_coroutine_threadsafe(_news_poll_loop(), loop)
+
     return True
 
 
@@ -929,6 +950,11 @@ def ensure_atm_streaming(stream_symbol: str):
                 _run_ticker_signals(_next_t)
             except Exception:
                 pass
+
+        # Keep the news service ticker list in sync
+        news_svc2 = s.get("news_service")
+        if news_svc2:
+            news_svc2.update_tickers(_all_tickers)
 
         # Feed pre-fetched spots from spot_cache into ATM service for all
         # tracked tickers.
@@ -2064,7 +2090,7 @@ def render_tabs_frag():
     s = st.session_state
     if not s.get("data"):
         return
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks", "Order Flow"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks", "Order Flow", "Live News"])
     with tab1: render_market_structure_frag()
     with tab2: render_positioning_frag()
     with tab3: render_volatility_frag()
@@ -2072,6 +2098,7 @@ def render_tabs_frag():
     with tab5: render_trade_signals_frag()
     with tab6: render_candlesticks()
     with tab7: render_flow_frag()
+    with tab8: render_news_frag()
     with st.container(): render_options_data_frag()
 
 
@@ -2125,6 +2152,53 @@ def render_flow_frag():
     st.subheader("ATM Order Flow")
     render_flow_legend_and_style()
     _flow_grid()
+
+
+@st.fragment(run_every=60)
+def render_news_frag():
+    """Render the Live News tab — headlines from Yahoo Finance RSS for
+    all tracked tickers.  The fragment auto-refreshes every 60 s to pick
+    up newly polled articles."""
+    s = st.session_state
+    news_svc = s.get("news_service")
+    if news_svc is None or not news_svc.is_running:
+        st.info("News service not initialized.")
+        return
+
+    tickers = s.get("ticker_history", [])
+    if not tickers:
+        st.info("No tickers tracked yet.")
+        return
+
+    # Force a poll on first render so there is something to show
+    import time as _tm
+    if s.get("_news_first_poll", True):
+        s["_news_first_poll"] = False
+        loop = _ensure_async_loop()
+        asyncio.run_coroutine_threadsafe(news_svc.poll(tickers), loop)
+
+    news = news_svc.get_all_news()
+
+    if not news:
+        st.caption("No news headlines yet — next poll in ~5 min.")
+        return
+
+    st.markdown(
+        f"<div style='margin-bottom:8px;color:gray;font-size:0.85rem'>"
+        f"{len(news)} recent headlines"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    for item in news:
+        title = item.get("title", "")
+        link = item.get("link", "")
+        published = item.get("published", "")
+        st.markdown(
+            f"[{title}]({link})  "
+            f"<span style='color:gray;font-size:0.8rem'>{published}</span>",
+            unsafe_allow_html=True,
+        )
 
 
 def main():
