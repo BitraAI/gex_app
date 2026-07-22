@@ -1,5 +1,4 @@
 import logging
-import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -8,11 +7,8 @@ from schwab import auth
 from schwab.client import AsyncClient
 
 from config import (
-    APP_NAME,
-    CALLBACK_URL,
     CLIENT_ID,
     CLIENT_SECRET,
-    MAX_TOKEN_AGE,
     TOKEN_PATH,
 )
 
@@ -51,6 +47,28 @@ def create_client() -> AsyncClient:
     return client
 
 
+async def fetch_front_expiration(client: AsyncClient, symbol: str) -> str | None:
+    """Fetch the nearest front expiration date for a symbol using the
+    lightweight option-expiration-chain endpoint.  Returns ``None`` if
+    the request fails or no expirations are returned."""
+    try:
+        resp = await client.get_option_expiration_chain(symbol)
+        if hasattr(resp, "json"):
+            resp = resp.json()
+        if isinstance(resp, dict):
+            for key in ("expirationList", "ExpirationList", "expiration_list"):
+                exps = resp.get(key, []) or []
+                if exps:
+                    for exp_key in ("expirationDate", "ExpirationDate", "expiration_date", "date"):
+                        val = exps[0].get(exp_key, "")
+                        if val:
+                            return val.split("T")[0] or None
+        return None
+    except Exception as exc:
+        logger.warning("fetch_front_expiration(%s) failed: %s", symbol, exc)
+        return None
+
+
 async def fetch_option_chain(
     client: AsyncClient,
     symbol: str,
@@ -83,7 +101,7 @@ async def fetch_option_chain(
         if hasattr(resp, "json"):
             return resp.json()
         return resp
-    except Exception as e:
+    except Exception:
         logger.exception(f"Failed to fetch option chain for {symbol}")
         raise
 
@@ -98,7 +116,7 @@ async def fetch_quotes(
         if not isinstance(result, dict):
             return {}
         return result
-    except Exception as e:
+    except Exception:
         logger.exception(f"Failed to fetch quotes for {symbols}")
         raise
 

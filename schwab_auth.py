@@ -47,7 +47,7 @@ def main():
 
     os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
 
-    print(f"Opening browser for Schwab OAuth login...")
+    print("Opening browser for Schwab OAuth login...")
     print(f"Callback URL: {CALLBACK_URL}")
     print(f"Token will be saved to: {TOKEN_PATH}")
 
@@ -67,7 +67,7 @@ def main():
         print("Warning: Token file was not written or is invalid.", file=sys.stderr)
         print("Check that:")
         print(f"  1. Your callback URL in Schwab's developer portal matches: {CALLBACK_URL}")
-        print(f"  2. Port 8182 is not in use by another process")
+        print("  2. Port 8182 is not in use by another process")
         print(f"  3. The directory {os.path.dirname(TOKEN_PATH)} is writable")
         sys.exit(1)
 

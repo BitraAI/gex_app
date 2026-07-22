@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import threading
+import time as _time_mod
 import pandas as pd
 from calculations import calculate_atm_strike
 
@@ -127,7 +128,6 @@ class AtmOptionVolumeService:
 
         # Timestamp (time.time()) of the last tick processed by _option_handler.
         # Used by the Order Flow watchdog to detect a silently dead feed.
-        import time as _time_mod
         self._last_tick_time: float = _time_mod.time()
 
         # Track the last set of skipped (unknown-spot) tickers so the
@@ -140,6 +140,17 @@ class AtmOptionVolumeService:
         # error 20 "STREAM CONNECTION NOT FOUND").  ensure_atm_streaming
         # checks this and calls register() again to re-establish the feed.
         self._needs_reconnect = False
+
+        # Throttle re-subscribe attempts on a dead connection: only attempt
+        # _do_subscribe once per _reconnect_interval seconds to avoid
+        # spamming the Schwab API with failed requests every 2-second tick.
+        self._last_sub_attempt: float = 0.0
+        self._reconnect_interval: float = 5.0
+
+        # Ticker symbols whose front expiration has been explicitly verified
+        # via the Schwab option-expiration-chain API.  Used to avoid
+        # re-fetching on every grid render.
+        self._expiration_verified: set[str] = set()
 
         # Per-ticker flow tracking (all tracked tickers including primary)
         # _ticker_flows: display_symbol -> {stream_symbol, spot, atm_strike,
@@ -269,6 +280,7 @@ class AtmOptionVolumeService:
             self._ticker_flows.clear()
             self._sym_to_ticker.clear()
             self._last_sub_ok_set = None
+            self._expiration_verified.clear()
 
             # Reset the watchdog timestamp so it doesn't immediately fire
             # again after this re-registration.  The flow needs time to
@@ -310,6 +322,7 @@ class AtmOptionVolumeService:
                     "stream_symbol": stream_sym,
                     "spot": 0.0,
                     "atm_strike": 0.0,
+                    "expiration": self._expiration,
                     "call_sym": None,
                     "put_sym": None,
                     "call_bid": None,
@@ -342,7 +355,6 @@ class AtmOptionVolumeService:
         """Return True if no option ticks have been received for
         *max_age_seconds*.  Used by the Order Flow watchdog to detect a
         silently dead WebSocket subscription."""
-        import time as _time_mod
         with self._lock:
             return (_time_mod.time() - self._last_tick_time) > max_age_seconds
 
@@ -360,6 +372,7 @@ class AtmOptionVolumeService:
                 "stream_symbol": stream_symbol,
                 "spot": spot,
                 "atm_strike": 0.0,
+                "expiration": self._expiration,
                 "call_sym": None,
                 "put_sym": None,
                 "call_bid": None,
@@ -450,6 +463,35 @@ class AtmOptionVolumeService:
                 return None
             return ticker["atm_strike"]
 
+    def get_ticker_expiration(self, display_symbol: str) -> str | None:
+        """Return the front expiration date for a tracked ticker.
+        Tries per-ticker expiration first (which may be set from option
+        chain data), then parses the OCC option symbol, then falls back
+        to the shared service expiration."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return self._expiration
+            exp = ticker.get("expiration")
+            if exp:
+                return exp
+            call_sym = ticker.get("call_sym")
+            if call_sym and len(call_sym) >= 12:
+                yymmdd = call_sym[6:12]
+                return f"20{yymmdd[0:2]}-{yymmdd[2:4]}-{yymmdd[4:6]}"
+            return self._expiration
+
+    def set_ticker_expiration(self, display_symbol: str, expiration: str):
+        """Set the front expiration for a tracked ticker.
+        Used when option chain data is available for that ticker."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is not None:
+                ticker["expiration"] = expiration
+                self._expiration_verified.add(
+                    _normalize_display_symbol(display_symbol)
+                )
+
     def update_ticker_spot(self, display_symbol: str, spot: float):
         """Update the spot price for a tracked ticker and trigger re-subscription
         if the ATM strike changes."""
@@ -526,7 +568,6 @@ class AtmOptionVolumeService:
                     continue
 
                 self._ticks_received += 1
-                import time as _time_mod
                 self._last_tick_time = _time_mod.time()
 
                 bid = c.get("BID_PRICE")
@@ -592,20 +633,20 @@ class AtmOptionVolumeService:
         """Build ATM option symbols for ALL tracked tickers and subscribe
         via the shared StreamClient *sc* in a SINGLE call.
 
+        Each ticker uses its own per-ticker expiration (set via
+        ``set_ticker_expiration``) so the ``Expiration`` column in the
+        Order Flow grid shows the correct date per ticker rather than
+        the chart symbol's shared front expiration.
+
         Note: Tickers without a known spot (spot<=0) are *skipped* rather
         than subscribed at a placeholder strike of 100, because subscribing
         to non-existent option symbols both wastes the message budget and
         causes grief on the next re-subscribe (root prefix match mistakes).
         They will be subscribed when `update_ticker_spot` arrives."""
         with self._lock:
-            expiration = self._expiration
             tickers = dict(self._ticker_flows)
-        if not expiration or not tickers:
+        if not tickers:
             return
-
-        # Parse expiration to YYMMDD
-        parts = expiration.split("-")
-        yymmdd = parts[0][2:] + parts[1] + parts[2]
 
         # Build all call/put symbols for all tickers
         all_symbols = []
@@ -621,6 +662,16 @@ class AtmOptionVolumeService:
                     info["put_sym"] = None
                     skipped_no_spot.append(display_sym)
                     continue
+
+                # Use per-ticker expiration when available, otherwise fall
+                # back to the shared service expiration so newly added
+                # tickers still get subscribed before the lazy fetch runs.
+                exp = info.get("expiration") or self._expiration
+                if not exp:
+                    continue
+                parts = exp.split("-")
+                yymmdd = parts[0][2:] + parts[1] + parts[2]
+
                 atm = calculate_atm_strike(spot)
                 call_sym = _make_option_symbol(stream_sym, yymmdd, "C", atm)
                 put_sym = _make_option_symbol(stream_sym, yymmdd, "P", atm)
@@ -629,6 +680,8 @@ class AtmOptionVolumeService:
                 info["call_sym"] = call_sym
                 info["put_sym"] = put_sym
                 info["atm_strike"] = atm
+                # Preserve per-ticker expiration — do NOT overwrite with
+                # the shared self._expiration here.
                 # For SPX/RUT/NDX index options the display symbol
                 # (e.g. "$SPX") differs from the ETF proxy used as the
                 # stream symbol ("SPY"). Map back to the *display* symbol
@@ -652,14 +705,17 @@ class AtmOptionVolumeService:
         if not all_symbols:
             return
 
+        # Throttle: during reconnection, only attempt once per
+        # _reconnect_interval seconds to avoid spamming the log.
+        _now = _time_mod.time()
+        if self._needs_reconnect and _now - self._last_sub_attempt < self._reconnect_interval:
+            return
+        self._last_sub_attempt = _now
+
         # Deduplicate: skip the subscription request if the symbol set
-        # is identical to the last successful one.  Sending redundant
-        # subscription requests every 2 s causes the Schwab server to
-        # rate-limit and silently drop the feed.
+        # is identical to the last successful one.
         _new_set = frozenset(all_symbols)
-        if _new_set == self._last_sub_ok_set and not getattr(self, "_needs_reconnect", False):
-            # Symbols unchanged — still update primary tracking vars
-            # from the rebuilt _ticker_flows entry.
+        if _new_set == self._last_sub_ok_set and not self._needs_reconnect:
             with self._lock:
                 primary_info = self._ticker_flows.get(self._symbol)
                 if primary_info:
@@ -671,13 +727,8 @@ class AtmOptionVolumeService:
             await sc.level_one_option_subs(all_symbols)
             self._needs_reconnect = False
         except Exception as e:
-            # ConnectionClosedOK (1000) is a normal WebSocket close during
-            # reconnect — the next _do_subscribe cycle will retry automatically.
             if type(e).__name__ == "ConnectionClosedOK":
                 return
-            # Surface subscription failures instead of swallowing them
-            # silently. A silent failure leaves _sym_to_ticker populated
-            # but the feed is dead, so ticks never arrive.
             _err_str = str(e).lower()
             _is_dead = (
                 "connection not found" in _err_str
@@ -687,11 +738,15 @@ class AtmOptionVolumeService:
             )
             if _is_dead:
                 self._needs_reconnect = True
-            print(
-                f"[AtmOptionVolumeService] _do_subscribe FAILED: "
-                f"{type(e).__name__}: {e} (symbols={len(all_symbols)})"
-                f"{' — will reconnect' if _is_dead else ''}"
-            )
+            # Only log on first failure or when the error message changes
+            _err_key = str(e)[:120]
+            if _err_key != getattr(self, "_last_sub_err_key", None):
+                print(
+                    f"[AtmOptionVolumeService] _do_subscribe FAILED: "
+                    f"{type(e).__name__}: {e} (symbols={len(all_symbols)})"
+                    f"{' — will reconnect' if _is_dead else ''}"
+                )
+                self._last_sub_err_key = _err_key
             return
 
         _ok_set = _new_set

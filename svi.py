@@ -505,16 +505,3 @@ def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float 
 
     return {"surface": surface, "skew": skew, "atm_iv": atm_iv}
 
-
-def overlay_curve(
-    surface: SSVISurface, strikes: list[float], tte: float, ref_spot: Optional[float] = None,
-) -> list[float]:
-    """Convenience: SSVI IV evaluated at every (strike, tte) — for charting."""
-    out: list[float] = []
-    for k in strikes:
-        v = surface.iv(float(k), tte, ref_spot=ref_spot)
-        if v <= 0.0:
-            out.append(float("nan"))
-        else:
-            out.append(v)
-    return out

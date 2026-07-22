@@ -1079,8 +1079,6 @@ def build_init_data(
     andean_series = None
     volume_series = None
     atm_series = None
-    iv_skew_series = None
-    iv_skew_hist = None
     vp_vols = None
 
     candlestick_options = {
@@ -1316,12 +1314,10 @@ def compute_latest_indicators(
     history: list[dict],
     indicators: list[str] | None,
 ) -> dict:
-    from charts import _get_est_offset, _sma, _ema, _trend, _andean_oscillator, _ema50_squeeze, INDICATORS
+    from charts import _sma, _ema, _trend, _andean_oscillator, INDICATORS
 
     if not indicators:
         return {}
-
-    et = _get_est_offset()
 
     all_candles = list(history)
     if all_candles and all_candles[-1].get("datetime") != candle.get("datetime"):
@@ -1339,8 +1335,6 @@ def compute_latest_indicators(
 
     closes = [c["close"] for c in cd]
     opens = [c["open"] for c in cd]
-    highs = [c["high"] for c in cd]
-    lows = [c["low"] for c in cd]
     times = [c["time"] for c in cd]
     last_t = times[-1]
 
@@ -1369,7 +1363,6 @@ def compute_latest_indicators(
 
 
 def render_chart(candles, indicators=None, call_wall=None, put_wall=None, force_reinit=False, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
-    import time
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
     osc_height = 100 if (indicators and "Andean Osc" in indicators) else 0
