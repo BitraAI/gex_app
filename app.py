@@ -1490,6 +1490,8 @@ def render_volatility_frag():
 
     st.subheader("Volatility")
 
+    from charts import create_iv_by_strike, create_iv_richness_by_strike
+
     _rv = s.get("underlying_20d_rv", 0.0)
     _ssvi_surf = s.analytics.get("ssvi_surface") if s.get("analytics") else None
 
@@ -1501,7 +1503,7 @@ def render_volatility_frag():
     )
 
     if vol_view == "IV by Expiration":
-        from charts import create_atm_iv_histogram
+        from charts import create_atm_iv_histogram, create_vrp_chart
         mo = st.radio("View", ["ATM IV", "VRP"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
         mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="iv_exp_slider")
         ivd = s.by_exp_all[:mx]
@@ -1533,8 +1535,8 @@ def render_volatility_frag():
                 f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
                 unsafe_allow_html=True,
             )
-            # VRP chart has been removed - use IV by Expiration instead
-            st.info("VRP chart removed - use IV by Expiration for expiration-based VRP data")
+            # VRP chart: ATM IV - RV per expiration
+            st.plotly_chart(create_vrp_chart(ivd, _rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_exp_chart")
         else: st.info("No RV data")
     else:
         tm = st.radio("View", ["IV", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
@@ -1591,6 +1593,8 @@ def render_heatmaps_frag():
         return
 
     st.subheader("Heatmaps")
+
+    from charts import create_heatmap, create_vol_surface_2d
 
     om = st.radio("Select", ["Open Interest", "Volume", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="hm_oi_vol_radio")
 
