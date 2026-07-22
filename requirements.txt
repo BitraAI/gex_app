@@ -8,3 +8,4 @@ pyyaml>=6.0
 tzdata
 python-telegram-bot>=22.8
 feedparser>=6.0
+yfinance>=1.5.0

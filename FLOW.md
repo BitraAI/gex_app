@@ -18,7 +18,7 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Put Price** | Mid price of the ATM put option. |
 | **Bullish Flow** | Cumulative option volume classified as bullish. |
 | **Bearish Flow** | Cumulative option volume classified as bearish. |
-| **Net Flow** | `Bullish − Bearish`. Green when positive, red when negative, grey when zero. |
+| **Flow Momentum** | `(Bullish − Bearish) / (Bullish + Bearish)`. Ratio from -1 to 1. Green when positive, red when negative, grey when zero. |
 | **Status** | `Live` / `Closed` / `Cached` / `No Data` (see below). Amber (`Closed`) doubles as the "market open but no ticks yet" warning colour. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
