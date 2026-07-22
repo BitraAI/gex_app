@@ -53,8 +53,14 @@ async def fetch_front_expiration(client: AsyncClient, symbol: str) -> str | None
     the request fails or no expirations are returned."""
     try:
         resp = await client.get_option_expiration_chain(symbol)
-        if hasattr(resp, "json"):
-            resp = resp.json()
+        if isinstance(resp, dict):
+            pass
+        elif hasattr(resp, "json"):
+            try:
+                resp = resp.json()
+            except (ValueError, TypeError) as json_err:
+                logger.warning("fetch_front_expiration(%s) json decode failed: %s", symbol, json_err)
+                return None
         if isinstance(resp, dict):
             for key in ("expirationList", "ExpirationList", "expiration_list"):
                 exps = resp.get(key, []) or []
@@ -166,20 +172,43 @@ async def get_interest_rate(client: AsyncClient) -> float:
 
 async def get_next_earnings_date(client: AsyncClient, symbol: str) -> Optional[str]:
     from datetime import datetime, timezone
+    # 1. Try Schwab quote fundamental data
     try:
         resp = await client.get_quotes([symbol])
         if hasattr(resp, "json"):
             resp = resp.json()
-        if not isinstance(resp, dict):
-            return None
-        qd = resp.get(symbol, {}) or {}
-        fund = qd.get("fundamental", {}) or {}
-        ts = fund.get("nextEarningsDate")
-        if ts and int(ts) > 0:
-            return datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-        return None
+        if isinstance(resp, dict):
+            qd = resp.get(symbol, {}) or {}
+            fund = qd.get("fundamental", {}) or {}
+            ts = fund.get("nextEarningsDate")
+            if ts and int(ts) > 0:
+                return datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
     except Exception:
-        return None
+        pass
+
+    # 2. Fallback: Yahoo Finance via yfinance
+    # Skip ETFs / indexes that never have earnings.
+    _NO_EARNINGS = {"SPY", "SPX", "SPXW", "QQQ", "IWM", "RUT", "RUTW", "NDX", "NDXP", "DIA", "TLT", "HYG"}
+    if symbol.upper().lstrip("$") not in _NO_EARNINGS:
+        try:
+            import yfinance as yf
+            # Suppress yfinance's HTTP-error stderr spam (ETF w/o fundamentals).
+            import io, contextlib
+            with contextlib.redirect_stderr(io.StringIO()):
+                ticker = yf.Ticker(symbol)
+                cal = ticker.calendar
+            if cal is None:
+                return None
+            ed_list = cal.get("Earnings Date") if isinstance(cal, dict) else None
+            if ed_list is not None and len(ed_list) > 0:
+                dt = ed_list[0]
+                if isinstance(dt, datetime):
+                    return dt.strftime("%Y-%m-%d")
+                return str(dt)
+        except Exception:
+            pass
+
+    return None
 
 
 def historical_volatility(prices: list[float], length: int = 20) -> float:

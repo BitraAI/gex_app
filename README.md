@@ -33,7 +33,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Dealer Position (Long/Short Gamma)
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
    - IV Rank — Where the latest daily return sits in the trailing 52-week range of daily returns. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
-   - **Bullish/Bearish Flow** — Real-time ATM option flow metrics from the shared equity WebSocket stream, shown in the **Order Flow** tab. Subscribes to the front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming. Trade direction is inferred by comparing trade price to the bid-ask midpoint. Bullish Flow = `call_buy_vol + put_sell_vol`; Bearish Flow = `call_sell_vol + put_buy_vol`. Net Flow (bullish − bearish) is colour-coded green/red. Streaming is started by the main app's ticker **Refresh** (which also drives the candlestick chart); the Order Flow tab reads the shared `flow_cache` and refreshes every 2 seconds.
+   - **Bullish/Bearish Flow** — Real-time ATM option flow metrics from the shared equity WebSocket stream, shown in the **Order Flow** tab. Subscribes to the front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming. Trade direction is inferred by comparing trade price to the bid-ask midpoint. Bullish Flow = `call_buy_vol + put_sell_vol`; Bearish Flow = `call_sell_vol + put_buy_vol`. Flow Momentum (normalized ratio from -1 to 1) is colour-coded green/red. Streaming is started by the main app's ticker **Refresh** (which also drives the candlestick chart); the Order Flow tab reads the shared `flow_cache` and refreshes every 2 seconds.
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
@@ -235,7 +235,7 @@ You can then open the app in your local browser.
    - **Drag the price-scale labels** (right edge) to zoom the Y-axis, or the **time-scale labels** (bottom) to zoom the X-axis.
    - **Scroll the mouse wheel** to zoom the X-axis (bar spacing).
    - The Y zoom persists across the live 1-second streaming updates — drag it to where you want and the chart stays there.
- 8. **Bullish/Bearish Flow** — open the **Order Flow** tab to see real-time ATM option flow for every ticker in `ticker_history.json`. The table shows Bullish Flow, Bearish Flow, Net Flow (green/red), and a Status (Live during market hours / Closed after hours / Cached / No Data). Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
+ 8. **Bullish/Bearish Flow** — open the **Order Flow** tab to see real-time ATM option flow for every ticker in `ticker_history.json`. The table shows Bullish Flow, Bearish Flow, Flow Momentum (green/red), and a Status (Live during market hours / Closed after hours / Cached / No Data). Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
 
 ## Architecture
 

@@ -1780,6 +1780,8 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     if rv is None:
         rv = 0.0
 
+    earnings_date = run_async(get_next_earnings_date(st.session_state.client, symbol))
+
     # Update ATM service with correct expiration for this ticker
     if data and spot > 0:
         expirations = sorted(set(e["expiration"] for e in data))
@@ -1792,7 +1794,7 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     if atm_svc:
         atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
 
-    return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym}
+    return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym, "earnings_date": earnings_date}
 
 
 def _build_signals(
@@ -1882,7 +1884,16 @@ def render_trade_signals_frag():
                 b, br = assess_market_bias(s.analytics, s.spot, iv_rank=s.get("iv_rank"))
                 e = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}
                 st.markdown(f"**Market Bias:** {e.get(b, '')} {b} - {br}")
-                st.markdown(f"**Next Earnings:** {s.get('next_earnings_date') or 'N/A'}")
+                # Lazily fetch earnings date if not already in session state
+                _sym_earn = s.get("symbol", "").upper().lstrip("$")
+                _ed = s.get("next_earnings_date")
+                if _ed is None and _sym_earn and s.get("client"):
+                    try:
+                        _ed = run_async(get_next_earnings_date(s.client, _sym_earn))
+                        st.session_state.next_earnings_date = _ed
+                    except Exception:
+                        pass
+                st.markdown(f"**Next Earnings:** {_ed or 'N/A'}")
                 rc = _build_signals(
                     s.filtered_data, s.spot, s.analytics, _rv, pt, stg,
                     atm_range=s.get("strikes_atm_range", 20), by_exp_all=s.get("by_exp_all"),
@@ -1928,6 +1939,11 @@ def render_trade_signals_frag():
                             _no_sig = "No strong signals" in " ".join(rc)
                             if rc and not _no_sig:
                                 results[sym] = rc
+                            # Store earnings date for display
+                            _scan_earnings = st.session_state.get("_scan_earnings", {})
+                            if res.get("earnings_date"):
+                                _scan_earnings[sym] = res["earnings_date"]
+                            st.session_state._scan_earnings = _scan_earnings
                         st.session_state.ticker_scan_results = results
                         st.session_state.ticker_scan_pt = pt
                         st.session_state.ticker_scan_stg = stg
@@ -1939,7 +1955,9 @@ def render_trade_signals_frag():
                         shown_stg = st.session_state.get("ticker_scan_stg")
                         st.markdown(f"**Scan results — {shown_pt} / {shown_stg}**")
                         for sym, recs in results.items():
-                            st.markdown(f"**{sym}**")
+                            _ed = st.session_state.get("_scan_earnings", {}).get(sym, "")
+                            _ed_str = f" — Earnings: {_ed}" if _ed else ""
+                            st.markdown(f"**{sym}{_ed_str}**")
                             for r in recs:
                                 st.markdown(f"- {r}")
                     elif st.session_state.get("ticker_scan_empty"):

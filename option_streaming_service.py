@@ -226,6 +226,10 @@ class AtmOptionVolumeService:
             elif self._running and self._expiration and self._subscribed_call_sym is None:
                 self._resubscribes += 1
                 sc = self._stream_client
+            for _t in self._ticker_flows.values():
+                if _t.get("stream_symbol") == self._symbol:
+                    _t["spot"] = spot
+                    _t["atm_strike"] = new_strike
         if sc is not None:
             asyncio.run_coroutine_threadsafe(
                 self._do_subscribe(sc), self._loop,
@@ -433,13 +437,17 @@ class AtmOptionVolumeService:
     def get_ticker_option_prices(self, display_symbol: str) -> dict:
         """Return {call_price, put_price} mid-market for a tracked ticker,
         or {} if not tracked.  Returns bid/ask mid if both sides are
-        available, else the single available side."""
+        available, else the single available side.
+        Falls back to the primary ticker's class-level bid/ask when the
+        per-ticker values are unavailable."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is None:
                 return {}
             result = {}
             cb, ca = ticker.get("call_bid"), ticker.get("call_ask")
+            if cb is None and ca is None and display_symbol == self._symbol:
+                cb, ca = self._call_bid, self._call_ask
             if cb is not None and ca is not None and ca > 0:
                 result["call_price"] = round((cb + ca) / 2, 2)
             elif cb is not None:
@@ -447,6 +455,8 @@ class AtmOptionVolumeService:
             elif ca is not None:
                 result["call_price"] = round(ca, 2)
             pb, pa = ticker.get("put_bid"), ticker.get("put_ask")
+            if pb is None and pa is None and display_symbol == self._symbol:
+                pb, pa = self._put_bid, self._put_ask
             if pb is not None and pa is not None and pa > 0:
                 result["put_price"] = round((pb + pa) / 2, 2)
             elif pb is not None:
@@ -466,12 +476,18 @@ class AtmOptionVolumeService:
 
     def get_ticker_atm_strike(self, display_symbol: str) -> float | None:
         """Return the front-expiration ATM strike for a tracked ticker,
-        or None if not tracked / no spot known yet."""
+        or None if not tracked / no spot known yet.
+        Falls back to calculating from the current spot when the stored
+        atm_strike is not set, so the column stays in sync with live spot."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None or ticker["atm_strike"] <= 0:
+            if ticker is None:
                 return None
-            return ticker["atm_strike"]
+            if ticker["atm_strike"] > 0:
+                return ticker["atm_strike"]
+            if ticker["spot"] > 0:
+                return calculate_atm_strike(ticker["spot"])
+            return None
 
     def get_ticker_expiration(self, display_symbol: str) -> str | None:
         """Return the front expiration date for a tracked ticker.
@@ -539,6 +555,7 @@ class AtmOptionVolumeService:
                 return
             old_spot = ticker["spot"]
             ticker["spot"] = spot
+            ticker["atm_strike"] = calculate_atm_strike(spot)
             if ticker["call_sym"] is None or ticker["put_sym"] is None or \
                abs(spot - old_spot) / max(old_spot, 1) > 0.001:
                 if self._running and self._expiration:
@@ -566,6 +583,7 @@ class AtmOptionVolumeService:
                 if ticker is not None:
                     old = ticker["spot"]
                     ticker["spot"] = spot
+                    ticker["atm_strike"] = calculate_atm_strike(spot)
                     if abs(spot - old) / max(old, 1) > 0.001:
                         _spot_changed = True
             if self._running and self._expiration:
@@ -609,6 +627,8 @@ class AtmOptionVolumeService:
 
                 bid = c.get("BID_PRICE")
                 ask = c.get("ASK_PRICE")
+                bid_size = c.get("BID_SIZE")
+                ask_size = c.get("ASK_SIZE")
                 contract_type = c.get("CONTRACT_TYPE", "").upper()
                 underlying = c.get("UNDERLYING_PRICE")
 
@@ -621,6 +641,10 @@ class AtmOptionVolumeService:
                             ticker["call_bid"] = float(bid)
                         if ask is not None:
                             ticker["call_ask"] = float(ask)
+                        if bid_size is not None:
+                            ticker["current_bid_size"] = float(bid_size)
+                        if ask_size is not None:
+                            ticker["current_ask_size"] = float(ask_size)
                     elif contract_type in ("PUT", "P"):
                         if underlying is not None:
                             ticker["spot"] = float(underlying)
@@ -628,6 +652,10 @@ class AtmOptionVolumeService:
                             ticker["put_bid"] = float(bid)
                         if ask is not None:
                             ticker["put_ask"] = float(ask)
+                        if bid_size is not None:
+                            ticker["current_bid_size"] = float(bid_size)
+                        if ask_size is not None:
+                            ticker["current_ask_size"] = float(ask_size)
 
                 # Also update primary service bid/ask/spot for chart merge
                 if is_primary:
@@ -891,6 +919,14 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return "flat"
             return ticker.get("trend", "flat")
+
+    def _calculate_book_imbalance(self, bid_size: float, ask_size: float) -> float:
+        """Calculate book imbalance ratio from bid/ask sizes.
+        Positive → bullish pressure, Negative → bearish pressure."""
+        total = bid_size + ask_size
+        if total == 0:
+            return 0.0
+        return (bid_size - ask_size) / total
 
     def _snapshot_flow(self, ticker: dict):
         """Enhanced flow snapshot combining OPTIONS_BOOK with flow momentum for trend detection.

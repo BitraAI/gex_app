@@ -191,7 +191,7 @@ def render_atm_order_flow_grid():
             status = "Closed"
         else:
             status = "Cached"
-        net = (bullish - bearish) if has_data else None
+        net = (bullish - bearish) / (bullish + bearish) if has_data and (bullish + bearish) != 0 else 0 if has_data else None
         opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
         atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
         spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
@@ -259,7 +259,7 @@ def render_atm_order_flow_grid():
             "Put Price": opt_prices.get("put_price"),
             "Bullish Flow": bullish if has_data else 0,
             "Bearish Flow": bearish if has_data else 0,
-            "Net Flow": net if has_data else 0,
+            "Flow Momentum": net if has_data else 0,
             "Trend": trend_display,
             "Status": status,
         })
@@ -273,7 +273,7 @@ def render_atm_order_flow_grid():
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
          r["Call Price"], r["Put Price"], r["Bullish Flow"],
-         r["Bearish Flow"], r["Net Flow"], r["Status"])
+         r["Bearish Flow"], r["Flow Momentum"], r["Status"])
         for r in rows
     )
     data_hash = hash(data_key)
@@ -291,11 +291,11 @@ def render_atm_order_flow_grid():
         return f"color: {color}; font-size: 35px; line-height: 35px; text-align: center;"
 
     def _net_flow_color(val):
-        if val > 0:
+        if val > 0.20:
             return "color: #00cc96; font-weight: bold;"
-        if val < 0:
+        if val < -0.20:
             return "color: #ef5350; font-weight: bold;"
-        return "color: #808080;"
+        return "color: #ff9800; font-weight: bold;"
 
     def _trend_color(val):
         """Color the trend text (up/down/flat) based on trend direction."""
@@ -307,11 +307,11 @@ def render_atm_order_flow_grid():
     _styler = df.style.set_uuid("flow_grid")
     if hasattr(_styler, "map"):
         _styler = _styler.map(_status_color, subset=["Status"])
-        _styler = _styler.map(_net_flow_color, subset=["Net Flow"])
+        _styler = _styler.map(_net_flow_color, subset=["Flow Momentum"])
         _styler = _styler.map(_trend_color, subset=["Trend"])
     else:
         _styler = _styler.apply(_status_color, subset=["Status"])
-        _styler = _styler.apply(_net_flow_color, subset=["Net Flow"])
+        _styler = _styler.apply(_net_flow_color, subset=["Flow Momentum"])
         _styler = _styler.apply(_trend_color, subset=["Trend"])
 
     styled = _styler.format({
@@ -325,7 +325,7 @@ def render_atm_order_flow_grid():
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Bullish Flow": "{:,.0f}",
         "Bearish Flow": "{:,.0f}",
-        "Net Flow": "{:,.0f}",
+        "Flow Momentum": "{:+.2f}",
         "Status": lambda v: "●",
     })
 
