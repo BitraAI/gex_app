@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.error
 import urllib.request
 from typing import Any, Iterable, Optional
 
@@ -28,11 +29,6 @@ logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.telegram.org"
 
-
-# Analytics keys that participate in the per-symbol alert diff. Sharing this
-# list keeps the Streamlit ``check_alerts`` and the standalone cron runner
-# (``telegram_alerts.py``) in lock-step.
-ALERT_STATE_FIELDS = ("gamma_flip", "call_wall", "put_wall", "dealer_position", "spot")
 
 
 def _enabled() -> bool:
@@ -56,8 +52,16 @@ def _http_post_json(url: str, payload: dict, *, timeout: float = 10.0) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        result = json.loads(body)
+        raise RuntimeError(
+            f"Telegram API error (HTTP {exc.code}): "
+            f"{result.get('description', body)}"
+        ) from exc
     result = json.loads(body)
     if not result.get("ok"):
         raise RuntimeError(f"Telegram API error: {result.get('description', body)}")

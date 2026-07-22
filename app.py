@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import threading
-from datetime import datetime, date
+from datetime import datetime
 from typing import Any, Optional
 
 # Persistent event loop in a background thread (avoids Python 3.12 "Event loop is closed")
@@ -27,12 +27,8 @@ def _ensure_async_loop() -> asyncio.AbstractEventLoop:
             _ASYNC_LOOP_THREAD.start()
     return _ASYNC_LOOP
 
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
-from streamlit.runtime.scriptrunner import add_script_run_ctx
 import client as client_mod
 from client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from streaming_service import StreamingService
@@ -42,7 +38,6 @@ from flow import render_atm_order_flow_grid
 from calculations import (
     aggregate_by_strike,
     aggregate_by_expiration,
-    compute_totals,
     parse_option_chain,
     build_greeks_lookup,
 )
@@ -274,6 +269,13 @@ def fetch_data(symbol: str) -> bool:
     prefetch_daily_candles(symbol)
     apply_filters()
     compute_state()
+    # Update ATM service with correct front expiration for this ticker
+    if data and spot > 0:
+        expirations = sorted(set(e["expiration"] for e in data))
+        if expirations:
+            atm_svc = st.session_state.get("atm_option_service")
+            if atm_svc:
+                atm_svc.set_ticker_expiration(_sym, expirations[0])
     st.session_state.etf_analytics = etf_analytics
     if etf_analytics and st.session_state.analytics.get("net_gex", 0) == 0:
         for key in ("net_gex", "total_call_gex", "total_put_gex",
@@ -425,24 +427,24 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
     col1.markdown(
         f'<div class="gex-metric"><div class="label">Put Wall</div>'
         f'<div class="value neutral">${pw:.2f}</div></div>' if pw else
-        f'<div class="gex-metric"><div class="label">Put Wall</div>'
-        f'<div class="value neutral">N/A</div></div>',
+        '<div class="gex-metric"><div class="label">Put Wall</div>'
+        '<div class="value neutral">N/A</div></div>',
         unsafe_allow_html=True,
     )
     cw = analytics.get('call_wall')
     col2.markdown(
         f'<div class="gex-metric"><div class="label">Call Wall</div>'
         f'<div class="value neutral">${cw:.2f}</div></div>' if cw else
-        f'<div class="gex-metric"><div class="label">Call Wall</div>'
-        f'<div class="value neutral">N/A</div></div>',
+        '<div class="gex-metric"><div class="label">Call Wall</div>'
+        '<div class="value neutral">N/A</div></div>',
         unsafe_allow_html=True,
     )
     gf = analytics.get('gamma_flip')
     col3.markdown(
         f'<div class="gex-metric"><div class="label">Gamma Flip</div>'
         f'<div class="value neutral">${gf:.2f}</div></div>' if gf else
-        f'<div class="gex-metric"><div class="label">Gamma Flip</div>'
-        f'<div class="value neutral">N/A</div></div>',
+        '<div class="gex-metric"><div class="label">Gamma Flip</div>'
+        '<div class="value neutral">N/A</div></div>',
         unsafe_allow_html=True,
     )
     dp = analytics.get('dealer_position', 'N/A')
@@ -458,8 +460,8 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
     col1.markdown(
         f'<div class="gex-metric"><div class="label">Max Pain</div>'
         f'<div class="value neutral">${pin:.2f}</div></div>' if pin else
-        f'<div class="gex-metric"><div class="label">Max Pain</div>'
-        f'<div class="value neutral">N/A</div></div>',
+        '<div class="gex-metric"><div class="label">Max Pain</div>'
+        '<div class="value neutral">N/A</div></div>',
         unsafe_allow_html=True,
     )
     iv_skew = analytics.get('iv_skew')
@@ -472,15 +474,15 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
         )
     else:
         col2.markdown(
-            f'<div class="gex-metric"><div class="label">IV Skew (25Δ)</div>'
-            f'<div class="value neutral">N/A</div></div>',
+            '<div class="gex-metric"><div class="label">IV Skew (25Δ)</div>'
+            '<div class="value neutral">N/A</div></div>',
             unsafe_allow_html=True,
         )
     col3.markdown(
         f'<div class="gex-metric"><div class="label">RV (20d)</div>'
         f'<div class="value neutral">{rv*100:.2f}%</div></div>' if rv > 0 else
-        f'<div class="gex-metric"><div class="label">RV (20d)</div>'
-        f'<div class="value neutral">N/A</div></div>',
+        '<div class="gex-metric"><div class="label">RV (20d)</div>'
+        '<div class="value neutral">N/A</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -494,8 +496,8 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
         )
     else:
         c1.markdown(
-            f'<div class="gex-metric"><div class="label">IV Rank</div>'
-            f'<div class="value neutral">N/A</div></div>',
+            '<div class="gex-metric"><div class="label">IV Rank</div>'
+            '<div class="value neutral">N/A</div></div>',
             unsafe_allow_html=True,
         )
     em = analytics.get('expected_move')
@@ -511,8 +513,8 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
         )
     else:
         c2.markdown(
-            f'<div class="gex-metric"><div class="label">Exp. Move</div>'
-            f'<div class="value neutral">N/A</div></div>',
+            '<div class="gex-metric"><div class="label">Exp. Move</div>'
+            '<div class="value neutral">N/A</div></div>',
             unsafe_allow_html=True,
         )
     lr = last_refresh.strftime("%H:%M:%S") if last_refresh else "—"
@@ -879,11 +881,34 @@ def ensure_atm_streaming(stream_symbol: str):
                 atm_svc._needs_reconnect = False
                 atm_svc.register(sc, stream_symbol, _first_exp)
                 atm_svc.start()
+            # When re-registering due to a reconnect, skip feeding spots —
+            # the equity streaming service's reconnection callback
+            # (_delayed_resubscribe) will re-subscribe after the WebSocket
+            # session is fully established.  Feeding spots now would just
+            # trigger a _do_subscribe that hits a dead connection.
+            return
 
         # Feed live spot so ATM strike tracking stays current
         if svc.last_price and svc.last_price > 0:
             atm_svc.update_spot(svc.last_price)
             s.spot_cache[stream_symbol] = svc.last_price
+
+        # Lazily fetch front expiration for tracked tickers that haven't
+        # been verified yet (throttled to once per minute).
+        import time as _t_mod
+        _exp_ts = s.get("_exp_fetch_ts", 0.0)
+        if _t_mod.time() - _exp_ts >= 60:
+            s["_exp_fetch_ts"] = _t_mod.time()
+            for _t in _all_tickers:
+                _t_upper = _t.upper().lstrip("$")
+                if _t_upper not in atm_svc._expiration_verified:
+                    try:
+                        from client import fetch_front_expiration
+                        _exp = run_async(fetch_front_expiration(s.client, _t_upper))
+                        if _exp:
+                            atm_svc.set_ticker_expiration(_t_upper, _exp)
+                    except Exception:
+                        pass
 
         # Feed pre-fetched spots from spot_cache into ATM service for all
         # tracked tickers.
@@ -1253,7 +1278,7 @@ def render_candlesticks():
                         for col in ["call_buy_vol", "call_sell_vol", "put_buy_vol", "put_sell_vol", "total_buy_vol", "total_sell_vol"]:
                             if col in chart_df.columns:
                                 chart_df[col] = chart_df[col].fillna(0).astype(int)
-                except Exception as e:
+                except Exception:
                     pass
 
         # Persist in session state. chart_df["datetime"] stays as int64 ms because
@@ -1292,9 +1317,6 @@ def render_candlesticks():
                 else:
                     c.pop(ac, None)
 
-        # Use unique chart id for the current ticker to preserve Y-axis state
-        chart_id = s.get("symbol", "SPY")
-
         last_close = float(df["close"].iloc[-1]) if not df.empty else None
 
         # Call/Put wall horizontal lines (price levels from analytics)
@@ -1323,7 +1345,7 @@ def render_candlesticks():
                     _n = _atm_svc.ticks_received
                     _msg += f" · { _n } option tick{'s' if _n != 1 else ''}"
                 elif _atm_svc.is_running and not _atm_svc.has_data:
-                    _msg += f" · waiting for option trades..."
+                    _msg += " · waiting for option trades..."
                 elif not _atm_svc.is_running:
                     _msg += " · option flow not subscribed"
             _status = {"text": _msg, "level": "success"}
@@ -1331,7 +1353,7 @@ def render_candlesticks():
             _status = {"text": f"Connected · waiting for {stream_symbol} trades...", "level": "info"}
         elif not _eq_svc.is_connected:
             _err = getattr(_eq_svc, "last_error", None)
-            _msg = f"WebSocket disconnected"
+            _msg = "WebSocket disconnected"
             if _err:
                 _msg += f": {_err}"
             _status = {"text": _msg, "level": "warning"}
@@ -1519,8 +1541,8 @@ def render_volatility_frag():
             ]
             cols = st.columns(len(legend_items) + 2)
             cols[0].markdown(
-                f'<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Buy Premium</span></div>',
+                '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+                '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Buy Premium</span></div>',
                 unsafe_allow_html=True,
             )
             for ci, (color, label) in zip(cols[1:-1], legend_items):
@@ -1531,8 +1553,8 @@ def render_volatility_frag():
                     unsafe_allow_html=True,
                 )
             cols[-1].markdown(
-                f'<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
+                '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+                '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
                 unsafe_allow_html=True,
             )
             # VRP chart: ATM IV - RV per expiration
@@ -1564,8 +1586,8 @@ def render_volatility_frag():
                 ]
                 cols = st.columns(len(legend_items) + 2)
                 cols[0].markdown(
-                    f'<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                    f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Cheap</span></div>',
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+                    '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Cheap</span></div>',
                     unsafe_allow_html=True,
                 )
                 for ci, (color, label) in zip(cols[1:-1], legend_items):
@@ -1576,8 +1598,8 @@ def render_volatility_frag():
                         unsafe_allow_html=True,
                     )
                 cols[-1].markdown(
-                    f'<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                    f'<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Expensive</span></div>',
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+                    '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Expensive</span></div>',
                     unsafe_allow_html=True,
                 )
                 st.plotly_chart(create_iv_richness_by_strike(vk, s.spot, _ssvi_surf, _ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_by_strike")
@@ -1711,6 +1733,14 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     rv = run_async(get_20d_rv(st.session_state.client, symbol))
     if rv is None:
         rv = 0.0
+
+    # Update ATM service with correct expiration for this ticker
+    if data and spot > 0:
+        expirations = sorted(set(e["expiration"] for e in data))
+        if expirations:
+            atm_svc = st.session_state.get("atm_option_service")
+            if atm_svc:
+                atm_svc.set_ticker_expiration(_sym, expirations[0])
 
     return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym}
 
@@ -1941,8 +1971,6 @@ def render_table():
     else:
         df["SSVI IV"] = 0.0
         df["IV (pp)"] = 0.0
-
-    rv = st.session_state.get("underlying_20d_rv", 0.0)
 
     df = df[["Strike","Call GEX","Put GEX","Net GEX","Call Gamma","Put Gamma","Call OI","Put OI","Call Vol","Put Vol","Call Price","Put Price","Call Delta","Put Delta","Expirations","IV","SSVI IV","IV (pp)"]]
 

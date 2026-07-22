@@ -4,7 +4,6 @@
 
 import json
 import os
-import threading
 import time
 
 # Create the necessary directories and files

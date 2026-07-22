@@ -8,7 +8,7 @@ safely from either entry point without re-running app.py's top-level code.
 import asyncio
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from option_streaming_service import _find_flow_for_display
 
@@ -45,29 +45,6 @@ def is_market_open() -> bool:
     if (now.month, now.day) in _holidays:
         return False
     return True
-
-
-def ensure_session_defaults():
-    """Initialize the shared st.session_state defaults.
-
-    The main app.py applies _SESSION_DEFAULTS at import time, but Streamlit
-    *pages* run as a separate script and would otherwise start with an empty
-    session state (causing AttributeError on st.session_state.spot_cache,
-    st.session_state.show_calls, etc. when the page drives fetch_data /
-    streaming directly).  Call this from any page before touching session state.
-
-    Reuses the exact _SESSION_DEFAULTS dict from app.py so the two never drift.
-    """
-    from app import _SESSION_DEFAULTS
-    for k, v in _SESSION_DEFAULTS.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-    if not st.session_state.ticker_history:
-        try:
-            from option_streaming_service import _load_ticker_history
-            st.session_state.ticker_history = _load_ticker_history()
-        except Exception:
-            pass
 
 
 def update_flow_cache():
@@ -122,6 +99,18 @@ def update_flow_cache():
         if bf is not None and brf is not None:
             if t_sym not in s.flow_cache or s.flow_cache[t_sym]["bullish"] is not None:
                 s.flow_cache[t_sym] = {"bullish": bf, "bearish": brf}
+
+
+def _format_expiration(exp: str | None) -> str:
+    if not exp:
+        return ""
+    try:
+        exp_date = date.fromisoformat(exp)
+        dte = (exp_date - date.today()).days
+        mmdd = exp[5:10]  # "MM-DD"
+        return f"{mmdd} ({dte}d)" if dte >= 0 else f"{mmdd} (0d)"
+    except (ValueError, TypeError):
+        return exp or ""
 
 
 _STATUS_COLORS = {
@@ -252,6 +241,7 @@ def render_atm_order_flow_grid():
             "Ticker": t_upper,
             "Spot": spot,
             "ATM Strike": atm_strike,
+            "Expiration": atm_svc.get_ticker_expiration(t_upper) if atm_svc else None,
             "Call Price": opt_prices.get("call_price"),
             "Put Price": opt_prices.get("put_price"),
             "Bullish Flow": bullish if has_data else 0,
@@ -267,7 +257,7 @@ def render_atm_order_flow_grid():
 
     # Hash the row data to detect whether anything actually changed.
     data_key = tuple(
-        (r["Ticker"], r["Spot"], r["ATM Strike"], r["Trend"],
+        (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"], r["Trend"],
          r["Call Price"], r["Put Price"], r["Bullish Flow"],
          r["Bearish Flow"], r["Net Flow"], r["Status"])
         for r in rows
@@ -313,6 +303,7 @@ def render_atm_order_flow_grid():
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
         "ATM Strike": lambda v: f"${v:,.2f}" if v is not None else "",
+        "Expiration": lambda v: _format_expiration(v),
         "Trend": lambda v: v,
         "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
