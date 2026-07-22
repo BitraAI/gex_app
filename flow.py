@@ -237,11 +237,24 @@ def render_atm_order_flow_grid():
             else:
                 trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
         
+        # Support (Put Wall) / Resistance (Call Wall): prefer per-ticker value
+        # set by fetch_data, fall back to session-state analytics for the
+        # current chart symbol so the columns are never empty without a manual
+        # Refresh.
+        put_wall_val = atm_svc.get_ticker_put_wall(t_upper) if atm_svc else None
+        call_wall_val = atm_svc.get_ticker_call_wall(t_upper) if atm_svc else None
+        if put_wall_val is None and t_upper == current_sym:
+            put_wall_val = (s.get("analytics") or {}).get("put_wall")
+        if call_wall_val is None and t_upper == current_sym:
+            call_wall_val = (s.get("analytics") or {}).get("call_wall")
+
         rows.append({
             "Ticker": t_upper,
             "Spot": spot,
             "ATM Strike": atm_strike,
             "Expiration": atm_svc.get_ticker_expiration(t_upper) if atm_svc else None,
+            "Support": put_wall_val,
+            "Resistance": call_wall_val,
             "Call Price": opt_prices.get("call_price"),
             "Put Price": opt_prices.get("put_price"),
             "Bullish Flow": bullish if has_data else 0,
@@ -257,7 +270,8 @@ def render_atm_order_flow_grid():
 
     # Hash the row data to detect whether anything actually changed.
     data_key = tuple(
-        (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"], r["Trend"],
+        (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
+         r["Support"], r["Resistance"], r["Trend"],
          r["Call Price"], r["Put Price"], r["Bullish Flow"],
          r["Bearish Flow"], r["Net Flow"], r["Status"])
         for r in rows
@@ -304,6 +318,8 @@ def render_atm_order_flow_grid():
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
         "ATM Strike": lambda v: f"${v:,.2f}" if v is not None else "",
         "Expiration": lambda v: _format_expiration(v),
+        "Support": lambda v: f"${v:,.2f}" if v is not None else "",
+        "Resistance": lambda v: f"${v:,.2f}" if v is not None else "",
         "Trend": lambda v: v,
         "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
