@@ -276,6 +276,11 @@ def fetch_data(symbol: str) -> bool:
             atm_svc = st.session_state.get("atm_option_service")
             if atm_svc:
                 atm_svc.set_ticker_expiration(_sym, expirations[0])
+    # Store Put Wall (support) and Call Wall (resistance) for the grid
+    atm_svc = st.session_state.get("atm_option_service")
+    if atm_svc:
+        _ana = st.session_state.get("analytics") or {}
+        atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"))
     st.session_state.etf_analytics = etf_analytics
     if etf_analytics and st.session_state.analytics.get("net_gex", 0) == 0:
         for key in ("net_gex", "total_call_gex", "total_put_gex",
@@ -909,6 +914,21 @@ def ensure_atm_streaming(stream_symbol: str):
                             atm_svc.set_ticker_expiration(_t_upper, _exp)
                     except Exception:
                         pass
+
+        # Lazily fetch full option-chain analytics (put/call walls) for
+        # tracked tickers that haven't been verified yet.  Process at most
+        # ONE ticker per `ensure_atm_streaming` call to avoid blocking the
+        # Streamlit thread for seconds at a time on the full REST query.
+        _walls_pending = [
+            _t for _t in _all_tickers
+            if _t.upper().lstrip("$") not in atm_svc._walls_verified
+        ]
+        if _walls_pending:
+            _next_t = _walls_pending[0]
+            try:
+                _run_ticker_signals(_next_t)
+            except Exception:
+                pass
 
         # Feed pre-fetched spots from spot_cache into ATM service for all
         # tracked tickers.
@@ -1741,6 +1761,10 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
             atm_svc = st.session_state.get("atm_option_service")
             if atm_svc:
                 atm_svc.set_ticker_expiration(_sym, expirations[0])
+    # Store Put Wall (support) and Call Wall (resistance) for the grid
+    atm_svc = st.session_state.get("atm_option_service")
+    if atm_svc:
+        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
 
     return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym}
 

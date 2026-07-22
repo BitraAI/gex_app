@@ -152,6 +152,11 @@ class AtmOptionVolumeService:
         # re-fetching on every grid render.
         self._expiration_verified: set[str] = set()
 
+        # Ticker symbols whose put/call walls have been fetched via a full
+        # option-chain REST query.  Used to pace the lazy background fetch
+        # in ensure_atm_streaming.
+        self._walls_verified: set[str] = set()
+
         # Per-ticker flow tracking (all tracked tickers including primary)
         # _ticker_flows: display_symbol -> {stream_symbol, spot, atm_strike,
         #   call_sym, put_sym, call_bid, call_ask, put_bid, put_ask,
@@ -281,6 +286,7 @@ class AtmOptionVolumeService:
             self._sym_to_ticker.clear()
             self._last_sub_ok_set = None
             self._expiration_verified.clear()
+            self._walls_verified.clear()
 
             # Reset the watchdog timestamp so it doesn't immediately fire
             # again after this re-registration.  The flow needs time to
@@ -323,6 +329,8 @@ class AtmOptionVolumeService:
                     "spot": 0.0,
                     "atm_strike": 0.0,
                     "expiration": self._expiration,
+                    "call_wall": None,
+                    "put_wall": None,
                     "call_sym": None,
                     "put_sym": None,
                     "call_bid": None,
@@ -373,6 +381,8 @@ class AtmOptionVolumeService:
                 "spot": spot,
                 "atm_strike": 0.0,
                 "expiration": self._expiration,
+                "call_wall": None,
+                "put_wall": None,
                 "call_sym": None,
                 "put_sym": None,
                 "call_bid": None,
@@ -491,6 +501,33 @@ class AtmOptionVolumeService:
                 self._expiration_verified.add(
                     _normalize_display_symbol(display_symbol)
                 )
+
+    def set_ticker_walls(self, display_symbol: str, put_wall: float | None, call_wall: float | None):
+        """Store the Put Wall (support) and Call Wall (resistance) for a
+        tracked ticker.  These are read from REST option-chain analytics
+        and displayed in the Order Flow grid."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is not None:
+                ticker["put_wall"] = put_wall
+                ticker["call_wall"] = call_wall
+                self._walls_verified.add(
+                    _normalize_display_symbol(display_symbol)
+                )
+
+    def get_ticker_put_wall(self, display_symbol: str) -> float | None:
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("put_wall")
+
+    def get_ticker_call_wall(self, display_symbol: str) -> float | None:
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("call_wall")
 
     def update_ticker_spot(self, display_symbol: str, spot: float):
         """Update the spot price for a tracked ticker and trigger re-subscription
