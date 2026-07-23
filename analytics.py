@@ -1,5 +1,6 @@
 import logging
 from typing import Any, Optional
+import numpy as np
 from calculations import (
     aggregate_by_strike,
     aggregate_by_expiration,
@@ -37,7 +38,7 @@ def get_filtered_strikes_for_analysis(
     """Get filtered strikes for order flow support and resistance calculation.
     
     Returns:
-        A list of strikes in the order: 20 strikes BELOW ATM, ATM strike, 20 strikes ABOVE ATM.
+        A list of strikes in the order: 20 strikes below ATM, ATM strike, 20 strikes above ATM.
         Each strike is returned as a tuple containing:
         (strike, call_gex, put_gex, call_oi, put_oi, call_iv, put_iv, net_gex, expiration, dte)
         
@@ -54,76 +55,37 @@ def get_filtered_strikes_for_analysis(
     if not strikes:
         return []
     
-    # Find ATM strike (closest to spot)
     atm_strike = min(strikes, key=lambda k: abs(k - spot))
     
-    # Get strikes below ATM, sorted by distance (closest first)
+    strike_map: dict[float, dict[str, Any]] = {}
+    for e in data:
+        strike_map[e["strike"]] = e
+
     below_strikes = [s for s in strikes if s < atm_strike]
     below_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
     
-    # Get strikes above ATM, sorted by distance (closest first)
     above_strikes = [s for s in strikes if s > atm_strike]
     above_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
     
-    # Select exactly n strikes below and n strikes above
-    # If there are fewer available strikes than n, use all available strikes
     selected_below = below_strikes[:n]
     selected_above = above_strikes[:n]
-    
-    # Combine: exactly n strikes below + ATM strike + exactly n strikes above (in this order)
-    selected_strikes = selected_below + [atm_strike] + selected_above
-    
-    # Build result in the correct order
-    result = []
-    
-    # Add strikes below ATM (in order of distance from ATM)
-    for strike in selected_below:
-        strike_data = [e for e in data if e["strike"] == strike][0]
-        result.append((
+
+    def _row(strike: float) -> tuple:
+        d = strike_map.get(strike, {})
+        return (
             strike,
-            strike_data.get("call_gex", 0),
-            strike_data.get("put_gex", 0),
-            strike_data.get("call_oi", 0),
-            strike_data.get("put_oi", 0),
-            strike_data.get("call_iv", strike_data.get("iv", 0)),
-            strike_data.get("put_iv", strike_data.get("iv", 0)),
-            strike_data.get("net_gex", 0),
-            strike_data.get("expiration"),
-            strike_data.get("days_to_exp") or strike_data.get("dte")
-        ))
-    
-    # Add ATM strike
-    atm_data = [e for e in data if e["strike"] == atm_strike][0]
-    result.append((
-        atm_strike,
-        atm_data.get("call_gex", 0),
-        atm_data.get("put_gex", 0),
-        atm_data.get("call_oi", 0),
-        atm_data.get("put_oi", 0),
-        atm_data.get("call_iv", atm_data.get("iv", 0)),
-        atm_data.get("put_iv", atm_data.get("iv", 0)),
-        atm_data.get("net_gex", 0),
-        atm_data.get("expiration"),
-        atm_data.get("days_to_exp") or atm_data.get("dte")
-    ))
-    
-    # Add strikes above ATM (in order of distance from ATM)
-    for strike in selected_above:
-        strike_data = [e for e in data if e["strike"] == strike][0]
-        result.append((
-            strike,
-            strike_data.get("call_gex", 0),
-            strike_data.get("put_gex", 0),
-            strike_data.get("call_oi", 0),
-            strike_data.get("put_oi", 0),
-            strike_data.get("call_iv", strike_data.get("iv", 0)),
-            strike_data.get("put_iv", strike_data.get("iv", 0)),
-            strike_data.get("net_gex", 0),
-            strike_data.get("expiration"),
-            strike_data.get("days_to_exp") or strike_data.get("dte")
-        ))
-    
-    return result
+            d.get("call_gex", 0),
+            d.get("put_gex", 0),
+            d.get("call_oi", 0),
+            d.get("put_oi", 0),
+            d.get("call_iv", d.get("iv", 0)),
+            d.get("put_iv", d.get("iv", 0)),
+            d.get("net_gex", 0),
+            d.get("expiration"),
+            d.get("days_to_exp") or d.get("dte"),
+        )
+
+    return [_row(s) for s in selected_below] + [_row(atm_strike)] + [_row(s) for s in selected_above]
 
 
 def compute_analytics(
@@ -278,16 +240,39 @@ def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: li
         return None
     full = aggregate_by_strike(data_full, spot) if data_full else strikes
     strike_prices = [s["strike"] for s in strikes]
+    full_sorted = sorted(full, key=lambda s: s["strike"])
+    full_strikes = np.array([s["strike"] for s in full_sorted], dtype=float)
+    call_oi = np.array([s.get("call_oi", 0) for s in full_sorted], dtype=float)
+    put_oi = np.array([s.get("put_oi", 0) for s in full_sorted], dtype=float)
+
+    n_full = len(full_strikes)
+    cum_call_oi = np.cumsum(call_oi)
+    cum_put_oi = np.cumsum(put_oi)
+    cum_call_k = np.cumsum(call_oi * full_strikes)
+    cum_put_k = np.cumsum(put_oi * full_strikes)
+    total_call_oi = cum_call_oi[-1] if n_full else 0.0
+    total_put_oi = cum_put_oi[-1] if n_full else 0.0
+    total_call_k = cum_call_k[-1] if n_full else 0.0
+    total_put_k = cum_put_k[-1] if n_full else 0.0
+
     best_strike = None
     best_pain = float("inf")
     for p in strike_prices:
-        total = 0.0
-        for s in full:
-            k = s["strike"]
-            if p > k:
-                total += (p - k) * s["call_oi"]
-            if p < k:
-                total += (k - p) * s["put_oi"]
+        idx = np.searchsorted(full_strikes, p, side="right") - 1
+        if idx >= 0:
+            left_call_oi = cum_call_oi[idx]
+            left_call_k = cum_call_k[idx]
+        else:
+            left_call_oi = 0.0
+            left_call_k = 0.0
+        if idx >= 0:
+            right_put_oi = total_put_oi - cum_put_oi[idx]
+            right_put_k = total_put_k - cum_put_k[idx]
+        else:
+            right_put_oi = total_put_oi
+            right_put_k = total_put_k
+
+        total = p * left_call_oi - left_call_k + right_put_k - p * right_put_oi
         if total < best_pain:
             best_pain = total
             best_strike = p

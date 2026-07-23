@@ -10,9 +10,6 @@ TEMPLATE = {
     "grid_color": "#e9eef3",
 }
 
-def _get_template():
-    return TEMPLATE
-
 
 def create_gex_histogram(
     strikes: list[dict[str, Any]],
@@ -21,7 +18,7 @@ def create_gex_histogram(
     put_wall: Optional[float] = None,
     gamma_flip: Optional[float] = None,
 ) -> go.Figure:
-    tmpl = _get_template()
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -133,7 +130,7 @@ def create_gex_by_expiration(
 ) -> go.Figure:
     from datetime import datetime
 
-    tmpl = _get_template()
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     weekdays = [e for e in by_exp if datetime.strptime(e["expiration"], "%Y-%m-%d").weekday() < 5]
@@ -192,7 +189,7 @@ def create_oi_by_strike(
     spot: float,
     mode: str = "oi",
 ) -> go.Figure:
-    tmpl = _get_template()
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -282,7 +279,7 @@ def create_heatmap(
     call_wall: float | None = None,
     put_wall: float | None = None,
 ) -> go.Figure:
-    tmpl = _get_template()
+    tmpl = TEMPLATE
 
     from datetime import datetime
     active_exps = set(e["expiration"] for e in data if e.get("open_interest", 0) > 0)
@@ -388,7 +385,7 @@ def create_heatmap(
 def create_gamma_surface(
     data: list[dict[str, Any]],
 ) -> go.Figure:
-    tmpl = _get_template()
+    tmpl = TEMPLATE
 
     from datetime import datetime
     expirations = sorted(set(e["expiration"] for e in data))
@@ -452,7 +449,7 @@ def create_vol_surface_2d(
     ssvi_surface: Any = None,
     ssvi_tte: float | None = None,
 ) -> go.Figure:
-    tmpl = _get_template()
+    tmpl = TEMPLATE
 
     from datetime import datetime
     filtered = [e for e in data if strike_min <= e["strike"] <= strike_max]
@@ -590,10 +587,11 @@ def create_dealer_gamma_curve(
     vex_magnet: Optional[float] = None,
     vex_repellent: Optional[float] = None,
 ) -> go.Figure:
-    tmpl = _get_template()
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
+    n = len(strikes_sorted)
 
     spot_prices = np.linspace(
         min(s["strike"] for s in strikes_sorted) * 0.95,
@@ -601,37 +599,41 @@ def create_dealer_gamma_curve(
         200,
     )
 
-    cumulative_gex = []
-    cumulative_vex = []
-    cumulative_cex = []
-    for sp in spot_prices:
-        cum_g = sum(
-            s["net_gex"] for s in strikes_sorted if s["strike"] >= sp
-        )
-        cumulative_gex.append(cum_g)
-        cum_v = sum(
-            s["net_vex"] for s in strikes_sorted if s["strike"] >= sp
-        )
-        cumulative_vex.append(cum_v)
-        cum_c = sum(
-            s["net_cex"] for s in strikes_sorted if s["strike"] >= sp
-        )
-        cumulative_cex.append(cum_c)
+    strike_arr = np.array([s["strike"] for s in strikes_sorted])
+    gex_arr = np.array([s["net_gex"] for s in strikes_sorted])
+    vex_arr = np.array([s["net_vex"] for s in strikes_sorted])
+    cex_arr = np.array([s["net_cex"] for s in strikes_sorted])
+
+    suffix_gex = np.empty(n)
+    suffix_vex = np.empty(n)
+    suffix_cex = np.empty(n)
+    suffix_gex[-1] = gex_arr[-1]
+    suffix_vex[-1] = vex_arr[-1]
+    suffix_cex[-1] = cex_arr[-1]
+    for i in range(n - 2, -1, -1):
+        suffix_gex[i] = suffix_gex[i + 1] + gex_arr[i]
+        suffix_vex[i] = suffix_vex[i + 1] + vex_arr[i]
+        suffix_cex[i] = suffix_cex[i + 1] + cex_arr[i]
+
+    indices = np.searchsorted(strike_arr, spot_prices, side="left")
+    cumulative_gex = np.where(indices < n, suffix_gex[np.clip(indices, 0, n - 1)], 0.0)
+    cumulative_vex = np.where(indices < n, suffix_vex[np.clip(indices, 0, n - 1)], 0.0)
+    cumulative_cex = np.where(indices < n, suffix_cex[np.clip(indices, 0, n - 1)], 0.0)
 
     if mode == "gex":
-        y_vals = cumulative_gex
+        y_vals = cumulative_gex.tolist()
         line_color = "#636efa"
         trace_name = "Gamma Exposure"
         yaxis_title = "Net GEX ($)"
         zero_label = "Zero<br>Gamma"
     elif mode == "vex":
-        y_vals = cumulative_vex
+        y_vals = cumulative_vex.tolist()
         line_color = "#00cc96"
         trace_name = "Vanna Exposure"
         yaxis_title = "Net VEX ($)"
         zero_label = "Zero<br>Vanna"
     else:
-        y_vals = cumulative_cex
+        y_vals = cumulative_cex.tolist()
         line_color = "#ff7f0e"
         trace_name = "Charm Exposure"
         yaxis_title = "Net CEX ($)"
@@ -775,7 +777,7 @@ def create_atm_iv_histogram(
     """
     from datetime import datetime
 
-    tmpl = _get_template()
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     # Filter to entries that have expiration dates (weekdays)
@@ -915,7 +917,7 @@ def create_vrp_chart(
 ) -> go.Figure:
     from datetime import datetime
 
-    tmpl = _get_template()
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     weekdays = []
@@ -1009,7 +1011,7 @@ def create_iv_by_strike(
     ssvi_surface: Any = None,
     ssvi_tte: float | None = None,
 ) -> go.Figure:
-    tmpl = _get_template()
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
@@ -1143,7 +1145,7 @@ def create_iv_richness_by_strike(
     ssvi_surface: Any,
     ssvi_tte: float,
 ) -> go.Figure:
-    tmpl = _get_template()
+    tmpl = TEMPLATE
     fig = go.Figure()
 
     strikes_sorted = sorted(strikes, key=lambda s: s["strike"])
