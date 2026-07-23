@@ -120,7 +120,7 @@ _SESSION_DEFAULTS = {
     "news_service": None,
 }
 
-TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
+TICKER_HISTORY_FILE = os.path.expanduser("~/gex_app/ticker_history.json")
 
 
 def _load_ticker_history() -> list[str]:
@@ -984,6 +984,31 @@ def ensure_atm_streaming(stream_symbol: str):
                 _run_ticker_signals(_next_t)
             except Exception:
                 pass
+
+        # Index tickers (SPX/RUT/NDX) have no LEVELONE_OPTIONS stream of
+        # their own — only the ETF proxy streams — so the ATM Order Flow
+        # Call Price / Put Price columns can only come from the REST
+        # option chain.  The 5-min wall-reverify cycle above is too slow
+        # for option prices, which move continuously with the underlying.
+        # Re-run the chain fetch for every index ticker on a tighter
+        # ~60 s cadence so their Call/Put Price column stays closer to
+        # real time without hammering Schwab.  ``_run_ticker_signals``
+        # also refreshes walls/ticker-spot, so this is safe to call
+        # alongside the wall cycle (the wall throttle still gates).
+        _INDEX_PRICE_REFRESH_INTERVAL = 60.0
+        _INDEX_SYMBOLS = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP"}
+        _idx_price_ts = s.get("_idx_price_refresh_ts", {})
+        for _t in _all_tickers:
+            _t_upper = _t.upper().lstrip("$")
+            if _t_upper not in _INDEX_SYMBOLS:
+                continue
+            if _now_ts - _idx_price_ts.get(_t_upper, 0.0) >= _INDEX_PRICE_REFRESH_INTERVAL:
+                _idx_price_ts[_t_upper] = _now_ts
+                try:
+                    _run_ticker_signals(_t)
+                except Exception:
+                    pass
+        s["_idx_price_refresh_ts"] = _idx_price_ts
 
         # Keep the news service ticker list in sync
         news_svc2 = s.get("news_service")
@@ -2333,8 +2358,7 @@ def _flow_grid():
     ensure_atm_streaming(mapped)
     render_atm_order_flow_grid()
     # Drive wall-zone Telegram alerts from the *streaming* spot the grid
-    # displays, so alerts fire in real time when the grid colors a cell
-    # even if the standalone cron job's REST fetch hasn't sampled again.
+    # displays, so alerts fire in real time when the grid colors a cell.
     from flow import maybe_fire_wall_zone_alerts
     maybe_fire_wall_zone_alerts()
 

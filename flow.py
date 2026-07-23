@@ -106,16 +106,14 @@ def update_flow_cache():
 # Streaming-driven wall-zone alerts
 # ---------------------------------------------------------------------------
 #
-# The standalone ``telegram_alerts.py`` cron job pulls REST option-chain
-# spot every ~5 min, which can miss brief wall-zone touches the live ATM
-# Order Flow grid displays or only sample the spot when it has already
-# exited the zone.  To close that gap we re-evaluate wall zones here every
-# fragment tick using the streaming spot stored on the ATM service and
-# **re-broadcast** the alert on a per-ticker cooldown while spot remains
-# in the zone — so the user keeps getting notified the entire time spot
-# sits at a wall, not only at the moment of entry.
+# The ATM Order Flow grid uses the live streaming spot, which is updated on
+# every fragment tick (~2 s).  We re-evaluate wall zones here on each tick
+# (via the streaming spot stored on the ATM service) and **re-broadcast** the
+# alert on a per-ticker cooldown while spot remains in the zone — so the user
+# keeps getting notified the entire time spot sits at a wall, not only at the
+# moment of entry.
 
-_WALL_ZONE_BUFFER = 0.0002  # 0.02 % — must match grid coloring in flow.py
+_WALL_ZONE_BUFFER = 0.0005  # 0.05 % — must match grid coloring in flow.py
 _WALL_ZONE_ALERT_COOLDOWN = 300.0  # min seconds between consecutive zone alerts per ticker
 
 def _compute_wall_zone(spot: float | None, put_wall: float | None,
@@ -383,7 +381,7 @@ def render_atm_order_flow_grid():
         styles = [""] * len(row)
         col_idx = list(row.index)
         spot_i = col_idx.index("Spot")
-        _BUFFER = 0.0002  # 0.02 %
+        _BUFFER = 0.0005  # 0.05 %
         if spot is not None and support is not None:
             pw_buf = abs(support) * _BUFFER
             if spot <= support + pw_buf:

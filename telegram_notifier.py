@@ -155,7 +155,7 @@ def diff_alerts(
         "wall_zone": None,
     }
 
-    _BUFFER = 0.0002  # 0.02 %
+    _BUFFER = 0.0005  # 0.05 %
     pw = cur["put_wall"]
     cw = cur["call_wall"]
     if pw is not None and spot <= pw + abs(pw) * _BUFFER:

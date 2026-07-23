@@ -1,7 +1,7 @@
 # ATM Order Flow
 
 Live bullish / bearish order-flow dashboard for the ATM (at-the-money) front
-expiration of every ticker in `~/.local/share/gex_app/ticker_history.json`.
+expiration of every ticker in `~/gex_app/ticker_history.json`.
 
 ## What it shows
 

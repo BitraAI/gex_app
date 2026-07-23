@@ -89,4 +89,3 @@ Each directional strategy follows a multi-step pipeline. All criteria are checke
 - `signals.py` — Bias and recommendation logic. `exp_vrp` dict (ATM IV − RV per expiration) built from full chain at function entry. Directional strategies select best expiration from this dict. SSVI-based per-strike richness used for final strike selection within the chosen expiration.
 - `analytics.py:167` — `_calculate_iv_skew()` computes the selected-expiration 25Δ skew from OTM strikes, with SSVI and front-expiration fallbacks.
 - `app.py` — `render_trade_signals_frag()` renders the UI, applies the selected-expiration restriction, and calls `generate_recommendations`.
-- `telegram_alerts.py` — `_build_strategy_alerts()` replicates the same filtering logic for standalone Telegram alert generation.

@@ -42,7 +42,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Iron Condor uses ATM range boundaries for short legs with protection legs from full data
   - Sell Premium includes Calendar Spread, Butterfly, Broken Wing Butterfly, Jade Lizard
   - Buy Premium includes Calendar Spread, Long LEAPS
-  - **Multi-ticker scan** — Tick the "Scan all tickers in ticker_history.json" box to run the same signal pipeline (Buy/Sell Premium with the selected strategy) across every ticker listed in `~/.local/share/gex_app/ticker_history.json`; results are shown grouped per ticker.
+  - **Multi-ticker scan** — Tick the "Scan all tickers in ticker_history.json" box to run the same signal pipeline (Buy/Sell Premium with the selected strategy) across every ticker listed in `~/gex_app/ticker_history.json`; results are shown grouped per ticker.
     - **Per-strategy filters** (applied before scoring):
       - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 60–90
         - **Long Calls:** gate `iv_skew > 0` & selected-expiration VRP `< 0`; strike CALL `> spot`, lowest SSVI richness (pp) `< 0`
@@ -68,9 +68,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 - **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
   - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
   - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
-  Two delivery paths:
-  - **In-app:** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
-  - **Automatic multi-ticker:** `telegram_alerts.py` polls every symbol in the saved ticker history list once per run and sends alerts on detected transitions — schedule it on cron for hands-off monitoring during market hours.
+  Wall-zone alerts (spot approaching a wall) are driven by the live streaming spot in `flow.py` and re-broadcast on a per-ticker cooldown while spot remains in the zone.
   All alerts are Markdown-formatted with the symbol header and current spot. Reads `BOT_TOKEN` / `CHAT_ID` from the `[telegram]` section of `config.toml` (overridable via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars). Set `enabled = false` to mute alerts without removing secrets. Alerts are delivered silently by default so they don't buzz the recipient's device on every refresh.
 
 ## Setup
@@ -143,40 +141,6 @@ CHAT_ID = "YOUR_CHAT_ID"           # from @userinfobot (or a negative group id, 
 - Get your `CHAT_ID` from [@userinfobot](https://t.me/userinfobot), or use a negative group id / `@channelname`.
 - Environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` override `config.toml`.
 - Alerts are sent synchronously over HTTPS via the Telegram Bot API (no extra async runtime needed) and never raise into the Streamlit app — failed sends are logged but do not interrupt the dashboard.
-
-#### Automatic Multi-Ticker Alerts (cron)
-
-`telegram_alerts.py` is a standalone runner that polls every ticker in `~/.local/share/gex_app/ticker_history.json` (the same list the dashboard maintains as you flip through symbols), computes GEX analytics via the Schwab API, and pushes Telegram alerts on detected transitions. Per-symbol previous state is persisted to `~/.local/share/gex_app/alert_state.json` so consecutive runs detect true transitions rather than re-broadcasting the current state on every poll.
-
-By default it only operates during US regular trading hours (Mon–Fri 09:30–16:00 America/New_York) and silently returns 0 outside RTH — safe to schedule on a 5-minute cron without polluting Schwab's quota or your inbox on weekends/evenings.
-
-```bash
-# Single poll (what cron invokes):
-uv run python telegram_alerts.py
-
-# Loop forever (foreground), polling every 5 min:
-uv run python telegram_alerts.py --loop --interval 300
-
-# Force a run outside market hours (testing):
-uv run python telegram_alerts.py --outside-rth
-
-# Dry-run: compute analytics + diff but only log (no Telegram sends):
-uv run python telegram_alerts.py --dry-run
-```
-
-Flags:
-- `--loop` — run forever, sleeping `--interval` seconds between polls.
-- `--interval N` — polling period in seconds (default `300`). Clamped to a minimum of 30s in loop mode.
-- `--outside-rth` — poll even outside US regular trading hours.
-- `--dry-run` — compute and log alerts but do not send Telegram messages (also implied when Telegram is disabled in config).
-
-Example `crontab -e` entry — every 5 minutes during RTH (the script self-guards off-hours):
-
-```cron
-*/5 9-15 * * * cd ~/gex_app && ~/gex_venv/bin/python telegram_alerts.py >> /tmp/gex_alerts.log 2>&1
-```
-
-The alert types fired are identical to the in-app `check_alerts` flow — both paths share the same pure `diff_alerts(analytics, spot)` implementation in `telegram_notifier.py`.
 
 ### Schwab Authentication
 
@@ -256,7 +220,6 @@ gex_app/
 ├── schwab_auth.py         # OAuth authentication script
 ├── signals.py             # Strategy signals engine (scoring, recommendations, bias)
 ├── telegram_notifier.py   # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
-├── telegram_alerts.py     # Standalone cron runner — multi-ticker alerts from ticker_history.json (RTH-guarded)
 ├── svi.py                 # SSVI volatility surface (Raw SVI + SSVI surface calibration)
 ├── test_calculations.py   # Unit tests for calculations
 ├── test_streaming.py      # Unit tests for streaming service
