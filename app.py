@@ -885,21 +885,52 @@ def ensure_atm_streaming(stream_symbol: str):
             ]
             try:
                 from client import fetch_quotes
+                _INDEX_QUOTE_MAP = {"SPX": "$SPX:X", "SPXW": "$SPX:X",
+                                    "RUT": "$RUT:X", "RUTW": "$RUT:X",
+                                    "NDX": "$NDX:X", "NDXP": "$NDX:X"}
+                _index_syms_to_fetch = []
+                _index_to_disp = {}
+                for _t in _all_tickers:
+                    _t_upper = _t.upper().lstrip("$")
+                    if _t_upper in _INDEX_QUOTE_MAP:
+                        _iq = _INDEX_QUOTE_MAP[_t_upper]
+                        _index_syms_to_fetch.append(_iq)
+                        _index_to_disp[_iq] = _t_upper
+
                 quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                 for disp_sym, _sym in zip(_all_tickers, _stream_symbols):
+                    _disp_upper = disp_sym.upper().lstrip("$")
+                    # Skip index symbols — their spot comes from the
+                    # index quote, not the ETF proxy quote.
+                    if _disp_upper in _INDEX_QUOTE_MAP:
+                        continue
                     qd = quote_resp.get(_sym, {}) or {}
                     quote = qd.get("quote", {}) or qd.get(_sym, {})
                     last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
                     if last is not None and float(last) > 0:
-                        s.spot_cache[disp_sym.upper().lstrip("$")] = float(last)
+                        s.spot_cache[_disp_upper] = float(last)
+
+                # Fetch actual index quotes for SPX, RUT, NDX
+                if _index_syms_to_fetch:
+                    try:
+                        idx_resp = run_async(fetch_quotes(s.client, _index_syms_to_fetch))
+                        for _iq, _disp_upper in _index_to_disp.items():
+                            qd = idx_resp.get(_iq, {}) or {}
+                            quote = qd.get("quote", {}) or qd.get(_iq, {})
+                            last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                            if last is not None and float(last) > 0:
+                                s.spot_cache[_disp_upper] = float(last)
+                    except Exception as e:
+                        print(f"[ensure_atm_streaming] index quote fetch failed: {e}")
             except Exception as e:
                 print(f"[ensure_atm_streaming] spot pre-fetch failed: {e}")
 
+        _was_reconnect = getattr(atm_svc, "_needs_reconnect", False)
         _need_register = (
             not atm_svc.is_running
             or atm_svc.symbol != stream_symbol
             or getattr(atm_svc, "_expiration", None) != _first_exp
-            or getattr(atm_svc, "_needs_reconnect", False)
+            or _was_reconnect
         )
         if _need_register:
             sc = svc.get_stream_client()
@@ -912,7 +943,8 @@ def ensure_atm_streaming(stream_symbol: str):
             # (_delayed_resubscribe) will re-subscribe after the WebSocket
             # session is fully established.  Feeding spots now would just
             # trigger a _do_subscribe that hits a dead connection.
-            return
+            if _was_reconnect:
+                return
 
         # Feed live spot so ATM strike tracking stays current
         if svc.last_price and svc.last_price > 0:
@@ -1075,16 +1107,46 @@ def render_candlesticks():
                 _stream_symbols = [_STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$")) for t in _all_tickers]
                 try:
                     from client import fetch_quotes
+                    _INDEX_QUOTE_MAP2 = {"SPX": "$SPX:X", "SPXW": "$SPX:X",
+                                         "RUT": "$RUT:X", "RUTW": "$RUT:X",
+                                         "NDX": "$NDX:X", "NDXP": "$NDX:X"}
+                    _idx_fetch = []
+                    _idx_disp_map = {}
+                    for _t in _all_tickers:
+                        _t_upper = _t.upper().lstrip("$")
+                        if _t_upper in _INDEX_QUOTE_MAP2:
+                            _iq = _INDEX_QUOTE_MAP2[_t_upper]
+                            _idx_fetch.append(_iq)
+                            _idx_disp_map[_iq] = _t_upper
+
                     quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                     for disp_sym, stream_sym in zip(_all_tickers, _stream_symbols):
+                        _disp_upper = disp_sym.upper().lstrip("$")
+                        if _disp_upper in _INDEX_QUOTE_MAP2:
+                            continue
                         qd = quote_resp.get(stream_sym, {}) or {}
                         quote = qd.get("quote", {}) or qd.get(stream_sym, {})
                         last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
                         if last is not None and float(last) > 0:
                             spot = float(last)
-                            s.spot_cache[disp_sym.upper().lstrip("$")] = spot
+                            s.spot_cache[_disp_upper] = spot
                             # Also update ATM service
-                            atm_svc.update_ticker_spot(disp_sym.upper().lstrip("$"), spot)
+                            atm_svc.update_ticker_spot(_disp_upper, spot)
+
+                    # Fetch actual index quotes for SPX, RUT, NDX
+                    if _idx_fetch:
+                        try:
+                            idx_resp = run_async(fetch_quotes(s.client, _idx_fetch))
+                            for _iq, _disp_upper in _idx_disp_map.items():
+                                qd = idx_resp.get(_iq, {}) or {}
+                                quote = qd.get("quote", {}) or qd.get(_iq, {})
+                                last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                                if last is not None and float(last) > 0:
+                                    spot = float(last)
+                                    s.spot_cache[_disp_upper] = spot
+                                    atm_svc.set_ticker_spot(_disp_upper, spot)
+                        except Exception as e:
+                            print(f"[chart] index quote fetch failed: {e}")
                 except Exception:
                     pass
 
@@ -1740,6 +1802,20 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     etf_data = None
     etf_spot = 0.0
 
+    # Filter expirations for charts if selected
+    if hasattr(st.session_state, 'selected_expirations') and st.session_state.selected_expirations:
+        # Filter raw data to selected expirations before parsing
+        if isinstance(raw, dict) and 'optionChain' in raw:
+            raw_filtered = [
+                e for e in raw['optionChain'] if e.get('expiration') in st.session_state.selected_expirations
+            ]
+            raw = raw_filtered if raw_filtered else None
+        elif isinstance(raw, list):
+            raw_filtered = [
+                e for e in raw if e.get('expiration') in st.session_state.selected_expirations
+            ]
+            raw = raw_filtered if raw_filtered else None
+
     if is_index_symbol:
         try:
             fb_raw = run_async(
@@ -1763,7 +1839,25 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     if not data or spot <= 0:
         return None
 
-    analytics = compute_analytics(data, spot, r=r, q=q, data_full=data)
+    # Use filtered data for wall calculations (same 41 strikes as charts)
+    # This ensures Support (Put Wall) and Resistance (Call Wall) match between Chart and ATM Order Flow
+    selected_expirations = st.session_state.get("selected_expiration", [])
+    if isinstance(selected_expirations, str):
+        selected_expirations = []
+    filtered_data = _get_filtered_data_for_walls(data, selected_expirations)
+    analytics = compute_analytics(filtered_data, spot, r=r, q=q, data_full=data)
+    
+    # Set filtered data for order flow display with exact 20 strikes below, ATM, 20 above
+    # This enables accurate wall calculations and displays correct support/resistance in the ATM order flow grid
+    from analytics import get_filtered_strikes_for_analysis
+    filtered_flow_data = get_filtered_strikes_for_analysis(filtered_data, spot, n=20)
+    analytics["filtered_flow_data"] = filtered_flow_data
+    
+    # Update ATM service with walls so the Order Flow grid displays them
+    atm_svc = st.session_state.get("atm_option_service")
+    if atm_svc:
+        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
+        
     if etf_analytics:
         if analytics.get("net_gex", 0) == 0:
             for key in ("net_gex", "total_call_gex", "total_put_gex",
@@ -1792,7 +1886,16 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     # Store Put Wall (support) and Call Wall (resistance) for the grid
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
-        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
+        _put_wall = analytics.get("put_wall")
+        _call_wall = analytics.get("call_wall")
+        if _put_wall is not None or _call_wall is not None:
+            atm_svc.set_ticker_walls(_sym, _put_wall, _call_wall)
+        # For index symbols (SPX, RUT, NDX) set the correct spot via
+        # the REST option chain parse — the streaming feed only gives
+        # us the ETF proxy (SPY, IWM, QQQ) price.
+        if is_index_symbol and spot > 0:
+            atm_svc.set_ticker_spot(_sym, spot)
+            st.session_state.spot_cache[_sym] = spot
 
     return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym, "earnings_date": earnings_date}
 
@@ -1894,8 +1997,10 @@ def render_trade_signals_frag():
                     except Exception:
                         pass
                 st.markdown(f"**Next Earnings:** {_ed or 'N/A'}")
+                # Use same data for walls as charts: 20 strikes below/above ATM (41 total)
+                chart_sweeps_data = s.filtered_data
                 rc = _build_signals(
-                    s.filtered_data, s.spot, s.analytics, _rv, pt, stg,
+                    chart_sweeps_data, s.spot, s.analytics, _rv, pt, stg,
                     atm_range=s.get("strikes_atm_range", 20), by_exp_all=s.get("by_exp_all"),
                     selected_expirations=[e for e in s.get("selected_expiration", []) if isinstance(e, str)] or None,
                     dte_min=dte_min, dte_max=dte_max,
@@ -1969,11 +2074,65 @@ def render_options_data_frag():
     render_table()
 
 def _filter_strikes_near_atm(data: list[dict], spot: float, n: int = 20) -> list[dict]:
+    """Filter strikes to n strikes below, ATM strike, and n strikes above (price-based)."""
     strikes = sorted(set(e["strike"] for e in data))
-    atm = min(strikes, key=lambda k: abs(k - spot)) if strikes else 0
-    ai = strikes.index(atm) if atm in strikes else 0
-    kr = set(strikes[max(0, ai - n):ai + n + 1])
-    return [e for e in data if e["strike"] in kr]
+    
+    if not strikes:
+        return []
+    
+    # Find ATM strike (closest to spot)
+    atm_strike = min(strikes, key=lambda k: abs(k - spot))
+    
+    # Get strikes below ATM, sorted by distance (closest first)
+    below_strikes = [s for s in strikes if s < atm_strike]
+    below_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
+    
+    # Get strikes above ATM, sorted by distance (closest first)
+    above_strikes = [s for s in strikes if s > atm_strike]
+    above_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
+    
+    # Select exactly n strikes below and n strikes above
+    # If there are fewer available strikes than n, use all available strikes
+    selected_below = below_strikes[:n]
+    selected_above = above_strikes[:n]
+    
+    # Combine: exactly n strikes below + ATM strike + exactly n strikes above (in this order)
+    selected_strikes = selected_below + [atm_strike] + selected_above
+    
+    return [e for e in data if e["strike"] in selected_strikes]
+
+def _get_filtered_data_for_walls(data: list[dict], selected_expirations: list[str] | None) -> list[dict]:
+    """Get filtered data for wall calculations, matching charts behavior.
+    
+    Includes strikes at and around ATM (nearly 4 expirations, 41 strikes total),
+    which is what the walls use.
+    """
+    # Step 1: Filter to expirations with non-zero volume (like charts.py:464)
+    active_exps = set(e["expiration"] for e in data if e.get("open_interest", 0) > 0)
+    
+    # Step 2: Use UI-selected expirations if available, otherwise use up to 4 high volume expirations
+    if selected_expirations:
+        target_exps = [e for e in selected_expirations if e in active_exps]
+    else:
+        target_exps = sorted(active_exps)[:4]  # Max 4 expirations like charts
+    
+    # Step 3: Filter data to target expirations with non-zero volume
+    filtered = [e for e in data if e["expiration"] in target_exps]
+    
+    if not filtered:
+        return data
+    
+    # Step 4: Filter to strikes near ATM (±20 strikes, including ATM)
+    # like get_filtered_strikes_for_analysis with n=20 (40 strikes total)
+    strike_set = sorted(set(e["strike"] for e in filtered))
+    if not strike_set:
+        return data
+    
+    # Get spot from filtered data (floor to nearest available strike)
+    spot = sorted(strike_set)[len(strike_set) // 2]
+    
+    # Apply the _filter_strikes_near_atm filter to get all required strikes
+    return _filter_strikes_near_atm(filtered, spot, n=20)
 
 def _compute_ssvi_tte(dtes: list[int]) -> float | None:
     valid = [d for d in dtes if d > 0]

@@ -19,7 +19,6 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Bullish Flow** | Cumulative option volume classified as bullish. |
 | **Bearish Flow** | Cumulative option volume classified as bearish. |
 | **Flow Momentum** | `(Bullish − Bearish) / (Bullish + Bearish)`. Ratio from -1 to 1. Green when positive, red when negative, grey when zero. |
-| **Status** | `Live` / `Closed` / `Cached` / `No Data` (see below). Amber (`Closed`) doubles as the "market open but no ticks yet" warning colour. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -30,14 +29,14 @@ flicker). `_flow_grid` is defined at module scope (not nested inside
 `render_flow_frag`) so Streamlit does not destroy and recreate it every
 10 s.
 
-### Status legend
+### Market status indicator
+
+The grid displays a market status indicator in the header area:
 
 | Status | Meaning | Colour |
 | --- | --- | --- |
-| **Live** | Ticker is subscribed and US regular trading hours are open (09:30–16:00 ET, Mon–Fri, excluding New Year's / Independence / Christmas). | Green |
-| **Closed** | Ticker is subscribed but the market is currently closed (after hours, weekend, or holiday). Flow values are frozen from the last session. Also briefly visible while the market is open but no ticks have arrived yet (watchdog grace window). | Amber |
-| **Cached** | Ticker is known but not currently subscribed/streaming. | Blue |
-| **No Data** | No flow received yet for this ticker. | Grey |
+| **Market Open** | US regular trading hours are open (09:30–16:00 ET, Mon–Fri, excluding New Year's / Independence / Christmas). | Green `●` |
+| **Market Closed** | Market is currently closed (after hours, weekend, or holiday). Flow values are frozen from the last session. | Amber `●` |
 
 Market-hours detection lives in `flow.is_market_open()`.
 
@@ -117,9 +116,12 @@ Key points:
 
 - **ATM strike** is computed per ticker from its live spot via
   `calculate_atm_strike` (strike spacing by price band).
-- **Front expiration** is auto-selected (nearest expiration in the loaded
-  chain) so the service always registers — `ensure_atm_streaming` in `app.py`
-  falls back to `sorted(expirations)[0]` when no expiration is manually chosen.
+- **Front expiration** is managed per-ticker. Each ticker gets its own
+  expiration fetched lazily via `fetch_front_expiration()` (throttled to
+  once per minute). When the expiration is corrected, `set_ticker_expiration()`
+  triggers a re-subscription so the ticker subscribes to the correct option
+  contracts. This ensures non-primary tickers (AAPL, TSLA, etc.) don't
+  inherit the primary's expiration and subscribe to non-existent contracts.
 - The service runs on the **same shared StreamClient** as the equity stream
   (no second WebSocket). Bid/ask for direction inference comes from the option
   quotes on that stream.
@@ -183,6 +185,9 @@ fragment timer ticks. The flow on each cycle:
    change): call `register()` which clears `_ticker_flows`, re-initializes
    all tickers with spot=0, and registers the handler. **Critically,
    `register()` does NOT call `_do_subscribe`** — the caller does.
+   - **Exception**: When re-registering due to a reconnect (`_needs_reconnect`
+     flag), the function returns early to avoid feeding spots before the
+     WebSocket connection is fully established.
 3. Feed live spot from equity stream for the primary ticker.
 4. `bulk_update_spots(spot_map)` sets spots from `spot_cache` and triggers
    `_do_subscribe`.
@@ -251,8 +256,9 @@ sets are not re-sent — re-sending identical subscription requests every
 - Lee-Ready uses the option bid/ask mid as the trade-direction threshold. If
   bid/ask has not yet arrived for an option, the trade is split evenly between
   bullish and bearish.
-- The service uses a single shared front expiration for all tickers in the
-  subscription (the primary symbol's front expiration).
+- Each ticker uses its own per-ticker expiration (fetched lazily via
+  `fetch_front_expiration()`), so non-primary tickers subscribe to the correct
+  option contracts rather than inheriting the primary's expiration.
 - `ensure_session_defaults` reuses `app._SESSION_DEFAULTS` so the page and main
   app never drift apart.
 - The REST pre-fetch (`fetch_quotes`) runs every ~10 s (gated by
