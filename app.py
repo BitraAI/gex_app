@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 # Persistent event loop in a background thread (avoids Python 3.12 "Event loop is closed")
@@ -47,11 +47,9 @@ from signals import generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import _get_style, _get_css
 
-# Lazy imports for expensive chart functions to improve startup performance
-# These functions are only imported when render functions are called
+from zoneinfo import ZoneInfo
 
-# Lazy imports for expensive chart functions to improve startup performance
-# These functions are only imported when render functions are called
+_STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
 
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
 # imported by another module — calling it twice raises StreamlitAPIException.
@@ -163,19 +161,13 @@ if st.session_state.get("client") is not None:
         st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
 
 
-async def _create_client_async():
-    return create_client()
-
 def init_client():
     loop = _ensure_async_loop()
     loop_changed = st.session_state.get("_async_loop_id") is not None and st.session_state._async_loop_id is not loop
     st.session_state._async_loop_id = loop
     if st.session_state.get("client") is None or loop_changed:
         try:
-            fut = asyncio.run_coroutine_threadsafe(
-                _create_client_async(), loop,
-            )
-            st.session_state.client = fut.result(timeout=30)
+            st.session_state.client = create_client()
         except Exception as e:
             st.error(f"Failed to create Schwab client: {e}")
             return False
@@ -622,13 +614,11 @@ def _candles_need_refresh(symbol: str, tf: str) -> bool:
     last = st.session_state.candle_last_fetch.get(f"{symbol}|{tf}")
     if last is None:
         return True
-    from datetime import datetime, timezone
     return (datetime.now(timezone.utc) - last).total_seconds() > CANDLE_TTL_SECS
 
 
 def refresh_candles(symbol: str, tf: str):
     """Fetch candles via Parquet cache + API, store in session state."""
-    from datetime import datetime, timezone
     key = f"{symbol}|{tf}"
     with st.spinner(f"Loading {tf} candles for {symbol}..."):
         df = run_async(fetch_candles_smart(st.session_state.client, symbol, tf))
@@ -646,7 +636,6 @@ def prefetch_daily_candles(symbol: str):
     last cached — today's daily bar would then never appear until the user
     cleared the cache manually.
     """
-    from datetime import datetime, timezone
     key = f"{symbol}|1d"
     if not _candles_need_refresh(symbol, "1d") and st.session_state.candle_dataframes.get(key) is not None:
         return
@@ -824,7 +813,6 @@ def ensure_atm_streaming(stream_symbol: str):
     Shared session state (streaming_service / atm_option_service) is reused.
     """
     s = st.session_state
-    _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
     stream_symbol = _STREAM_SYMBOL_MAP.get(stream_symbol.upper().lstrip("$"), stream_symbol)
 
     svc = s.get("streaming_service")
@@ -1089,7 +1077,6 @@ def render_candlesticks():
             return
 
         # --- Start streaming services (equity + ATM option) ---
-        _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
         stream_symbol = _STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"), symbol)
         ensure_atm_streaming(stream_symbol)
 
@@ -1191,7 +1178,6 @@ def render_candlesticks():
                         # wouldn't appear/get updated.
                         tf_ms = 24 * 60 * 60 * 1000
                         try:
-                            from zoneinfo import ZoneInfo
                             _ny_tz = ZoneInfo("America/New_York")
                             # Convert each tick ms -> NY-local date, take that
                             # date's start-of-day in NY, convert back to UTC ms.
@@ -1229,7 +1215,6 @@ def render_candlesticks():
                     now_utc_ms = int(pd.Timestamp.now(tz="UTC").value // 1_000_000)
                     if tf_minutes is None:
                         try:
-                            from zoneinfo import ZoneInfo
                             _ny_tz = ZoneInfo("America/New_York")
                             current_bucket = int(
                                 pd.Timestamp.now(tz=_ny_tz)
@@ -1367,7 +1352,6 @@ def render_candlesticks():
                         if _tf_min is None:
                             _tf_ms = 24 * 60 * 60 * 1000
                             try:
-                                from zoneinfo import ZoneInfo
                                 _ny_tz = ZoneInfo("America/New_York")
                                 tick_dt = pd.to_datetime(atm_df["datetime"], unit="ms", utc=True).dt.tz_convert(_ny_tz)
                                 day_start_ny = tick_dt.dt.normalize()
@@ -2138,7 +2122,6 @@ def _compute_ssvi_tte(dtes: list[int]) -> float | None:
     valid = [d for d in dtes if d > 0]
     if not valid:
         return None
-    from zoneinfo import ZoneInfo
     _ny = ZoneInfo("America/New_York")
     _ny_now = datetime.now(_ny)
     _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
@@ -2294,7 +2277,6 @@ def _flow_grid():
     if not s.get("client"):
         return
     stream_symbol = s.get("symbol", "SPY").upper().lstrip("$")
-    _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
     mapped = _STREAM_SYMBOL_MAP.get(stream_symbol, stream_symbol)
 
     # Watchdog: detect a silently dead option feed.  If the market is

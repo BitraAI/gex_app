@@ -283,7 +283,21 @@ def render_atm_order_flow_grid():
             "down": "color: #ef5350; font-weight: bold;",
         }.get(val, "color: #808080;")
 
+    def _spot_wall_bg(row):
+        spot = row["Spot"]
+        support = row["Support"]
+        resistance = row["Resistance"]
+        styles = [""] * len(row)
+        col_idx = list(row.index)
+        spot_i = col_idx.index("Spot")
+        if spot is not None and support is not None and spot < support + 0.20:
+            styles[spot_i] = "background-color: #ccffcc"
+        if spot is not None and resistance is not None and spot > resistance - 0.20:
+            styles[spot_i] = "background-color: #ffcccc"
+        return styles
+
     _styler = df.style.set_uuid("flow_grid")
+    _styler = _styler.apply(_spot_wall_bg, axis=1)
     if hasattr(_styler, "map"):
         _styler = _styler.map(_net_flow_color, subset=["Flow Momentum"])
         _styler = _styler.map(_trend_color, subset=["Trend"])

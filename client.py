@@ -198,19 +198,33 @@ async def get_next_earnings_date(client: AsyncClient, symbol: str) -> Optional[s
     if symbol.upper().lstrip("$") not in _NO_EARNINGS:
         try:
             import yfinance as yf
-            # Suppress yfinance's HTTP-error stderr spam (ETF w/o fundamentals).
             import io, contextlib
-            with contextlib.redirect_stderr(io.StringIO()):
-                ticker = yf.Ticker(symbol)
-                cal = ticker.calendar
-            if cal is None:
-                return None
-            ed_list = cal.get("Earnings Date") if isinstance(cal, dict) else None
-            if ed_list is not None and len(ed_list) > 0:
-                dt = ed_list[0]
-                if isinstance(dt, datetime):
-                    return dt.strftime("%Y-%m-%d")
-                return str(dt)
+            ticker = yf.Ticker(symbol)
+
+            # 2a. Try ticker.calendar for earnings dates
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    cal = ticker.calendar
+                if isinstance(cal, dict):
+                    ed_list = cal.get("Earnings Date")
+                    if ed_list is not None and len(ed_list) > 0:
+                        dt = ed_list[0]
+                        if isinstance(dt, datetime):
+                            return dt.strftime("%Y-%m-%d")
+                        return str(dt)
+            except Exception:
+                pass
+
+            # 2b. Fallback: ticker.info has earningsTimestampStart
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    info = ticker.info
+                if isinstance(info, dict):
+                    ts = info.get("earningsTimestampStart") or info.get("earningsTimestamp")
+                    if ts and int(ts) > 0:
+                        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+            except Exception:
+                pass
         except Exception:
             pass
 
