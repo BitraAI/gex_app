@@ -8,6 +8,12 @@ from calculations import calculate_atm_strike
 
 MAX_ROWS = 200
 
+# Minimum seconds between REST option-chain re-fetches for a single ticker
+# after an ATM strike crossing.  Prevents a fast-moving tape from spamming
+# the Schwab REST endpoint while still keeping put/call walls reasonably
+# fresh in the Order Flow grid.
+_WALL_REFRESH_MIN_INTERVAL = 30.0
+
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
 _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
 
@@ -157,6 +163,15 @@ class AtmOptionVolumeService:
         # in ensure_atm_streaming.
         self._walls_verified: set[str] = set()
 
+        # Wall-refresh throttling: tracks the last time put/call walls were
+        # recomputed from the REST option chain for each ticker.  When the
+        # streaming spot causes an ATM strike crossing we invalidate
+        # _walls_verified so the lazy fetcher picks up the ticker on the
+        # next ensure_atm_streaming cycle, but we throttle re-fetches to
+        # at most one per _WALL_REFRESH_MIN_INTERVAL seconds per ticker so
+        # a fast-moving tape doesn't hammer the Schwab REST endpoint.
+        self._wall_refresh_ts: dict[str, float] = {}
+
         # Per-ticker flow tracking (all tracked tickers including primary)
         # _ticker_flows: display_symbol -> {stream_symbol, spot, atm_strike,
         #   call_sym, put_sym, call_bid, call_ask, put_bid, put_ask,
@@ -235,8 +250,14 @@ class AtmOptionVolumeService:
                 _key_norm = _key.upper().lstrip("$")
                 if _key_norm != self._symbol:
                     continue
+                old_atm = _t.get("atm_strike")
                 _t["spot"] = spot
                 _t["atm_strike"] = new_strike
+                # Invalidate put/call walls on an ATM strike crossing for
+                # the primary ticker so the lazy fetcher re-fetches OI.
+                self._maybe_invalidate_walls_on_strike_change(
+                    _key, old_atm, new_strike,
+                )
         if sc is not None:
             asyncio.run_coroutine_threadsafe(
                 self._do_subscribe(sc), self._loop,
@@ -298,6 +319,7 @@ class AtmOptionVolumeService:
             self._last_sub_ok_set = None
             self._expiration_verified.clear()
             self._walls_verified.clear()
+            self._wall_refresh_ts.clear()
 
             # Reset the watchdog timestamp so it doesn't immediately fire
             # again after this re-registration.  The flow needs time to
@@ -540,6 +562,29 @@ class AtmOptionVolumeService:
                 self._do_subscribe(sc), self._loop,
             )
 
+    def _maybe_invalidate_walls_on_strike_change(
+        self, display_symbol: str, old_atm: float | None, new_atm: float,
+    ) -> None:
+        """Invalidate put/call wall verification when a ticker's ATM strike
+        changes, throttled to _WALL_REFRESH_MIN_INTERVAL seconds per ticker
+        so a fast-moving tape does not spam the Schwab REST endpoint.
+
+        Called from the streaming spot-update paths (update_ticker_spot,
+        bulk_update_spots, set_ticker_spot) with the OLD and NEW ATM strike.
+        On a true crossing (and after the throttle elapses), the ticker is
+        removed from _walls_verified so the lazy fetcher in
+        ensure_atm_streaming re-fetches the option chain and recomputes
+        the walls on the next cycle."""
+        if old_atm is None or new_atm is None or old_atm == new_atm:
+            return
+        norm = _normalize_display_symbol(display_symbol)
+        now = _time_mod.monotonic()
+        last = self._wall_refresh_ts.get(norm, 0.0)
+        if now - last < _WALL_REFRESH_MIN_INTERVAL:
+            return
+        # Mark for re-fetch on the next ensure_atm_streaming cycle.
+        self._walls_verified.discard(norm)
+
     def set_ticker_walls(self, display_symbol: str, put_wall: float | None, call_wall: float | None):
         """Store the Put Wall (support) and Call Wall (resistance) for a
         tracked ticker.  These are read from REST option-chain analytics
@@ -552,9 +597,39 @@ class AtmOptionVolumeService:
                     ticker["put_wall"] = put_wall
                 if call_wall is not None:
                     ticker["call_wall"] = call_wall
-                self._walls_verified.add(
-                    _normalize_display_symbol(display_symbol)
-                )
+                norm = _normalize_display_symbol(display_symbol)
+                self._walls_verified.add(norm)
+                # Stamp the refresh time so the throttle in
+                # _maybe_invalidate_walls_on_strike_change takes effect.
+                self._wall_refresh_ts[norm] = _time_mod.monotonic()
+
+    def set_ticker_option_prices(self, display_symbol: str,
+                                  call_price: float | None,
+                                  put_price: float | None):
+        """Store the ATM mark for Call/Put for a tracked ticker.
+
+        Used to populate the Call Price / Put Price columns in the ATM
+        Order Flow grid for tickers that do NOT have a LEVELONE_OPTIONS
+        stream of their own — namely index symbols (SPX, RUT, NDX) which
+        only stream the ETF proxy (SPY, IWM, QQQ).  Without this setter
+        ``get_ticker_option_prices`` would fall back to the ETF's option
+        bid/ask mid, which is the wrong underlying price level.
+
+        Values are written into both ``call_bid`` and ``call_ask`` (same
+        for puts) so ``get_ticker_option_prices`` returns the supplied
+        mark verbatim and does not recompute a mid from stale ticks."""
+        if call_price is None and put_price is None:
+            return
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return
+            if call_price is not None:
+                ticker["call_bid"] = float(call_price)
+                ticker["call_ask"] = float(call_price)
+            if put_price is not None:
+                ticker["put_bid"] = float(put_price)
+                ticker["put_ask"] = float(put_price)
 
     def set_ticker_spot(self, display_symbol: str, spot: float):
         """Set the spot price for a tracked ticker and recalculate its ATM
@@ -568,8 +643,17 @@ class AtmOptionVolumeService:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is not None:
                 old = ticker["spot"]
+                old_atm = ticker.get("atm_strike")
                 ticker["spot"] = spot
-                ticker["atm_strike"] = calculate_atm_strike(spot)
+                new_atm = calculate_atm_strike(spot)
+                ticker["atm_strike"] = new_atm
+                # Invalidate put/call walls on an ATM strike crossing so the
+                # lazy fetcher re-fetches fresh OI from REST.  Index symbols
+                # share the ETF proxy subscription, but their walls are
+                # still computed from the index option chain.
+                self._maybe_invalidate_walls_on_strike_change(
+                    display_symbol, old_atm, new_atm,
+                )
                 if abs(spot - old) / max(old, 1) > 0.001:
                     self._spot_changed = True
 
@@ -596,8 +680,15 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return
             old_spot = ticker["spot"]
+            old_atm = ticker.get("atm_strike")
             ticker["spot"] = spot
-            ticker["atm_strike"] = calculate_atm_strike(spot)
+            new_atm = calculate_atm_strike(spot)
+            ticker["atm_strike"] = new_atm
+            # Invalidate put/call walls on an ATM strike crossing so the
+            # lazy fetcher re-fetches fresh open interest from REST.
+            self._maybe_invalidate_walls_on_strike_change(
+                display_symbol, old_atm, new_atm,
+            )
             if ticker["call_sym"] is None or ticker["put_sym"] is None or \
                abs(spot - old_spot) / max(old_spot, 1) > 0.001:
                 if self._running and self._expiration:
@@ -624,8 +715,15 @@ class AtmOptionVolumeService:
                 ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
                 if ticker is not None:
                     old = ticker["spot"]
+                    old_atm = ticker.get("atm_strike")
                     ticker["spot"] = spot
-                    ticker["atm_strike"] = calculate_atm_strike(spot)
+                    new_atm = calculate_atm_strike(spot)
+                    ticker["atm_strike"] = new_atm
+                    # Invalidate put/call walls on an ATM strike crossing so
+                    # the lazy fetcher re-fetches fresh OI from REST.
+                    self._maybe_invalidate_walls_on_strike_change(
+                        display_symbol, old_atm, new_atm,
+                    )
                     # Only trigger re-subscribe for non-index tickers
                     # (index symbols share the ETF proxy subscription).
                     _disp_norm = _normalize_display_symbol(display_symbol)
