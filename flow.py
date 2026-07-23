@@ -6,6 +6,7 @@ safely from either entry point without re-running app.py's top-level code.
 """
 
 import asyncio
+import time as _time_mod
 import pandas as pd
 import streamlit as st
 from datetime import date, datetime
@@ -99,6 +100,98 @@ def update_flow_cache():
         if bf is not None and brf is not None:
             if t_sym not in s.flow_cache or s.flow_cache[t_sym]["bullish"] is not None:
                 s.flow_cache[t_sym] = {"bullish": bf, "bearish": brf}
+
+
+# ---------------------------------------------------------------------------
+# Streaming-driven wall-zone alerts
+# ---------------------------------------------------------------------------
+#
+# The standalone ``telegram_alerts.py`` cron job pulls REST option-chain
+# spot every ~5 min, which can miss brief wall-zone touches the live ATM
+# Order Flow grid displays or only sample the spot when it has already
+# exited the zone.  To close that gap we re-evaluate wall zones here every
+# fragment tick using the streaming spot stored on the ATM service and
+# **re-broadcast** the alert on a per-ticker cooldown while spot remains
+# in the zone — so the user keeps getting notified the entire time spot
+# sits at a wall, not only at the moment of entry.
+
+_WALL_ZONE_BUFFER = 0.0002  # 0.02 % — must match grid coloring in flow.py
+_WALL_ZONE_ALERT_COOLDOWN = 300.0  # min seconds between consecutive zone alerts per ticker
+
+def _compute_wall_zone(spot: float | None, put_wall: float | None,
+                       call_wall: float | None) -> str | None:
+    if spot is None or spot <= 0:
+        return None
+    if put_wall is not None and spot <= put_wall + abs(put_wall) * _WALL_ZONE_BUFFER:
+        return "support"
+    if call_wall is not None and spot >= call_wall - abs(call_wall) * _WALL_ZONE_BUFFER:
+        return "resistance"
+    return None
+
+
+def maybe_fire_wall_zone_alerts() -> None:
+    """Inspect every tracked ticker's streaming spot vs its walls and push
+    a Telegram alert while spot *sits* in a wall zone (support or
+    resistance).
+
+    Runs on every ATM Order Flow fragment tick (~2 s).  Fires on the first
+    tick a ticker enters a zone and then re-fires every
+    ``_WALL_ZONE_ALERT_COOLDOWN`` seconds while the ticker remains in the
+    zone so a fast-moving tape that briefly exits and re-enters does not
+    reset the cooldown prematurely.  When spot leaves the zone the stored
+    cooldown is reset so the next entry fires immediately.  Safe to call
+    when Telegram is disabled; ``notify_alerts`` is a no-op then.
+    """
+    s = st.session_state
+    atm_svc = s.get("atm_option_service")
+    if atm_svc is None:
+        return
+    if not is_market_open():
+        return
+    now = _time_mod.monotonic()
+    state = s.setdefault("atm_alert_state", {})
+    for t in atm_svc.tracked_tickers():
+        t_upper = t.upper().lstrip("$")
+        spot = atm_svc.get_ticker_spot(t_upper)
+        put_wall = atm_svc.get_ticker_put_wall(t_upper)
+        call_wall = atm_svc.get_ticker_call_wall(t_upper)
+        cur_zone = _compute_wall_zone(spot, put_wall, call_wall)
+
+        prev = state.get(t_upper, {})
+        prev_zone = prev.get("wall_zone")
+        last_alert_ts = prev.get("last_alert_ts", 0.0)
+
+        # Spot left the zone → reset the cooldown so the next entry fires
+        # immediately rather than being suppressed by the prior cooldown.
+        if cur_zone is None:
+            state[t_upper] = {"wall_zone": None, "last_alert_ts": 0.0}
+            continue
+
+        # While still in the zone, throttle re-broadcasts to the cooldown.
+        # On the first entry ``prev_zone != cur_zone`` forces the immediate
+        # fire below, regardless of last_alert_ts.
+        fire = (prev_zone != cur_zone) or (now - last_alert_ts >= _WALL_ZONE_ALERT_COOLDOWN)
+        state[t_upper] = {"wall_zone": cur_zone, "last_alert_ts": last_alert_ts}
+        if not fire:
+            continue
+
+        if cur_zone == "support" and put_wall is not None:
+            label = "support"
+            wall = put_wall
+        elif cur_zone == "resistance" and call_wall is not None:
+            label = "resistance"
+            wall = call_wall
+        else:
+            continue
+        already = prev_zone == label
+        msg = (
+            f"Price approaching {'Put' if label == 'support' else 'Call'} Wall (${wall:.2f})"
+            + ("" if not already else " (still in zone)")
+        )
+
+        state[t_upper]["last_alert_ts"] = now
+        from telegram_notifier import notify_alerts
+        notify_alerts([msg], symbol=t_upper, spot=spot, disable_notification=False)
 
 
 def _format_expiration(exp: str | None) -> str:
@@ -290,10 +383,15 @@ def render_atm_order_flow_grid():
         styles = [""] * len(row)
         col_idx = list(row.index)
         spot_i = col_idx.index("Spot")
-        if spot is not None and support is not None and spot < support + 0.20:
-            styles[spot_i] = "background-color: #ccffcc"
-        if spot is not None and resistance is not None and spot > resistance - 0.20:
-            styles[spot_i] = "background-color: #ffcccc"
+        _BUFFER = 0.0002  # 0.02 %
+        if spot is not None and support is not None:
+            pw_buf = abs(support) * _BUFFER
+            if spot <= support + pw_buf:
+                styles[spot_i] = "background-color: #ccffcc"
+        if spot is not None and resistance is not None:
+            cw_buf = abs(resistance) * _BUFFER
+            if spot >= resistance - cw_buf:
+                styles[spot_i] = "background-color: #ffcccc"
         return styles
 
     _styler = df.style.set_uuid("flow_grid")

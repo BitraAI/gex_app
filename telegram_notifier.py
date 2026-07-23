@@ -152,7 +152,16 @@ def diff_alerts(
         "put_wall": analytics.get("put_wall"),
         "dealer_position": analytics.get("dealer_position"),
         "spot": spot,
+        "wall_zone": None,
     }
+
+    _BUFFER = 0.0002  # 0.02 %
+    pw = cur["put_wall"]
+    cw = cur["call_wall"]
+    if pw is not None and spot <= pw + abs(pw) * _BUFFER:
+        cur["wall_zone"] = "support"
+    elif cw is not None and spot >= cw - abs(cw) * _BUFFER:
+        cur["wall_zone"] = "resistance"
 
     if not prev:
         return [], cur
@@ -181,16 +190,11 @@ def diff_alerts(
     elif prev_dp == "Short Gamma" and dp == "Long Gamma":
         new_alerts.append("Dealer flipped from Short Gamma to Long Gamma")
 
-    prev_spot = prev.get("spot")
-    if prev_spot is not None:
-        _BUFFER = 0.0002  # 0.02 %
-        if cw is not None:
-            cw_buf = abs(cw) * _BUFFER
-            if prev_spot < cw and spot >= cw - cw_buf:
-                new_alerts.append(f"Price approaching Call Wall (${cw:.2f})")
-        if pw is not None:
-            pw_buf = abs(pw) * _BUFFER
-            if prev_spot > pw and spot <= pw + pw_buf:
-                new_alerts.append(f"Price approaching Put Wall (${pw:.2f})")
+    prev_zone = prev.get("wall_zone")
+    cur_zone = cur["wall_zone"]
+    if cur_zone == "support" and prev_zone != "support" and pw is not None:
+        new_alerts.append(f"Price approaching Put Wall (${pw:.2f})")
+    if cur_zone == "resistance" and prev_zone != "resistance" and cw is not None:
+        new_alerts.append(f"Price approaching Call Wall (${cw:.2f})")
 
     return new_alerts, cur

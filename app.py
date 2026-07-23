@@ -274,7 +274,7 @@ def fetch_data(symbol: str) -> bool:
     st.session_state.spot_cache[symbol.upper().lstrip("$")] = spot
     if symbol not in st.session_state.ticker_history:
         st.session_state.ticker_history.insert(0, symbol)
-        st.session_state.ticker_history = st.session_state.ticker_history[:10]
+        st.session_state.ticker_history = st.session_state.ticker_history[:20]
         _save_ticker_history(st.session_state.ticker_history)
     st.session_state.last_refresh = datetime.now()
     st.session_state.underlying_20d_rv = run_async(get_20d_rv(st.session_state.client, symbol))
@@ -960,6 +960,20 @@ def ensure_atm_streaming(stream_symbol: str):
         # tracked tickers that haven't been verified yet.  Process at most
         # ONE ticker per `ensure_atm_streaming` call to avoid blocking the
         # Streamlit thread for seconds at a time on the full REST query.
+        #
+        # Periodically re-invalidate walls (every ~5 min per ticker) so the
+        # Support/Resistance columns in the ATM Order Flow grid refresh
+        # intraday as open interest shifts even when the ATM strike never
+        # crosses.  Without this, walls are only recomputed once at startup
+        # and on a strike crossing, leaving the columns stale in real time.
+        _WALL_REVERIFY_INTERVAL = 300.0  # seconds
+        _now_ts = _t_mod.monotonic()
+        for _t in _all_tickers:
+            _t_upper = _t.upper().lstrip("$")
+            if _t_upper in atm_svc._walls_verified and \
+               _now_ts - atm_svc._wall_refresh_ts.get(_t_upper, 0.0) >= _WALL_REVERIFY_INTERVAL:
+                atm_svc._walls_verified.discard(_t_upper)
+
         _walls_pending = [
             _t for _t in _all_tickers
             if _t.upper().lstrip("$") not in atm_svc._walls_verified
@@ -1880,6 +1894,33 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
         if is_index_symbol and spot > 0:
             atm_svc.set_ticker_spot(_sym, spot)
             st.session_state.spot_cache[_sym] = spot
+        # For index symbols (SPX/RUT/NDX) there is no LEVELONE_OPTIONS
+        # stream of their own — only the ETF proxy streams.  Populate
+        # Call Price / Put Price columns from the REST option-chain
+        # ATM marks so the ATM Order Flow grid updates in real time
+        # alongside the periodic wall refresh.
+        if is_index_symbol and atm_svc:
+            _atm_k = min(
+                (e["strike"] for e in filtered_data),
+                key=lambda k: abs(k - spot),
+                default=None,
+            )
+            _call_mark = None
+            _put_mark = None
+            if _atm_k is not None:
+                _atm_exps = sorted(
+                    {e["expiration"] for e in filtered_data
+                     if e["strike"] == _atm_k}
+                )
+                if _atm_exps:
+                    _front = _atm_exps[0]
+                    for e in filtered_data:
+                        if e["strike"] == _atm_k and e["expiration"] == _front:
+                            if e["type"] == "CALL" and _call_mark is None:
+                                _call_mark = e.get("mark")
+                            elif e["type"] == "PUT" and _put_mark is None:
+                                _put_mark = e.get("mark")
+            atm_svc.set_ticker_option_prices(_sym, _call_mark, _put_mark)
 
     return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym, "earnings_date": earnings_date}
 
@@ -2291,6 +2332,11 @@ def _flow_grid():
 
     ensure_atm_streaming(mapped)
     render_atm_order_flow_grid()
+    # Drive wall-zone Telegram alerts from the *streaming* spot the grid
+    # displays, so alerts fire in real time when the grid colors a cell
+    # even if the standalone cron job's REST fetch hasn't sampled again.
+    from flow import maybe_fire_wall_zone_alerts
+    maybe_fire_wall_zone_alerts()
 
 
 def render_flow_frag():
