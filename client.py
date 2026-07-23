@@ -117,8 +117,14 @@ async def fetch_quotes(
 ) -> dict[str, Any]:
     try:
         result = await client.get_quotes(symbols)
-        if hasattr(result, "json"):
-            result = result.json()
+        if isinstance(result, dict):
+            pass
+        elif hasattr(result, "json"):
+            try:
+                result = result.json()
+            except (ValueError, TypeError):
+                logger.warning("fetch_quotes json decode failed for %s", symbols)
+                return {}
         if not isinstance(result, dict):
             return {}
         return result

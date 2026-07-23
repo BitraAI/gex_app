@@ -113,31 +113,23 @@ def _format_expiration(exp: str | None) -> str:
         return exp or ""
 
 
-_STATUS_COLORS = {
-    "Live": "#00cc96",
-    "Closed": "#E69500",
-    "Cached": "#1E90FF",
-    "No Data": "#808080",
-}
-
-
 def render_flow_legend_and_style():
-    """Render the static legend and dataframe style block for the Order Flow grid.
+    """Render the market status indicator and dataframe style block for the
+    Order Flow grid.
 
     Called once per outer-fragment tick (every ~10 s) instead of every 2 s
     to prevent HTML-DOM flicker caused by re-injecting the same markup.
     """
-    _items = list(_STATUS_COLORS.items())
-    _legend_html = "".join(
-        f'<span style="display:inline-flex;align-items:center;'
-        f'margin-left:16px;">'
-        f'<span style="font-size:35px;line-height:35px;'
-        f'color:{c};margin-right:6px;">•</span>{name}</span>'
-        for name, c in _items
-    )
+    _open = is_market_open()
+    _color = "#00cc96" if _open else "#E69500"
+    _label = "Market Open" if _open else "Market Closed"
     st.markdown(
         f'<div style="margin-bottom:8px;font-size:0.9rem;display:flex;'
-        f'justify-content:flex-end;">{_legend_html}</div>',
+        f'justify-content:flex-end;align-items:center;">'
+        f'<span style="display:inline-flex;align-items:center;">'
+        f'<span style="font-size:35px;line-height:35px;'
+        f'color:{_color};margin-right:6px;">●</span>{_label}</span>'
+        f'</div>',
         unsafe_allow_html=True,
     )
     st.markdown("""
@@ -183,14 +175,6 @@ def render_atm_order_flow_grid():
         bearish = cached.get("bearish") if cached is not None else None
         has_data = bullish is not None and bearish is not None
         is_tracked = (t_upper == current_sym) or (t_upper in tracked)
-        if not has_data:
-            status = "No Data"
-        elif is_tracked and is_market_open():
-            status = "Live"
-        elif is_tracked:
-            status = "Closed"
-        else:
-            status = "Cached"
         net = (bullish - bearish) / (bullish + bearish) if has_data and (bullish + bearish) != 0 else 0 if has_data else None
         opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
         atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
@@ -261,7 +245,6 @@ def render_atm_order_flow_grid():
             "Bearish Flow": bearish if has_data else 0,
             "Flow Momentum": net if has_data else 0,
             "Trend": trend_display,
-            "Status": status,
         })
 
     if not rows:
@@ -273,7 +256,7 @@ def render_atm_order_flow_grid():
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
          r["Call Price"], r["Put Price"], r["Bullish Flow"],
-         r["Bearish Flow"], r["Flow Momentum"], r["Status"])
+         r["Bearish Flow"], r["Flow Momentum"])
         for r in rows
     )
     data_hash = hash(data_key)
@@ -285,10 +268,6 @@ def render_atm_order_flow_grid():
         return
 
     df = pd.DataFrame(rows)
-
-    def _status_color(val):
-        color = _STATUS_COLORS.get(val, "#808080")
-        return f"color: {color}; font-size: 35px; line-height: 35px; text-align: center;"
 
     def _net_flow_color(val):
         if val > 0.20:
@@ -306,11 +285,9 @@ def render_atm_order_flow_grid():
 
     _styler = df.style.set_uuid("flow_grid")
     if hasattr(_styler, "map"):
-        _styler = _styler.map(_status_color, subset=["Status"])
         _styler = _styler.map(_net_flow_color, subset=["Flow Momentum"])
         _styler = _styler.map(_trend_color, subset=["Trend"])
     else:
-        _styler = _styler.apply(_status_color, subset=["Status"])
         _styler = _styler.apply(_net_flow_color, subset=["Flow Momentum"])
         _styler = _styler.apply(_trend_color, subset=["Trend"])
 
@@ -326,7 +303,6 @@ def render_atm_order_flow_grid():
         "Bullish Flow": "{:,.0f}",
         "Bearish Flow": "{:,.0f}",
         "Flow Momentum": "{:+.2f}",
-        "Status": lambda v: "●",
     })
 
     s._flow_styled_hash = data_hash

@@ -141,11 +141,25 @@ def _tte_from_dtes(dtes: list[int]) -> float | None:
 
 
 def _filter_strikes_near_atm(data: list[dict], spot: float, n: int = 20) -> list[dict]:
+    """Filter strikes to n strikes below, ATM strike, and n strikes above (price-based)."""
     strikes = sorted(set(e["strike"] for e in data))
-    atm = min(strikes, key=lambda k: abs(k - spot)) if strikes else 0
-    ai = strikes.index(atm) if atm in strikes else 0
-    kr = set(strikes[max(0, ai - n):ai + n + 1])
-    return [e for e in data if e["strike"] in kr]
+    
+    if not strikes:
+        return []
+    
+    # Find ATM strike (closest to spot)
+    atm_strike = min(strikes, key=lambda k: abs(k - spot))
+    
+    # Get strikes below ATM, sorted by absolute distance (closest first)
+    below_strikes = sorted([s for s in strikes if s < atm_strike], key=lambda x: abs(x - atm_strike))[:n]
+    
+    # Get strikes above ATM, sorted by absolute distance (closest first)
+    above_strikes = sorted([s for s in strikes if s > atm_strike], key=lambda x: abs(x - atm_strike))[:n]
+    
+    # Combine: up to n below + ATM + up to n above
+    selected_strikes = below_strikes + [atm_strike] + above_strikes
+    
+    return [e for e in data if e["strike"] in selected_strikes]
 
 
 def _build_strategy_alerts(

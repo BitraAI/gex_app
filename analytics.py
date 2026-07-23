@@ -10,7 +10,137 @@ from svi import skew_for_tte as ssvi_skew_for_tte
 
 logger = logging.getLogger(__name__)
 
-def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool = True, show_puts: bool = True, data_full: list[dict[str, Any]] | None = None, r: float = 0.0, q: float = 0.0, expiration: str | None = None) -> dict[str, Any]:
+
+def _filter_strikes_near_atm(data: list[dict[str, Any]], spot: float, n: int = 20) -> list[dict[str, Any]]:
+    """Filter strikes to n strikes below, ATM strike, and n strikes above (price-based)."""
+    strikes = sorted(set(e["strike"] for e in data))
+    
+    if not strikes:
+        return []
+    
+    # Find ATM strike (closest to spot)
+    atm_strike = min(strikes, key=lambda k: abs(k - spot))
+    
+    # Get strikes below ATM, sorted by absolute distance (closest first)
+    below_strikes = sorted([s for s in strikes if s < atm_strike], key=lambda x: abs(x - atm_strike))[:n]
+    
+    # Get strikes above ATM, sorted by absolute distance (closest first)
+    above_strikes = sorted([s for s in strikes if s > atm_strike], key=lambda x: abs(x - atm_strike))[:n]
+    
+    # Combine: up to n below + ATM + up to n above
+    selected_strikes = below_strikes + [atm_strike] + above_strikes
+    
+    return [e for e in data if e["strike"] in selected_strikes]
+def get_filtered_strikes_for_analysis(
+    data: list[dict[str, Any]], spot: float, n: int = 20
+) -> list[tuple[float, float, float, float, float, float, float, float, str, str | None]]:
+    """Get filtered strikes for order flow support and resistance calculation.
+    
+    Returns:
+        A list of strikes in the order: 20 strikes BELOW ATM, ATM strike, 20 strikes ABOVE ATM.
+        Each strike is returned as a tuple containing:
+        (strike, call_gex, put_gex, call_oi, put_oi, call_iv, put_iv, net_gex, expiration, dte)
+        
+    Args:
+        data: List of option data dictionaries
+        spot: Current spot price
+        n: Number of strikes to include below and above ATM (default: 20)
+    """
+    if not data:
+        return []
+    
+    strikes = sorted(set(e["strike"] for e in data))
+    
+    if not strikes:
+        return []
+    
+    # Find ATM strike (closest to spot)
+    atm_strike = min(strikes, key=lambda k: abs(k - spot))
+    
+    # Get strikes below ATM, sorted by distance (closest first)
+    below_strikes = [s for s in strikes if s < atm_strike]
+    below_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
+    
+    # Get strikes above ATM, sorted by distance (closest first)
+    above_strikes = [s for s in strikes if s > atm_strike]
+    above_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
+    
+    # Select exactly n strikes below and n strikes above
+    # If there are fewer available strikes than n, use all available strikes
+    selected_below = below_strikes[:n]
+    selected_above = above_strikes[:n]
+    
+    # Combine: exactly n strikes below + ATM strike + exactly n strikes above (in this order)
+    selected_strikes = selected_below + [atm_strike] + selected_above
+    
+    # Build result in the correct order
+    result = []
+    
+    # Add strikes below ATM (in order of distance from ATM)
+    for strike in selected_below:
+        strike_data = [e for e in data if e["strike"] == strike][0]
+        result.append((
+            strike,
+            strike_data.get("call_gex", 0),
+            strike_data.get("put_gex", 0),
+            strike_data.get("call_oi", 0),
+            strike_data.get("put_oi", 0),
+            strike_data.get("call_iv", strike_data.get("iv", 0)),
+            strike_data.get("put_iv", strike_data.get("iv", 0)),
+            strike_data.get("net_gex", 0),
+            strike_data.get("expiration"),
+            strike_data.get("days_to_exp") or strike_data.get("dte")
+        ))
+    
+    # Add ATM strike
+    atm_data = [e for e in data if e["strike"] == atm_strike][0]
+    result.append((
+        atm_strike,
+        atm_data.get("call_gex", 0),
+        atm_data.get("put_gex", 0),
+        atm_data.get("call_oi", 0),
+        atm_data.get("put_oi", 0),
+        atm_data.get("call_iv", atm_data.get("iv", 0)),
+        atm_data.get("put_iv", atm_data.get("iv", 0)),
+        atm_data.get("net_gex", 0),
+        atm_data.get("expiration"),
+        atm_data.get("days_to_exp") or atm_data.get("dte")
+    ))
+    
+    # Add strikes above ATM (in order of distance from ATM)
+    for strike in selected_above:
+        strike_data = [e for e in data if e["strike"] == strike][0]
+        result.append((
+            strike,
+            strike_data.get("call_gex", 0),
+            strike_data.get("put_gex", 0),
+            strike_data.get("call_oi", 0),
+            strike_data.get("put_oi", 0),
+            strike_data.get("call_iv", strike_data.get("iv", 0)),
+            strike_data.get("put_iv", strike_data.get("iv", 0)),
+            strike_data.get("net_gex", 0),
+            strike_data.get("expiration"),
+            strike_data.get("days_to_exp") or strike_data.get("dte")
+        ))
+    
+    return result
+
+
+def compute_analytics(
+    data: list[dict[str, Any]],
+    spot: float,
+    show_calls: bool = True,
+    show_puts: bool = True,
+    data_full: list[dict[str, Any]] | None = None,
+    r: float = 0.0,
+    q: float = 0.0,
+    expiration: str | None = None,
+    filter_strikes_to_chart_range: bool = False,
+) -> dict[str, Any]:
+    # For wall calculations in ATM Order Flow, use the same 41 strikes as charts
+    if filter_strikes_to_chart_range:
+        data = _filter_strikes_near_atm(data, spot)
+
     strikes = aggregate_by_strike(data, spot, show_calls=show_calls, show_puts=show_puts)
     by_exp = aggregate_by_expiration(data, show_calls=show_calls, show_puts=show_puts, spot=spot)
     totals = compute_totals(data)
@@ -115,17 +245,17 @@ def compute_analytics(data: list[dict[str, Any]], spot: float, show_calls: bool 
 
 
 def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    above = [s for s in strikes if s["strike"] >= spot and s["call_gex"] != 0]
+    above = [s for s in strikes if s["strike"] > spot and s["call_gex"] != 0]
     if not above:
         return None
-    return max(above, key=lambda s: abs(s["call_gex"]))["strike"]
+    return max(above, key=lambda s: s["call_gex"])["strike"]
 
 
 def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    below = [s for s in strikes if s["strike"] <= spot and s["put_gex"] != 0]
+    below = [s for s in strikes if s["strike"] < spot and s["put_gex"] != 0]
     if not below:
         return None
-    return max(below, key=lambda s: abs(s["put_gex"]))["strike"]
+    return max(below, key=lambda s: s["put_gex"])["strike"]
 
 
 def _find_gamma_flip(strikes: list[dict[str, Any]]) -> Optional[float]:
