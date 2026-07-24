@@ -76,9 +76,6 @@ class StreamingService:
         with self._lock:
             return self._last_error
 
-    def load_historical(self, candles: list[dict]):
-        pass  # No historical preload — live ticks only
-
     def get_candles(self) -> pd.DataFrame:
         """Return snapshot of completed 1s bars plus the live incomplete bar."""
         with self._lock:

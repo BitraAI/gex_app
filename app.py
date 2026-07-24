@@ -277,7 +277,10 @@ def fetch_data(symbol: str) -> bool:
         st.session_state.ticker_history = st.session_state.ticker_history[:20]
         _save_ticker_history(st.session_state.ticker_history)
     st.session_state.last_refresh = datetime.now()
-    st.session_state.underlying_20d_rv = run_async(get_20d_rv(st.session_state.client, symbol))
+    _rv = run_async(get_20d_rv(st.session_state.client, symbol))
+    st.session_state.underlying_20d_rv = _rv
+    if _rv:
+        st.session_state.setdefault("ticker_rv", {})[symbol] = _rv
     st.session_state.next_earnings_date = run_async(get_next_earnings_date(st.session_state.client, symbol))
     prefetch_daily_candles(symbol)
     apply_filters()
@@ -293,7 +296,8 @@ def fetch_data(symbol: str) -> bool:
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
         _ana = st.session_state.get("analytics") or {}
-        atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"))
+        atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"),
+                                 _ana.get("net_gex"), _ana.get("atm_iv"))
     st.session_state.etf_analytics = etf_analytics
     if etf_analytics and st.session_state.analytics.get("net_gex", 0) == 0:
         for key in ("net_gex", "total_call_gex", "total_put_gex",
@@ -565,6 +569,39 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
     return alerts
 
 
+def _compute_front_vrp(data: list[dict], spot: float, rv: float) -> float | None:
+    """Return the front-expiration VRP (IV − RV, percentage points) for
+    the option closest to spot. Mirrors the per-expiration logic in
+    ``signals.py``: IV is treated as a fraction when > 3, otherwise as
+    already-decimal.  Returns None when inputs are missing/invalid."""
+    if not data or rv <= 0:
+        return None
+    try:
+        front = min(
+            (e for e in data if (e.get("days_to_exp") or e.get("dte") or 0) > 0),
+            key=lambda e: e.get("days_to_exp") or e.get("dte") or 0,
+            default=None,
+        )
+    except (TypeError, ValueError):
+        front = None
+    if front is None:
+        return None
+    front_exp = front.get("expiration")
+    if not front_exp:
+        return None
+    exp_rows = [e for e in data if e.get("expiration") == front_exp]
+    if not exp_rows:
+        return None
+    atm = min(exp_rows, key=lambda e: abs(e.get("strike", spot) - spot), default=None)
+    if atm is None:
+        return None
+    raw_iv = atm.get("iv", 0) or 0
+    if raw_iv <= 0:
+        return None
+    iv = raw_iv / 100 if raw_iv > 3 else raw_iv
+    return (iv - rv) * 100
+
+
 def check_alerts(analytics: dict, spot: float):
     prev = st.session_state.prev_alerts_state
     new_alerts, next_state = diff_alerts(prev, analytics, spot)
@@ -604,6 +641,10 @@ def check_alerts(analytics: dict, spot: float):
                 tg_alerts,
                 symbol=st.session_state.get("symbol"),
                 spot=spot,
+                gex=(st.session_state.get("analytics") or {}).get("net_gex"),
+                front_vrp=_compute_front_vrp(
+                    st.session_state.get("data", []), spot, rv
+                ) if rv > 0 else None,
             )
 
 
@@ -1879,7 +1920,8 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     # Update ATM service with walls so the Order Flow grid displays them
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
-        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
+        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"),
+                                 analytics.get("net_gex"), analytics.get("atm_iv"))
         
     if etf_analytics:
         if analytics.get("net_gex", 0) == 0:
@@ -1896,6 +1938,8 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     rv = run_async(get_20d_rv(st.session_state.client, symbol))
     if rv is None:
         rv = 0.0
+    elif rv:
+        st.session_state.setdefault("ticker_rv", {})[symbol] = rv
 
     earnings_date = run_async(get_next_earnings_date(st.session_state.client, symbol))
 
@@ -1906,13 +1950,17 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
             atm_svc = st.session_state.get("atm_option_service")
             if atm_svc:
                 atm_svc.set_ticker_expiration(_sym, expirations[0])
-    # Store Put Wall (support) and Call Wall (resistance) for the grid
+    # Store Put Wall (support), Call Wall (resistance), and Net GEX for the
+    # grid + the per-ticker Telegram wall-zone alert header.
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
         _put_wall = analytics.get("put_wall")
         _call_wall = analytics.get("call_wall")
-        if _put_wall is not None or _call_wall is not None:
-            atm_svc.set_ticker_walls(_sym, _put_wall, _call_wall)
+        _net_gex = analytics.get("net_gex")
+        # Re-store after the ETF-backfill above so the cached GEX is the
+        # post-backfill (i.e. accurate) value, including for index symbols.
+        if _put_wall is not None or _call_wall is not None or _net_gex is not None:
+            atm_svc.set_ticker_walls(_sym, _put_wall, _call_wall, _net_gex, analytics.get("atm_iv"))
         # For index symbols (SPX, RUT, NDX) set the correct spot via
         # the REST option chain parse — the streaming feed only gives
         # us the ETF proxy (SPY, IWM, QQQ) price.

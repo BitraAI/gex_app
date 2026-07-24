@@ -186,6 +186,54 @@ When running on a remote host via VS Code, the editor automatically detects the 
 
 You can then open the app in your local browser.
 
+#### Running as a systemd user service
+
+For hands-off / always-on operation the app is wired up as a user-level systemd unit at `~/.config/systemd/user/gex-app.service`:
+
+```ini
+[Unit]
+Description=GammaEx GEX Analytics Streamlit App
+After=network-online.target
+
+[Service]
+WorkingDirectory=/path/to/gex_app
+ExecStart=/path/to/gex_venv/bin/uv run streamlit run app.py --server.port 8501
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+Manage it without `sudo` (runs as your user, no root):
+
+```bash
+# Enable + start on login
+systemctl --user enable gex-app
+systemctl --user start gex-app
+
+# Check status / view logs
+systemctl --user status gex-app
+journalctl --user -u gex-app -f
+
+# Stop / disable
+systemctl --user stop gex-app
+systemctl --user disable gex-app
+```
+
+The unit assumes:
+- The Python virtualenv lives at `~/gex_venv` (adjust `ExecStart` if you use `uv` instead).
+- The repo lives at `~/gex_app`.
+- `Restart=always` brings the app back automatically after a crash; `RestartSec=10` spaces retries so a back-to-back failure doesn't hammer the Schwab login.
+
+To keep the service alive after you log out (so it survives SSH disconnects), enable lingering for your user:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+Without lingering, the user systemd manager exits when the last session of your user closes, taking the service with it.
+
 ## Usage
 
 1. Enter a ticker symbol (e.g., SPY, AAPL, TSLA, $SPX) in the sidebar

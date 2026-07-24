@@ -189,7 +189,22 @@ def maybe_fire_wall_zone_alerts() -> None:
 
         state[t_upper]["last_alert_ts"] = now
         from telegram_notifier import notify_alerts
-        notify_alerts([msg], symbol=t_upper, spot=spot, disable_notification=False)
+        # Front-expiration VRP for the alert header — ATM IV (decimal,
+        # cached when analytics ran for this ticker) minus this symbol's
+        # 20d realized vol (cached whenever ``get_20d_rv`` ran on it).
+        # Rendered as percentage points with a sign by ``_format``; if
+        # either side is missing VRP is simply omitted from the message.
+        _atm_iv = atm_svc.get_ticker_atm_iv(t_upper)
+        _rv = (s.get("ticker_rv") or {}).get(t_upper)
+        front_vrp = None
+        if _atm_iv is not None and _atm_iv > 0 and _rv is not None and _rv > 0:
+            front_vrp = (_atm_iv - _rv) * 100
+        notify_alerts(
+            [msg], symbol=t_upper, spot=spot,
+            gex=atm_svc.get_ticker_net_gex(t_upper),
+            front_vrp=front_vrp,
+            disable_notification=False,
+        )
 
 
 def _format_expiration(exp: str | None) -> str:

@@ -21,7 +21,9 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from datetime import datetime
 from typing import Any, Iterable, Optional
+from zoneinfo import ZoneInfo
 
 import config
 
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.telegram.org"
 
+_NY_TZ = ZoneInfo("America/New_York")
 
 
 def _enabled() -> bool:
@@ -38,6 +41,30 @@ def _enabled() -> bool:
         and config.BOT_TOKEN
         and config.CHAT_ID
     )
+
+
+def _is_market_open() -> bool:
+    """Return True iff US regular equity trading hours are currently open
+    (09:30–16:00 America/New_York, Mon–Fri, excluding a fixed subset of
+    major holidays).
+
+    Kept here in isolation (rather than importing ``flow.is_market_open``)
+    so ``telegram_notifier`` stays leaf-of-dependency and can be called
+    safely from any module without risking a circular import.  The
+    semantics intentionally mirror ``flow.is_market_open`` so the in-app
+    UI and every alert path see the same market-hours verdict.
+    """
+    now = datetime.now(_NY_TZ)
+    if now.weekday() >= 5:  # Sat/Sun
+        return False
+    _open  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+    _close = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+    if not (_open <= now <= _close):
+        return False
+    # Major US market holidays (fixed/observed subset).
+    if (now.month, now.day) in {(1, 1), (7, 4), (12, 25)}:
+        return False
+    return True
 
 
 def _http_post_json(url: str, payload: dict, *, timeout: float = 10.0) -> dict:
@@ -93,13 +120,29 @@ def send_telegram(text: str, *, disable_notification: bool = False) -> bool:
         return False
 
 
-def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float]) -> str:
+def _format(alerts: Iterable[str], *, symbol: Optional[str],
+            spot: Optional[float], gex: Optional[float],
+            front_vrp: Optional[float] = None) -> str:
     """Build a Markdown-formatted message from a list of alert strings."""
     header_lines = []
     if symbol:
         header_lines.append(f"*{symbol}*")
     if spot is not None:
-        header_lines.append(f"Spot: `${spot:,.2f}`")
+        header_lines.append(f"Price: `${spot:,.2f}`")
+    if gex is not None:
+        # Show Net GEX as billions for readability (analytics["net_gex"] is
+        # already in raw gamma × OI × spot² units, which scale to ~billions
+        # for major underlyings).  Use a compact format with a sign so the
+        # polarity (Long vs Short gamma) is visible at a glance.
+        _sign = "+" if gex >= 0 else ""
+        _emoji = "🟢" if gex >= 0 else "🔴"
+        header_lines.append(f"{_emoji} GEX: `{_sign}{gex / 1e9:.2f}B`")
+    if front_vrp is not None:
+        # Front-expiration VRP (IV − RV, in percentage points): > +2 means
+        # the front options are expensive (rich), < -2 means cheap.  Use a
+        # sign so premium/cheap side is visible at a glance.
+        _vsign = "+" if front_vrp >= 0 else ""
+        header_lines.append(f"VRP: `{_vsign}{front_vrp:.2f}%`")
     body = "\n".join(f"• {a}" for a in alerts if a)
     if header_lines:
         return "\n".join(header_lines) + "\n" + body
@@ -111,6 +154,8 @@ def notify_alerts(
     *,
     symbol: Optional[str] = None,
     spot: Optional[float] = None,
+    gex: Optional[float] = None,
+    front_vrp: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
     """Push a batch of alert strings to Telegram as one message.
@@ -118,11 +163,28 @@ def notify_alerts(
     ``disable_notification=True`` (default) delivers the message silently,
     which is appropriate for routine GEX updates — flip ``False`` for
     urgent alerts so the recipient gets a sound.
+
+    ``gex`` is the Net GEX (positive = dealer Long Gamma) of the symbol
+    the alert concerns; it is rendered as a header line for context and
+    is *not* itself an alert (i.e. transitions in GEX still come through
+    ``diff_alerts`` as their own alert strings).
+
+    ``front_vrp`` is the front-expiration Volatility Risk Premium
+    (IV − RV in percentage points); for tracked tickers it's passed in
+    by the caller.  Rendered as a header line right under GEX.
     """
     alerts = list(alerts)
     if not alerts:
         return False
-    text = _format(alerts, symbol=symbol, spot=spot)
+    if not _is_market_open():
+        # Don't push alerts outside US RTH — even when the dashboard is
+        # left running on a remote host, the bot stays silent on nights,
+        # weekends and holidays. ``diff_alerts`` already persists the
+        # new per-symbol state in ``st.session_state`` so the first
+        # in-hours tick won't replay a flood of "X changed" alerts.
+        logger.debug("suppressing %d alert(s) — outside US RTH", len(alerts))
+        return False
+    text = _format(alerts, symbol=symbol, spot=spot, gex=gex, front_vrp=front_vrp)
     return send_telegram(text, disable_notification=disable_notification)
 
 
@@ -192,9 +254,16 @@ def diff_alerts(
 
     prev_zone = prev.get("wall_zone")
     cur_zone = cur["wall_zone"]
-    if cur_zone == "support" and prev_zone != "support" and pw is not None:
-        new_alerts.append(f"Price approaching Put Wall (${pw:.2f})")
-    if cur_zone == "resistance" and prev_zone != "resistance" and cw is not None:
-        new_alerts.append(f"Price approaching Call Wall (${cw:.2f})")
+    if cur_zone != prev_zone and (cur_zone in {"support", "resistance"}):
+        if cur_zone == "support":
+            zone_line = "🟢 Near Support"
+            pw_str = f"${pw:.2f}" if pw is not None else "N/A"
+            signal_line = f"Signal: BUY CALL {pw_str}"
+        else:
+            zone_line = "🔴 Near Resistance"
+            cw_str = f"${cw:.2f}" if cw is not None else "N/A"
+            signal_line = f"Signal: BUY PUT {cw_str}"
+        new_alerts.append(zone_line)
+        new_alerts.append(signal_line)
 
     return new_alerts, cur

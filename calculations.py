@@ -452,10 +452,4 @@ def compute_totals(
     }
 
 
-def dealer_position(data: list[dict[str, Any]], spot: float) -> str:
-    totals = compute_totals(data)
-    if totals["net_gex"] > 0:
-        return "Long Gamma"
-    elif totals["net_gex"] < 0:
-        return "Short Gamma"
-    return "Neutral"
+

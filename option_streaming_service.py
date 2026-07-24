@@ -387,6 +387,7 @@ class AtmOptionVolumeService:
                     "expiration": self._expiration,
                     "call_wall": None,
                     "put_wall": None,
+                    "net_gex": None,
                     "call_sym": None,
                     "put_sym": None,
                     "call_bid": None,
@@ -425,55 +426,6 @@ class AtmOptionVolumeService:
     # ------------------------------------------------------------------ #
     # Per-ticker flow tracking API
     # ------------------------------------------------------------------ #
-
-    def add_ticker(self, display_symbol: str, stream_symbol: str, spot: float):
-        """Add a ticker to tracking (does NOT subscribe individually - all
-        tickers are subscribed in a single call via _do_subscribe)."""
-        with self._lock:
-            if display_symbol in self._ticker_flows:
-                return
-            self._ticker_flows[display_symbol] = {
-                "stream_symbol": stream_symbol,
-                "spot": spot,
-                "atm_strike": 0.0,
-                "expiration": self._expiration,
-                "call_wall": None,
-                "put_wall": None,
-                "call_sym": None,
-                "put_sym": None,
-                "call_bid": None,
-                "call_ask": None,
-                "put_bid": None,
-                "put_ask": None,
-                "bullish": 0,
-                "bearish": 0,
-                "flow_history": [],
-                "trend": "flat",
-            }
-        # Trigger a full re-subscription to include the new ticker
-        if self._running and self._expiration:
-            sc = self._get_stream_client()
-            if sc is not None:
-                asyncio.run_coroutine_threadsafe(
-                    self._do_subscribe(sc), self._loop,
-                )
-
-    def remove_ticker(self, display_symbol: str):
-        """Stop tracking flow for a ticker."""
-        with self._lock:
-            ticker = self._ticker_flows.pop(display_symbol, None)
-            if ticker:
-                if ticker["call_sym"]:
-                    _remove_sym_to_ticker(self._sym_to_ticker, ticker["call_sym"], display_symbol)
-                if ticker["put_sym"]:
-                    _remove_sym_to_ticker(self._sym_to_ticker, ticker["put_sym"], display_symbol)
-        # Trigger re-subscription to remove the unsubscribed symbols
-        if self._running and self._expiration:
-            sc = self._get_stream_client()
-            if sc is not None:
-                asyncio.run_coroutine_threadsafe(
-                    self._do_subscribe(sc), self._loop,
-                )
 
     def get_ticker_flow(self, display_symbol: str) -> tuple:
         """Return (bullish_vol, bearish_vol) for a tracked ticker,
@@ -608,10 +560,13 @@ class AtmOptionVolumeService:
         # Mark for re-fetch on the next ensure_atm_streaming cycle.
         self._walls_verified.discard(norm)
 
-    def set_ticker_walls(self, display_symbol: str, put_wall: float | None, call_wall: float | None):
-        """Store the Put Wall (support) and Call Wall (resistance) for a
-        tracked ticker.  These are read from REST option-chain analytics
-        and displayed in the Order Flow grid."""
+    def set_ticker_walls(self, display_symbol: str, put_wall: float | None, call_wall: float | None,
+                         net_gex: float | None = None, atm_iv: float | None = None):
+        """Store the Put Wall (support) and Call Wall (resistance), and
+        optionally the Net GEX and front-expiration ATM IV, for a tracked
+        ticker.  These are read from REST option-chain analytics and
+        displayed in the Order Flow grid / pushed with Telegram wall-zone
+        alerts."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is not None:
@@ -620,11 +575,24 @@ class AtmOptionVolumeService:
                     ticker["put_wall"] = put_wall
                 if call_wall is not None:
                     ticker["call_wall"] = call_wall
+                if net_gex is not None:
+                    ticker["net_gex"] = net_gex
+                if atm_iv is not None:
+                    ticker["atm_iv"] = float(atm_iv)
                 norm = _normalize_display_symbol(display_symbol)
                 self._walls_verified.add(norm)
                 # Stamp the refresh time so the throttle in
                 # _maybe_invalidate_walls_on_strike_change takes effect.
                 self._wall_refresh_ts[norm] = _time_mod.monotonic()
+
+    def get_ticker_atm_iv(self, display_symbol: str) -> float | None:
+        """Return the cached front-expiration ATM IV (decimal, e.g. 0.23
+        for 23 %) for a tracked ticker, or None when not yet populated."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("atm_iv")
 
     def set_ticker_option_prices(self, display_symbol: str,
                                   call_price: float | None,
@@ -677,8 +645,6 @@ class AtmOptionVolumeService:
                 self._maybe_invalidate_walls_on_strike_change(
                     display_symbol, old_atm, new_atm,
                 )
-                if abs(spot - old) / max(old, 1) > 0.001:
-                    self._spot_changed = True
 
     def get_ticker_put_wall(self, display_symbol: str) -> float | None:
         with self._lock:
@@ -693,6 +659,16 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return None
             return ticker.get("call_wall")
+
+    def get_ticker_net_gex(self, display_symbol: str) -> float | None:
+        """Return the cached Net GEX (total gamma exposure across strikes,
+        positive = dealer Long Gamma) for a tracked ticker, or ``None`` if
+        it has not been populated yet by the REST analytics pipeline."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("net_gex")
 
     def update_ticker_spot(self, display_symbol: str, spot: float):
         """Update the spot price for a tracked ticker and trigger re-subscription
@@ -1215,11 +1191,6 @@ class AtmOptionVolumeService:
                 self._subscribed_call_sym = primary_info.get("call_sym")
                 self._subscribed_put_sym = primary_info.get("put_sym")
 
-    async def _do_resubscribe(self):
-        pass  # re-subscription is triggered by update_spot, but since we no
-              # longer own the StreamClient, re-subscribing needs the shared
-              # client — handled via app.py feeding update_spot + re-register
-
     def _aggregate_tick(self, tick_time_ms: int, price: float, size: int, opt_type: str):
         """Merge a raw option tick into the 1-second OHLCV aggregation.
         opt_type: 'CALL' or 'PUT'.
@@ -1304,20 +1275,6 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return "flat"
             return ticker.get("trend", "flat")
-
-    def get_ticker_trend_data(self, display_symbol: str) -> dict:
-        """Atomically return trend, book_imbalance, and trend_reversal
-        for a ticker under a single lock, avoiding race conditions where
-        book_imbalance is updated by _snapshot_flow before trend."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return {"trend": "flat", "book_imbalance": None, "trend_reversal": None}
-            return {
-                "trend": ticker.get("trend", "flat"),
-                "book_imbalance": ticker.get("book_imbalance"),
-                "trend_reversal": ticker.get("trend_reversal"),
-            }
 
     def _calculate_book_imbalance(self, bid_size: float, ask_size: float) -> float:
         """Calculate book imbalance ratio from bid/ask sizes.
