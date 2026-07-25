@@ -140,7 +140,8 @@ CHAT_ID = "YOUR_CHAT_ID"           # from @userinfobot (or a negative group id, 
 ```
 
 - Get a `BOT_TOKEN` from [@BotFather](https://t.me/BotFather) after creating a bot.
-- Get your `CHAT_ID` from [@userinfobot](https://t.me/userinfobot), or use a negative group id / `@channelname`.
+- Create a private Channel. Add the bot as admin. Enable Manage Messages -> Post Messages.
+- Get your `CHAT_ID` from https://api.telegram.org/bot<BOT_TOKEN>/getUpdates.
 - Environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` override `config.toml`.
 - Alerts are sent synchronously over HTTPS via the Telegram Bot API (no extra async runtime needed) and never raise into the Streamlit app — failed sends are logged but do not interrupt the dashboard.
 
