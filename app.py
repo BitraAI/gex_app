@@ -1417,9 +1417,12 @@ def render_candlesticks():
                 v = c["volume"]
                 c["volume"] = float(v) if pd.notna(v) and v == v else 0.0
             for ac in _extra_cols:
-                v = c.get(ac)
-                if v is not None and pd.notna(v):
-                    c[ac] = int(v)
+                if ac in c:
+                    v = c[ac]
+                    try:
+                        c[ac] = int(v)
+                    except (TypeError, ValueError, OverflowError):
+                        c.pop(ac, None)
                 else:
                     c.pop(ac, None)
 
