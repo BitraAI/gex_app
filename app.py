@@ -47,6 +47,7 @@ from signals import generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import _get_style, _get_css
 
+
 from zoneinfo import ZoneInfo
 
 _STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
@@ -2097,9 +2098,22 @@ def render_trade_signals_frag():
                         st.info("No signals found across tickers")
 
 
-def render_options_data_frag():
-    if not st.session_state.get("data"): return
-    render_table()
+def render_options_data_with_skip_management():
+    """Clears the skip flag and renders the Options Data table.
+    
+    This is a plain function (not a fragment) because it is called from
+    inside ``render_tabs_frag`` which is already a fragment.  Nesting a
+    ``run_every`` fragment inside another ``run_every`` fragment causes
+    the inner fragment to be destroyed / recreated on every parent
+    re-run, preventing its content from appearing.
+    """
+    st.session_state._options_table_skip_render = False
+    
+    if st.session_state.get("data"):
+        try:
+            render_table()
+        except Exception as e:
+            st.error(f"Error loading options table: {e}")
 
 def _filter_strikes_near_atm(data: list[dict], spot: float, n: int = 20) -> list[dict]:
     """Filter strikes to n strikes below, ATM strike, and n strikes above (price-based)."""
@@ -2289,34 +2303,17 @@ div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
     st.dataframe(styled, height=400)
 
 
-@st.fragment(run_every=10)
-def render_tabs_frag():
-    s = st.session_state
-    if not s.get("data"):
-        return
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Market Structure", "Positioning", "Volatility", "Heatmaps", "Trade Signals", "Candlesticks", "Order Flow", "Live News"])
-    with tab1: render_market_structure_frag()
-    with tab2: render_positioning_frag()
-    with tab3: render_volatility_frag()
-    with tab4: render_heatmaps_frag()
-    with tab5: render_trade_signals_frag()
-    with tab6: render_candlesticks()
-    with tab7: render_flow_frag()
-    with tab8: render_news_frag()
-    with st.container(): render_options_data_frag()
+
 
 
 @st.fragment(run_every=2)
-def _flow_grid():
-    """Auto-refreshing fragment for the Order Flow dataframe.
-
-    Defined at module level (not nested inside render_flow_frag) so its
-    identity is stable across parent-fragment re-runs and it is not
-    destroyed / recreated every 10 s by render_tabs_frag.
+def render_flow_grid():
+    """Renders the Order Flow dataframe with fast updates.
 
     Includes a watchdog: if no option ticks arrive for 60 s while the
     market is open, the feed is assumed dead and a reconnection is forced.
     """
+    from flow import render_flow_legend_and_style
     s = st.session_state
     if not s.get("client"):
         return
@@ -2341,25 +2338,8 @@ def _flow_grid():
     from flow import maybe_fire_wall_zone_alerts
     maybe_fire_wall_zone_alerts()
 
-
-def render_flow_frag():
-    """Render the ATM Order Flow tab.
-
-    Static elements (subheader, legend, style) are rendered here so they
-    are only injected when the parent fragment re-runs (~10 s), not on
-    every 2-second data tick.  The dataframe itself lives inside the
-    ``_flow_grid`` fragment which refreshes independently.
-    """
-    s = st.session_state
-    if not s.get("client"):
-        st.info("Initialize authentication to load data")
-        return
-
-    from flow import render_flow_legend_and_style
-
     st.subheader("ATM Order Flow")
     render_flow_legend_and_style()
-    _flow_grid()
 
 
 @st.fragment(run_every=60)
@@ -2407,6 +2387,42 @@ def render_news_frag():
             f"<span style='color:gray;font-size:0.8rem'>{published}</span>",
             unsafe_allow_html=True,
         )
+
+
+def render_tabs_frag():
+    # Create the tabs with updated order
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+        "Market Structure", "Positioning", "Volatility", "Heatmaps",
+        "Options Data", "Candlesticks", "Trade Signals", "Order Flow", "Live News"
+    ])
+    
+    # Render each tab
+    with tab1:
+        render_market_structure_frag()
+    
+    with tab2:
+        render_positioning_frag()
+    
+    with tab3:
+        render_volatility_frag()
+    
+    with tab4:
+        render_heatmaps_frag()
+    
+    with tab5:
+        render_options_data_with_skip_management()
+    
+    with tab6:
+        render_candlesticks()
+    
+    with tab7:
+        render_trade_signals_frag()
+    
+    with tab8:
+        render_flow_grid()
+    
+    with tab9:
+        render_news_frag()
 
 
 def main():
