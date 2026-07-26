@@ -1095,15 +1095,14 @@ def render_candlesticks():
         stream_symbol = _STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"), symbol)
         ensure_atm_streaming(stream_symbol)
 
-        # Periodically refresh spots for all tickers (every 10s)
+        # Periodically refresh spots for all tickers (every 2s)
         atm_svc = st.session_state.get("atm_option_service")
         _first_exp = st.session_state.get("selected_expiration")
         _first_exp = _first_exp[0] if isinstance(_first_exp, list) and _first_exp else (_first_exp if isinstance(_first_exp, str) else None)
         if atm_svc and atm_svc.is_running and _first_exp:
             import time
-            _now = time.time()
             _last_spot_refresh = s.get("_last_spot_refresh", 0)
-            if _now - _last_spot_refresh > 10:
+            if _now - _last_spot_refresh > 2:
                 s._last_spot_refresh = _now
                 _all_tickers = s.get("ticker_history", [])
                 _stream_symbols = [_STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$")) for t in _all_tickers]
@@ -1523,7 +1522,7 @@ def render_metrics_frag():
         render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=iv_rank, iv_skew=iv_skew)
 
 
-def render_market_structure_frag():
+def render_market_structure():
     s = st.session_state
     if not s.get("strikes"):
         return
@@ -1560,7 +1559,7 @@ def render_market_structure_frag():
             st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="dealer_curve_chart")
 
 
-def render_positioning_frag():
+def render_positioning():
     s = st.session_state
     if not s.get("strikes"):
         return
@@ -1615,7 +1614,7 @@ def render_positioning_frag():
             )
 
 
-def render_volatility_frag():
+def render_volatility():
     s = st.session_state
     if not s.get("strikes"):
         return
@@ -1719,7 +1718,7 @@ def render_volatility_frag():
                 st.info("SSVI surface not calibrated yet")
 
 
-def render_heatmaps_frag():
+def render_heatmaps():
     s = st.session_state
     if not s.get("strikes"):
         return
@@ -1982,7 +1981,7 @@ def _strategy_side(stg: str) -> str | None:
     return None
 
 
-def render_trade_signals_frag():
+def render_trade_signals():
     s = st.session_state
 
     st.subheader("Trade Signals")
@@ -2098,7 +2097,7 @@ def render_trade_signals_frag():
                         st.info("No signals found across tickers")
 
 
-def render_options_data_with_skip_management():
+def render_options_data():
     """Clears the skip flag and renders the Options Data table.
     
     This is a plain function (not a fragment) because it is called from
@@ -2307,7 +2306,7 @@ div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
 
 
 @st.fragment(run_every=2)
-def render_flow_grid():
+def render_flow_frag():
     """Renders the Order Flow dataframe with fast updates.
 
     Includes a watchdog: if no option ticks arrive for 60 s while the
@@ -2398,28 +2397,28 @@ def render_tabs_frag():
     
     # Render each tab
     with tab1:
-        render_market_structure_frag()
+        render_market_structure()
     
     with tab2:
-        render_positioning_frag()
+        render_positioning()
     
     with tab3:
-        render_volatility_frag()
+        render_volatility()
     
     with tab4:
-        render_heatmaps_frag()
+        render_heatmaps()
     
     with tab5:
-        render_options_data_with_skip_management()
+        render_options_data()
     
     with tab6:
         render_candlesticks()
     
     with tab7:
-        render_trade_signals_frag()
+        render_trade_signals()
     
     with tab8:
-        render_flow_grid()
+        render_flow_frag()
     
     with tab9:
         render_news_frag()
