@@ -345,6 +345,13 @@ def render_atm_order_flow_grid():
         return
 
     # Hash the row data to detect whether anything actually changed.
+    # Include a 10 s epoch so the ATM Strike column is re-rendered every
+    # 10 s even when the cached value is unchanged, keeping the display
+    # visibly "alive" for users who watch the grid.
+    # Include a 60 s epoch so the Support / Resistance wall columns are
+    # re-rendered every 60 s even when their stored values are unchanged.
+    _atm_epoch = int(_time_mod.time() // 10)
+    _wall_epoch = int(_time_mod.time() // 60)
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
@@ -352,7 +359,7 @@ def render_atm_order_flow_grid():
          r["Bearish Flow"], r["Flow Momentum"])
         for r in rows
     )
-    data_hash = hash(data_key)
+    data_hash = hash((data_key, _atm_epoch, _wall_epoch))
 
     cached_hash = s.get("_flow_styled_hash")
     cached_styled = s.get("_flow_styled")
