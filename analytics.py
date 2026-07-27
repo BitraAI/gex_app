@@ -118,6 +118,9 @@ def compute_analytics(
     analytics["call_wall"] = call_wall
     analytics["put_wall"] = put_wall
 
+    atm_strike = min(strikes, key=lambda s: abs(s["strike"] - spot))["strike"] if strikes else None
+    analytics["atm_strike"] = atm_strike
+
     gamma_flip = _find_gamma_flip(strikes)
     analytics["gamma_flip"] = gamma_flip
 

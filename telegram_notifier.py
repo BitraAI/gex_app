@@ -96,14 +96,20 @@ def send_telegram(text: str, *, disable_notification: bool = False) -> bool:
 def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float]) -> str:
+def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None) -> str:
     """Build an HTML-formatted message from a list of alert strings."""
     header_lines = []
     if symbol:
         header_lines.append(f"<b>{_escape_html(symbol)}</b>")
     if spot is not None:
-        header_lines.append(f"Spot: <code>{spot:,.2f}</code>")
-    body = "\n".join(f"• {_escape_html(a)}" for a in alerts if a)
+        header_lines.append(f"Price: <code>{spot:,.2f}</code>")
+    if vrp is not None:
+        emoji = "🟢" if vrp < 0 else "🔴"
+        header_lines.append(f"{emoji} VRP: <code>{vrp:.1f}%</code>")
+    if gex is not None:
+        emoji = "🟢" if gex > 0 else "🔴"
+        header_lines.append(f"{emoji} GEX: <code>{gex:,.0f}</code>")
+    body = "\n".join(f"{_escape_html(a)}" for a in alerts if a)
     if header_lines:
         return "\n".join(header_lines) + "\n" + body
     return body or "No alerts."
@@ -114,6 +120,8 @@ def notify_alerts(
     *,
     symbol: Optional[str] = None,
     spot: Optional[float] = None,
+    gex: Optional[float] = None,
+    vrp: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
     """Push a batch of alert strings to Telegram as one message.
@@ -125,7 +133,7 @@ def notify_alerts(
     alerts = list(alerts)
     if not alerts:
         return False
-    text = _format(alerts, symbol=symbol, spot=spot)
+    text = _format(alerts, symbol=symbol, spot=spot, gex=gex, vrp=vrp)
     return send_telegram(text, disable_notification=disable_notification)
 
 
@@ -156,6 +164,7 @@ def diff_alerts(
         "dealer_position": analytics.get("dealer_position"),
         "spot": spot,
         "wall_zone": None,
+        "atm_strike": analytics.get("atm_strike"),
     }
 
     _BUFFER = 0.0002  # 0.02 %
@@ -196,8 +205,14 @@ def diff_alerts(
     prev_zone = prev.get("wall_zone")
     cur_zone = cur["wall_zone"]
     if cur_zone == "support" and prev_zone != "support" and pw is not None:
-        new_alerts.append(f"Price approaching Put Wall (${pw:.2f})")
+        new_alerts.append(f"🟢 Near Support ${pw:.2f}")
+        atm = cur.get("atm_strike")
+        if atm:
+            new_alerts.append(f"Signal: BUY CALL ${atm}")
     if cur_zone == "resistance" and prev_zone != "resistance" and cw is not None:
-        new_alerts.append(f"Price approaching Call Wall (${cw:.2f})")
+        new_alerts.append(f"🔴 Near Resistance ${cw:.2f}")
+        atm = cur.get("atm_strike")
+        if atm:
+            new_alerts.append(f"Signal: BUY PUT ${atm}")
 
     return new_alerts, cur

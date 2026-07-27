@@ -579,10 +579,14 @@ def check_alerts(analytics: dict, spot: float):
         st.session_state.alerts = all_alerts + st.session_state.alerts[:20]
         tg_alerts = [a for a in all_alerts if "Wall changed" not in a]
         if tg_alerts:
+            atm_iv = analytics.get("atm_iv")
+            vrp = (atm_iv - rv) * 100 if atm_iv is not None and rv > 0 else None
             notify_alerts(
                 tg_alerts,
                 symbol=st.session_state.get("symbol"),
                 spot=spot,
+                gex=analytics.get("net_gex"),
+                vrp=vrp,
             )
 
 

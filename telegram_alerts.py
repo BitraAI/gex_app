@@ -275,7 +275,7 @@ async def _compute_for_symbol(client, symbol: str) -> Optional[dict[str, Any]]:
         logger.warning("failed to fetch 20d RV for %s: %s", symbol, exc)
 
     strat_alerts = _build_strategy_alerts(data, analytics, spot, rv)
-    return {"analytics": analytics, "spot": spot, "strategy_alerts": strat_alerts}
+    return {"analytics": analytics, "spot": spot, "strategy_alerts": strat_alerts, "rv": rv}
 
 
 async def _run_once(*, dry_run: bool, outside_rth: bool) -> int:
@@ -309,6 +309,7 @@ async def _run_once(*, dry_run: bool, outside_rth: bool) -> int:
             if result is None:
                 continue
             analytics, spot = result["analytics"], result["spot"]
+            rv = result.get("rv", 0.0)
             prev = state.get(sym)
             new_alerts, next_sym_state = diff_alerts(prev, analytics, spot)
             new_state[sym] = next_sym_state
@@ -320,7 +321,9 @@ async def _run_once(*, dry_run: bool, outside_rth: bool) -> int:
             if all_alerts:
                 logger.info("[%s] %d alert(s): %s", sym, len(all_alerts), all_alerts)
                 if not dry_run:
-                    notify_alerts(all_alerts, symbol=sym, spot=spot)
+                    atm_iv = analytics.get("atm_iv")
+                    vrp = (atm_iv - rv) * 100 if atm_iv is not None and rv > 0 else None
+                    notify_alerts(all_alerts, symbol=sym, spot=spot, gex=analytics.get("net_gex"), vrp=vrp)
             else:
                 logger.debug("[%s] no change", sym)
     finally:
