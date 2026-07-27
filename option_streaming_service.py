@@ -772,9 +772,16 @@ class AtmOptionVolumeService:
                 # Fallback: match by root prefix (the OCC root is the stock
                 # symbol leading the option symbol, followed by the date).
                 # Handles both padded (e.g. "AAPL  ") and unpadded formats.
+                # IMPORTANT: skip index-symbol entries (e.g. SPX, RUT) whose
+                # stream_symbol is an ETF proxy — the prefix match against
+                # the ETF's option ticks would overwrite their spot with the
+                # ETF's underlying price (SPY instead of SPX, etc.).
                 if ticker is None:
                     for _td, _tk in self._ticker_flows.items():
                         stock_sym = _tk.get("stream_symbol") or ""
+                        _td_norm = _td.upper().lstrip("$")
+                        if _td_norm != stock_sym:
+                            continue
                         if sym.startswith(stock_sym) or sym.startswith(stock_sym.ljust(6).replace(" ", "")):
                             ticker = _tk
                             ticker_display = _td
@@ -802,8 +809,17 @@ class AtmOptionVolumeService:
 
                 # Update the relevant ticker's bid/ask/spot
                 if ticker:
+                    # Index symbols (SPX/RUT/NDX) share an ETF proxy
+                    # subscription (SPY/IWM/QQQ).  The UNDERLYING_PRICE in
+                    # those option ticks is the ETF's price, not the index
+                    # level, so NEVER overwrite the correct index spot
+                    # that was set from the index quote ($SPX:X etc.).
+                    _is_idx = (
+                        ticker_display is not None
+                        and ticker_display.upper().lstrip("$") in _STREAM_SYMBOL_MAP
+                    )
                     if contract_type in ("CALL", "C"):
-                        if underlying is not None:
+                        if underlying is not None and not _is_idx:
                             ticker["spot"] = float(underlying)
                         if bid is not None:
                             ticker["call_bid"] = float(bid)
@@ -814,7 +830,7 @@ class AtmOptionVolumeService:
                         if ask_size is not None:
                             ticker["current_ask_size"] = float(ask_size)
                     elif contract_type in ("PUT", "P"):
-                        if underlying is not None:
+                        if underlying is not None and not _is_idx:
                             ticker["spot"] = float(underlying)
                         if bid is not None:
                             ticker["put_bid"] = float(bid)

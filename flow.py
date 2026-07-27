@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
-from option_streaming_service import _find_flow_for_display
+from option_streaming_service import _find_flow_for_display, _normalize_display_symbol
 from client import fetch_quotes
 from calculations import calculate_atm_strike
 
@@ -117,6 +117,9 @@ def ensure_atm_streaming(stream_symbol: str):
 
     if svc and svc.is_connected and atm_svc and _first_exp:
         _all_tickers = s.get("ticker_history", [])
+        _current_sym = s.get("symbol", "").upper().lstrip("$")
+        if _current_sym and _current_sym not in [t.upper().lstrip("$") for t in _all_tickers]:
+            _all_tickers = list(_all_tickers) + [_current_sym]
 
         # Pre-fetch spots via REST only every ~10 s to avoid blocking the
         # Streamlit thread on every 2-second fragment tick.  Between fetches
@@ -190,6 +193,53 @@ def ensure_atm_streaming(stream_symbol: str):
             atm_svc.update_spot(svc.last_price)
             s.spot_cache[stream_symbol] = svc.last_price
 
+        # Ensure all tickers from session state have entries in _ticker_flows.
+        # When a ticker is added via fetch_data() the file is updated but
+        # register() may not be called again (service already running), so
+        # _init_all_tickers() never picks it up.  Without an entry in
+        # _ticker_flows, get_ticker_spot() returns None.
+        # Use _find_flow_for_display to find existing entries regardless of
+        # key format.  If a matching entry exists under a different key
+        # (e.g. "$SPX" vs "SPX"), remove any stale direct-key entry that
+        # would shadow it in _find_flow_for_display's step-1 direct lookup.
+        for _t in _all_tickers:
+            _t_upper = _t.upper().lstrip("$")
+            with atm_svc._lock:
+                # If a direct-key entry exists with spot<=0 but a variant
+                # (e.g. "$SPX") carries the real data, remove the stale one
+                # so _find_flow_for_display's step-1 direct lookup doesn't
+                # shadow the correct entry that step 3 would find.
+                _direct = atm_svc._ticker_flows.get(_t_upper)
+                if _direct is not None and _direct.get("spot", 0) <= 0:
+                    _has_variant = any(
+                        k != _t_upper
+                        and _normalize_display_symbol(k) == _t_upper
+                        for k in atm_svc._ticker_flows
+                    )
+                    if _has_variant:
+                        del atm_svc._ticker_flows[_t_upper]
+
+                if not _find_flow_for_display(atm_svc._ticker_flows, _t_upper):
+                    _stream = _STREAM_SYMBOL_MAP.get(_t_upper, _t_upper)
+                    atm_svc._ticker_flows[_t_upper] = {
+                        "stream_symbol": _stream,
+                        "spot": 0.0,
+                        "atm_strike": 0.0,
+                        "expiration": atm_svc._expiration,
+                        "call_wall": None,
+                        "put_wall": None,
+                        "call_sym": None,
+                        "put_sym": None,
+                        "call_bid": None,
+                        "call_ask": None,
+                        "put_bid": None,
+                        "put_ask": None,
+                        "bullish": 0,
+                        "bearish": 0,
+                        "flow_history": [],
+                        "trend": "flat",
+                    }
+
         _spot_map = {}
         for _t in _all_tickers:
             _t_upper = _t.upper().lstrip("$")
@@ -253,13 +303,16 @@ def _refresh_ticker_walls_incrementally():
     if not atm_svc or not client:
         return
 
-    tracked = list(atm_svc.tracked_tickers())
-    if not tracked:
+    # Use raw keys from _ticker_flows to preserve the original symbol
+    # format (e.g. "$SPX" vs "SPX") that the Schwab API expects.
+    with atm_svc._lock:
+        ticker_keys = list(atm_svc._ticker_flows.keys())
+    if not ticker_keys:
         return
 
     # Pick the next ticker to refresh (round-robin)
-    idx = s.setdefault("_wall_refresh_idx", 0) % len(tracked)
-    t = tracked[idx]
+    idx = s.setdefault("_wall_refresh_idx", 0) % len(ticker_keys)
+    t = ticker_keys[idx]
     s["_wall_refresh_idx"] = idx + 1
     t_upper = t.upper().lstrip("$")
 
@@ -315,6 +368,24 @@ def _refresh_ticker_walls_incrementally():
         if not data or spot <= 0:
             return
 
+        # For index symbols that fetched their OWN chain (not ETF fallback),
+        # set the correct spot and ATM strike directly on the ticker entry
+        # so the grid shows the index level (SPX ~5500) not the ETF proxy
+        # (SPY ~500).  Skip triggering _do_subscribe — index symbols would
+        # subscribe to non-existent ETF-proxy OCC symbols anyway.
+        if is_index and raw is not None:
+            _new_atm = calculate_atm_strike(spot)
+            with atm_svc._lock:
+                _idx_ticker = atm_svc._ticker_flows.get(t)
+                if _idx_ticker is not None:
+                    old_atm = _idx_ticker.get("atm_strike")
+                    _idx_ticker["spot"] = spot
+                    _idx_ticker["atm_strike"] = _new_atm
+                    if abs((old_atm or 0) - _new_atm) > 0.001:
+                        atm_svc._maybe_invalidate_walls_on_strike_change(
+                            t, old_atm, _new_atm,
+                        )
+
         analytics = compute_analytics(data, spot, r=r, q=q)
 
         put_wall = analytics.get("put_wall")
@@ -322,6 +393,38 @@ def _refresh_ticker_walls_incrementally():
         if put_wall is not None or call_wall is not None:
             atm_svc.set_ticker_walls(t_upper, put_wall, call_wall)
             s.setdefault("_wall_ts_per_ticker", {})[t_upper] = _time_mod.time()
+
+        # Also set Call Price / Put Price from the REST chain so they
+        # populate for index symbols (RUT/SPX/NDX) whose streaming proxy
+        # bid/ask fallback only works when the ATM service's primary
+        # symbol matches their ETF proxy.
+        _atm_k = min(
+            (e["strike"] for e in data),
+            key=lambda k: abs(k - spot),
+            default=None,
+        )
+        _call_mark = None
+        _put_mark = None
+        if _atm_k is not None:
+            _atm_exps = sorted(
+                {e["expiration"] for e in data if e["strike"] == _atm_k}
+            )
+            if _atm_exps:
+                _front = _atm_exps[0]
+                for e in data:
+                    if e["strike"] == _atm_k and e["expiration"] == _front:
+                        if e["type"] == "CALL" and _call_mark is None:
+                            _call_mark = e.get("mark")
+                        elif e["type"] == "PUT" and _put_mark is None:
+                            _put_mark = e.get("mark")
+        atm_svc.set_ticker_option_prices(t_upper, _call_mark, _put_mark)
+
+        # Update front expiration for this ticker so the grid column
+        # shows the correct value rather than a stale fallback to the
+        # primary service expiration.
+        _expirations = sorted(set(e["expiration"] for e in data))
+        if _expirations:
+            atm_svc.set_ticker_expiration(t_upper, _expirations[0])
     except Exception:
         pass
 
@@ -356,18 +459,34 @@ def update_flow_cache():
     if _need_fetch and s.get("client"):
         try:
             from client import fetch_quotes
-            _stream_map = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
-            _fetch_syms = [_stream_map.get(sym, sym) for sym in _need_fetch]
+            _INDEX_QUOTE_MAP_FETCH = {"SPX": "$SPX:X", "SPXW": "$SPX:X",
+                                      "RUT": "$RUT:X", "RUTW": "$RUT:X",
+                                      "NDX": "$NDX:X", "NDXP": "$NDX:X"}
+            _idx_need = [sym for sym in _need_fetch if sym in _INDEX_QUOTE_MAP_FETCH]
+            _eq_need = [sym for sym in _need_fetch if sym not in _INDEX_QUOTE_MAP_FETCH]
             loop = _ensure_async_loop()
-            fut = asyncio.run_coroutine_threadsafe(fetch_quotes(s.client, _fetch_syms), loop)
-            quote_resp = fut.result()
-            for disp_sym, _sym in zip(_need_fetch, _fetch_syms):
-                qd = quote_resp.get(_sym, {}) or {}
-                quote = qd.get("quote", {}) or qd.get(_sym, {})
-                last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                if last is not None and float(last) > 0:
-                    _spot_map[disp_sym] = float(last)
-                    s.spot_cache[disp_sym] = float(last)
+            if _eq_need:
+                _fetch_syms = _eq_need
+                fut = asyncio.run_coroutine_threadsafe(fetch_quotes(s.client, _fetch_syms), loop)
+                quote_resp = fut.result()
+                for disp_sym in _eq_need:
+                    qd = quote_resp.get(disp_sym, {}) or {}
+                    quote = qd.get("quote", {}) or qd.get(disp_sym, {})
+                    last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                    if last is not None and float(last) > 0:
+                        _spot_map[disp_sym] = float(last)
+                        s.spot_cache[disp_sym] = float(last)
+            if _idx_need:
+                _idx_fetch_syms = [_INDEX_QUOTE_MAP_FETCH[sym] for sym in _idx_need]
+                fut = asyncio.run_coroutine_threadsafe(fetch_quotes(s.client, _idx_fetch_syms), loop)
+                idx_resp = fut.result()
+                for disp_sym, iq in zip(_idx_need, _idx_fetch_syms):
+                    qd = idx_resp.get(iq, {}) or {}
+                    quote = qd.get("quote", {}) or qd.get(iq, {})
+                    last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                    if last is not None and float(last) > 0:
+                        _spot_map[disp_sym] = float(last)
+                        s.spot_cache[disp_sym] = float(last)
         except Exception:
             pass
     if _spot_map:
