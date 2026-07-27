@@ -747,6 +747,10 @@ def render_sidebar():
         if refresh and symbol:
             with st.spinner(f"Loading {symbol} option chain..."):
                 fetch_data(symbol)
+            # Invalidate the candle cache timestamp so the chart
+            # auto-refreshes on the next render with fresh data.
+            for tf in TIMEFRAMES:
+                st.session_state.candle_last_fetch.pop(f"{symbol}|{tf}", None)
 
         st.markdown("### Expiration")
         all_exps = st.session_state.expirations
