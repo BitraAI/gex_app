@@ -960,7 +960,8 @@ def render_candlesticks_frag():
         # are streamed via their ETF equivalents (SPY, IWM, QQQ), but those
         # have completely different price scales — merging them would produce
         # nonsensical candlesticks, so skip the merge for proxy streams.
-        _merge_streaming = svc and svc.is_running and svc.symbol == stream_symbol and symbol.upper() == stream_symbol
+        _sym_norm_chart = symbol.upper().lstrip("$")
+        _merge_streaming = svc and svc.is_running and svc.symbol == stream_symbol and _sym_norm_chart == stream_symbol
         if _merge_streaming:
             try:
                 stream_df = svc.get_candles()
@@ -1136,6 +1137,61 @@ def render_candlesticks_frag():
                     max_bars = 1500 if tf_minutes else 500
                     if len(chart_df) > max_bars:
                         chart_df = chart_df.tail(max_bars).reset_index(drop=True)
+            except Exception:
+                pass
+
+        # ---- Index symbols (SPX, RUT, NDX): build a live bar from the real
+        # index spot poll (s.spot_cache, updated every ~2s by the $SPX:X etc.
+        # fetch above) and merge it into the chart so $SPX/$RUT/$NDX
+        # candlesticks update like equities.  Index symbols cannot be streamed
+        # via the equity WebSocket (Schwab only supports LEVELONE_EQUITIES for
+        # real equities, not indices), so we fall back to REST polling ---- #
+        _INDEX_SYMBOLS_SET = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP"}
+        _sym_norm_idx = symbol.upper().lstrip("$")
+        if _sym_norm_idx in _INDEX_SYMBOLS_SET and not chart_df.empty:
+            try:
+                _idx_spot = s.spot_cache.get(_sym_norm_idx)
+                if _idx_spot is not None and float(_idx_spot) > 0:
+                    _idx_spot = float(_idx_spot)
+                    _tf_min_idx = (client_mod.TIMEFRAMES.get(timeframe) or {}).get("minutes")
+                    if _tf_min_idx is None:
+                        _tf_ms_idx = 24 * 60 * 60 * 1000
+                        try:
+                            _ny_tz_idx = ZoneInfo("America/New_York")
+                            _live_bucket_idx = int(
+                                pd.Timestamp.now(tz=_ny_tz_idx).normalize().tz_convert("UTC").value // 1_000_000
+                            )
+                        except Exception:
+                            _live_bucket_idx = (int(pd.Timestamp.now(tz="UTC").value // 1_000_000) // _tf_ms_idx) * _tf_ms_idx
+                    else:
+                        _tf_ms_idx = _tf_min_idx * 60 * 1000
+                        _live_bucket_idx = (int(pd.Timestamp.now(tz="UTC").value // 1_000_000) // _tf_ms_idx) * _tf_ms_idx
+                    chart_df = chart_df.sort_values("datetime").reset_index(drop=True)
+                    _last_hist_time_idx = int(chart_df["datetime"].iloc[-1])
+                    _live_last_time_idx = max(_last_hist_time_idx, _live_bucket_idx)
+                    _hist_at_live_idx = chart_df[chart_df["datetime"] == _live_last_time_idx]
+                    _hist_snapshot_idx = _hist_at_live_idx.iloc[0].to_dict() if not _hist_at_live_idx.empty else None
+                    chart_df = chart_df[chart_df["datetime"] != _live_last_time_idx]
+                    if _hist_snapshot_idx is not None:
+                        _o_idx = _hist_snapshot_idx["open"]
+                        _h_idx = max(_hist_snapshot_idx["high"], _idx_spot)
+                        _l_idx = min(_hist_snapshot_idx["low"], _idx_spot)
+                        _vol_idx = _hist_snapshot_idx.get("volume", 0) or 0
+                    else:
+                        _o_idx = _h_idx = _l_idx = _idx_spot
+                        _vol_idx = 0
+                    _live_bar_idx = pd.DataFrame([{
+                        "datetime": _live_last_time_idx,
+                        "open": float(_o_idx),
+                        "high": float(_h_idx),
+                        "low": float(_l_idx),
+                        "close": float(_idx_spot),
+                        "volume": float(_vol_idx),
+                    }])
+                    chart_df = pd.concat([chart_df, _live_bar_idx], ignore_index=True).sort_values("datetime").reset_index(drop=True)
+                    _max_bars_idx = 1500 if _tf_min_idx else 500
+                    if len(chart_df) > _max_bars_idx:
+                        chart_df = chart_df.tail(_max_bars_idx).reset_index(drop=True)
             except Exception:
                 pass
 
