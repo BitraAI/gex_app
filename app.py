@@ -1100,7 +1100,8 @@ def render_candlesticks():
         _first_exp = st.session_state.get("selected_expiration")
         _first_exp = _first_exp[0] if isinstance(_first_exp, list) and _first_exp else (_first_exp if isinstance(_first_exp, str) else None)
         if atm_svc and atm_svc.is_running and _first_exp:
-            import time
+            import time as _time_mod
+            _now = _time_mod.time()
             _last_spot_refresh = s.get("_last_spot_refresh", 0)
             if _now - _last_spot_refresh > 2:
                 s._last_spot_refresh = _now
