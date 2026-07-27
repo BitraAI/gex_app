@@ -1445,6 +1445,22 @@ STYLE = """
         background: none !important;
         background-color: transparent !important;
     }
+    /* Disable browser scroll-anchoring so the page scroll position stays
+       stable when fragment (auto-rerun) content above/below the viewport
+       re-renders (e.g., the candlestick chart rebuilding every 2s). */
+    html, body, .stApp, .main, [data-testid="stAppViewContainer"],
+    [data-testid="stMain"], [data-testid="stFragment"],
+    .stVerticalBlock, .element-container, .stBlock {
+        overflow-anchor: none !important;
+    }
+    /* Keep the candlestick chart container a fixed-size box so clearing
+       its children during a 2s fragment re-render doesn't momentarily
+       collapse the page layout (which would let scroll anchoring jump). */
+    div[id^="lwc_candlestick_"] {
+        overflow-anchor: none !important;
+        contain: size layout style !important;
+        min-height: 420px !important;
+    }
 </style>
 """
 
