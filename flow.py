@@ -595,7 +595,11 @@ def maybe_fire_wall_zone_alerts() -> None:
 
         state[t_upper]["last_alert_ts"] = now
         from telegram_notifier import notify_alerts
-        notify_alerts([msg], symbol=t_upper, spot=spot, disable_notification=False)
+        analytics = st.session_state.get("analytics", {})
+        rv = st.session_state.get("underlying_20d_rv", 0.0)
+        atm_iv = analytics.get("atm_iv")
+        vrp = (atm_iv - rv) * 100 if atm_iv is not None and rv > 0 else None
+        notify_alerts([msg], symbol=t_upper, spot=spot, gex=analytics.get("net_gex"), vrp=vrp, disable_notification=False)
 
 
 def render_market_status():
