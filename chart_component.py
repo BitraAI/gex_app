@@ -10,7 +10,6 @@ import streamlit as st
 _JS_LIB = '<script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>'
 
 _HTML_TEMPLATE = """
-<div id="%(root_id)s" style="position:relative;width:100%%;"></div>
 %(lib)s
 <script>
 (function() {
@@ -81,6 +80,9 @@ _HTML_TEMPLATE = """
     const TOTAL_H = panes.reduce(function(s, p) { return s + p.h; }, 0);
 
     const GAP = 4; // px margin on each side of every price scale
+
+    // Remove previous chart canvases so we don't accumulate them
+    while (container.firstChild) container.removeChild(container.firstChild);
 
     const chart = LightweightCharts.createChart(container, {
         height: TOTAL_H,
@@ -1024,6 +1026,46 @@ _UPDATE_TEMPLATE = """
             };
         }
     } catch (_) {}
+
+    // ---- Register live-update function for incremental bar updates ---------- //
+    // Called from the fragment's update script to avoid rebuilding the entire
+    // chart on every tick.  Only the last bar is updated in-place.
+    const UPDATE_KEY = '__lwc_update_' + ROOT_ID;
+    window[UPDATE_KEY] = function(data) {
+        if (!candleSeries) return;
+        try {
+            // Update the last bar via series.update()
+            if (data.bar) candleSeries.update(data.bar);
+            // Update indicator latest values (stored series by key)
+            if (data.indicators) {
+                for (const key of Object.keys(data.indicators)) {
+                    const s = _allSeriesByKey[key];
+                    if (!s) continue;
+                    s.update(data.indicators[key]);
+                }
+            }
+            // Update streaming status badge
+            if (data.status && data.status.text) {
+                var existing = container.querySelector('[data-status-badge]');
+                if (existing) {
+                    existing.textContent = data.status.text;
+                } else {
+                    var lvl = data.status.level || 'info';
+                    var colors = {
+                        'info':    {bg: 'rgba(33,150,243,0.92)', fg: '#ffffff'},
+                        'success': {bg: 'rgba(0,204,150,0.92)', fg: '#0e1117'},
+                        'warning': {bg: 'rgba(255,193,7,0.95)',  fg: '#31333f'},
+                    };
+                    var c = colors[lvl] || colors['info'];
+                    var badge = document.createElement('div');
+                    badge.setAttribute('data-status-badge', '');
+                    badge.textContent = data.status.text;
+                    badge.style.cssText = 'position:absolute;top:4px;left:4px;padding:4px 10px;border-radius:6px;background:' + c.bg + ';color:' + c.fg + ';font-size:12px;font-weight:600;pointer-events:none;z-index:10;box-shadow:0 1px 3px rgba(0,0,0,0.35);white-space:nowrap;';
+                    container.appendChild(badge);
+                }
+            }
+        } catch (_) {}
+    };
 })();
 </script>
 """

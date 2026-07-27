@@ -158,6 +158,10 @@ class StreamingService:
         except Exception:
             import traceback
             traceback.print_exc()
+        finally:
+            with self._lock:
+                self._running = False
+                self._connected = False
 
     def _aggregate_tick(self, tick_time_ms: int, price: float, size: int):
         """Merge a raw tick into the 1-second OHLC aggregation.  Called
