@@ -121,9 +121,13 @@ def ensure_atm_streaming(stream_symbol: str):
         if _current_sym and _current_sym not in [t.upper().lstrip("$") for t in _all_tickers]:
             _all_tickers = list(_all_tickers) + [_current_sym]
 
-        # Pre-fetch spots via REST only every ~10 s to avoid blocking the
-        # Streamlit thread on every 2-second fragment tick.  Between fetches
-        # we feed whatever is already in spot_cache.
+        _INDEX_QUOTE_MAP = {"SPX": "$SPX:X", "SPXW": "$SPX:X",
+                            "RUT": "$RUT:X", "RUTW": "$RUT:X",
+                            "NDX": "$NDX:X", "NDXP": "$NDX:X"}
+
+        # Pre-fetch ETF proxy spots via REST only every ~10 s to avoid
+        # blocking the Streamlit thread on every 2-second fragment tick.
+        # Between fetches we feed whatever is already in spot_cache.
         import time as _time
         _last_fetch_ts = s.get("_spot_fetch_ts", 0.0)
         if _time.time() - _last_fetch_ts >= 10:
@@ -133,18 +137,6 @@ def ensure_atm_streaming(stream_symbol: str):
                 for t in _all_tickers
             ]
             try:
-                _INDEX_QUOTE_MAP = {"SPX": "$SPX:X", "SPXW": "$SPX:X",
-                                    "RUT": "$RUT:X", "RUTW": "$RUT:X",
-                                    "NDX": "$NDX:X", "NDXP": "$NDX:X"}
-                _index_syms_to_fetch = []
-                _index_to_disp = {}
-                for _t in _all_tickers:
-                    _t_upper = _t.upper().lstrip("$")
-                    if _t_upper in _INDEX_QUOTE_MAP:
-                        _iq = _INDEX_QUOTE_MAP[_t_upper]
-                        _index_syms_to_fetch.append(_iq)
-                        _index_to_disp[_iq] = _t_upper
-
                 quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                 for disp_sym, _sym in zip(_all_tickers, _stream_symbols):
                     _disp_upper = disp_sym.upper().lstrip("$")
@@ -157,21 +149,34 @@ def ensure_atm_streaming(stream_symbol: str):
                     last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
                     if last is not None and float(last) > 0:
                         s.spot_cache[_disp_upper] = float(last)
-
-                # Fetch actual index quotes for SPX, RUT, NDX
-                if _index_syms_to_fetch:
-                    try:
-                        idx_resp = run_async(fetch_quotes(s.client, _index_syms_to_fetch))
-                        for _iq, _disp_upper in _index_to_disp.items():
-                            qd = idx_resp.get(_iq, {}) or {}
-                            quote = qd.get("quote", {}) or qd.get(_iq, {})
-                            last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                            if last is not None and float(last) > 0:
-                                s.spot_cache[_disp_upper] = float(last)
-                    except Exception as e:
-                        print(f"[ensure_atm_streaming] index quote fetch failed: {e}")
             except Exception as e:
                 print(f"[ensure_atm_streaming] spot pre-fetch failed: {e}")
+
+        # Index quotes (SPX, RUT, NDX) refreshed every ~2 s (every fragment
+        # tick) so the Order Flow grid shows a live spot for index symbols
+        # instead of relying only on the 10-second ETF-proxy refresh above.
+        _last_idx_fetch_ts = s.get("_idx_spot_fetch_ts", 0.0)
+        if _time.time() - _last_idx_fetch_ts >= 2:
+            s["_idx_spot_fetch_ts"] = _time.time()
+            _index_syms_to_fetch = []
+            _index_to_disp = {}
+            for _t in _all_tickers:
+                _t_upper = _t.upper().lstrip("$")
+                if _t_upper in _INDEX_QUOTE_MAP:
+                    _iq = _INDEX_QUOTE_MAP[_t_upper]
+                    _index_syms_to_fetch.append(_iq)
+                    _index_to_disp[_iq] = _t_upper
+            if _index_syms_to_fetch:
+                try:
+                    idx_resp = run_async(fetch_quotes(s.client, _index_syms_to_fetch))
+                    for _iq, _disp_upper in _index_to_disp.items():
+                        qd = idx_resp.get(_iq, {}) or {}
+                        quote = qd.get("quote", {}) or qd.get(_iq, {})
+                        last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+                        if last is not None and float(last) > 0:
+                            s.spot_cache[_disp_upper] = float(last)
+                except Exception as e:
+                    print(f"[ensure_atm_streaming] index quote fetch failed: {e}")
 
         _was_reconnect = getattr(atm_svc, "_needs_reconnect", False)
         _need_register = (

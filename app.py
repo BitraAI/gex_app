@@ -11,7 +11,7 @@ import client as client_mod
 from client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from streaming_service import StreamingService
 from option_streaming_service import AtmOptionVolumeService
-from chart_component import render_chart
+from chart_component import render_chart, build_update_data, compute_latest_indicators
 from flow import (
     _ensure_async_loop,
     _STREAM_SYMBOL_MAP,
@@ -784,7 +784,8 @@ def _build_candlestick_df(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return resampled.reset_index().rename(columns={"index": "datetime"})
 
 
-def render_candlesticks():
+@st.fragment(run_every=2)
+def render_candlesticks_frag():
     s = st.session_state
     if not s.get("client"):
         st.info("Initialize authentication to load data")
@@ -1271,6 +1272,11 @@ def render_candlesticks():
                         "call_iv_25d": _analytics.get("call_iv_25d"),
                         "atm_iv": _analytics.get("atm_iv"),
                     })
+            _chart_key = f"lwc_candlestick_{symbol}"
+            st.markdown(
+                f'<div id="{_chart_key}" style="position:relative;width:100%;"></div>',
+                unsafe_allow_html=True,
+            )
             render_chart(
                 candles_payload,
                 indicators=selected_indicators,
@@ -2168,7 +2174,7 @@ def render_tabs_frag():
         render_options_data()
     
     with tab6:
-        render_candlesticks()
+        render_candlesticks_frag()
     
     with tab7:
         render_trade_signals()

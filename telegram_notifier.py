@@ -69,7 +69,7 @@ def _http_post_json(url: str, payload: dict, *, timeout: float = 10.0) -> dict:
 
 
 def send_telegram(text: str, *, disable_notification: bool = False) -> bool:
-    """Send a single Markdown message to the configured Telegram chat.
+    """Send a single HTML message to the configured Telegram chat.
 
     Returns ``True`` on success, ``False`` if disabled or on failure. Never
     raises — failures are logged so the calling app keeps running.
@@ -81,7 +81,7 @@ def send_telegram(text: str, *, disable_notification: bool = False) -> bool:
     payload = {
         "chat_id": config.CHAT_ID,
         "text": text,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
         "disable_notification": disable_notification,
         "disable_web_page_preview": True,
     }
@@ -93,14 +93,17 @@ def send_telegram(text: str, *, disable_notification: bool = False) -> bool:
         return False
 
 
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float]) -> str:
-    """Build a Markdown-formatted message from a list of alert strings."""
+    """Build an HTML-formatted message from a list of alert strings."""
     header_lines = []
     if symbol:
-        header_lines.append(f"*{symbol}*")
+        header_lines.append(f"<b>{_escape_html(symbol)}</b>")
     if spot is not None:
-        header_lines.append(f"Spot: `${spot:,.2f}`")
-    body = "\n".join(f"• {a}" for a in alerts if a)
+        header_lines.append(f"Spot: <code>{spot:,.2f}</code>")
+    body = "\n".join(f"• {_escape_html(a)}" for a in alerts if a)
     if header_lines:
         return "\n".join(header_lines) + "\n" + body
     return body or "No alerts."
