@@ -194,7 +194,32 @@ def maybe_fire_wall_zone_alerts() -> None:
         notify_alerts([msg], symbol=t_upper, spot=spot, disable_notification=False)
 
 
+def render_market_status():
+    """Display the market status indicator on the same header row as ATM Order Flow.
+    
+    This indicator should be displayed every fragment tick (every 2s) so it's
+    always visible. The visual markup is lightweight and Streamlit-diffable,
+    so it won't cause DOM flicker when re-rendered.
+
+    Called from the Order Flow tab's render_flow_frag() function.
+    """
+    _open = is_market_open()
+    _color = "#00cc96" if _open else "#E69500"
+    _label = "Market Open" if _open else "Market Closed"
+    st.markdown(
+        f'<div style="display:flex;align-items:center;justify-content:flex-end;'
+        f'gap:8px;margin-bottom:12px;">'
+        f'<span style="font-size:35px;line-height:35px;color:{_color};">●</span>'
+        f'<span style="font-size:22px;font-weight:500;">{_label}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _format_expiration(exp: str | None) -> str:
+    """Format expiration date into MM-DD (X days) for display.
+    
+    Returns empty string for None/invalid input.
+    """
     if not exp:
         return ""
     try:
@@ -207,24 +232,14 @@ def _format_expiration(exp: str | None) -> str:
 
 
 def render_flow_legend_and_style():
-    """Render the market status indicator and dataframe style block for the
-    Order Flow grid.
+    """Inject only the CSS styles needed for the Order Flow grid.
 
     Called once per outer-fragment tick (every ~10 s) instead of every 2 s
     to prevent HTML-DOM flicker caused by re-injecting the same markup.
+
+    Called from render_tabs_frag() in app.py to ensure styles are injected
+    only once per session when the Order Flow tab is active.
     """
-    _open = is_market_open()
-    _color = "#00cc96" if _open else "#E69500"
-    _label = "Market Open" if _open else "Market Closed"
-    st.markdown(
-        f'<div style="margin-bottom:8px;font-size:0.9rem;display:flex;'
-        f'justify-content:flex-end;align-items:center;">'
-        f'<span style="display:inline-flex;align-items:center;">'
-        f'<span style="font-size:35px;line-height:35px;'
-        f'color:{_color};margin-right:6px;">●</span>{_label}</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
     st.markdown("""
     <style>
     div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }

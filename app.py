@@ -46,6 +46,7 @@ from analytics import compute_analytics
 from signals import generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import _get_style, _get_css
+from flow import render_market_status
 
 
 from zoneinfo import ZoneInfo
@@ -2331,16 +2332,15 @@ def render_flow_frag():
             atm_svc._needs_reconnect = True
 
     ensure_atm_streaming(mapped)
-    # Header must render at the top of the Order Flow tab.  Streamlit
-    # emits elements top-to-bottom in call order.
     st.subheader("ATM Order Flow")
-    # The market-status indicator re-injects HTML/CSS — only re-render it
-    # every ~10 s (per its docstring) to prevent DOM flicker, even though
-    # the surrounding fragment ticks every 2 s.
-    import time as _time_mod
-    if _time_mod.monotonic() - s.get("_flow_legend_ts", 0.0) >= 10:
-        s["_flow_legend_ts"] = _time_mod.monotonic()
+    # Market status indicator at the header row
+    from flow import render_market_status
+    render_market_status()
+    # CSS styles for the dataframe (only need to inject once)
+    if "_flow_css_injected" not in s:
+        from flow import render_flow_legend_and_style
         render_flow_legend_and_style()
+        s["_flow_css_injected"] = True
     render_atm_order_flow_grid()
     # Drive wall-zone Telegram alerts from the *streaming* spot the grid
     # displays, so alerts fire in real time when the grid colors a cell
