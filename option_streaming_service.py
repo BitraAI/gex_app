@@ -609,11 +609,13 @@ class AtmOptionVolumeService:
         """Store the ATM mark for Call/Put for a tracked ticker.
 
         Used to populate the Call Price / Put Price columns in the ATM
-        Order Flow grid for tickers that do NOT have a LEVELONE_OPTIONS
-        stream of their own — namely index symbols (SPX, RUT, NDX) which
-        only stream the ETF proxy (SPY, IWM, QQQ).  Without this setter
-        ``get_ticker_option_prices`` would fall back to the ETF's option
-        bid/ask mid, which is the wrong underlying price level.
+        Order Flow grid.  For index symbols (SPX, RUT, NDX) that stream
+        the ETF proxy (SPY, IWM, QQQ), these REST marks are the only
+        source of truth.  For equity tickers they serve as a fallback
+        before live WebSocket option trades populate bid/ask.  Without
+        this setter ``get_ticker_option_prices`` would fall back to the
+        ETF's option bid/ask mid (for index tickers) or return empty
+        (for equity tickers) before WebSocket ticks arrive.
 
         Values are written into both ``call_bid`` and ``call_ask`` (same
         for puts) so ``get_ticker_option_prices`` returns the supplied

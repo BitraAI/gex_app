@@ -5,28 +5,6 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-# Persistent event loop in a background thread (avoids Python 3.12 "Event loop is closed")
-_ASYNC_LOOP: asyncio.AbstractEventLoop | None = None
-_ASYNC_LOOP_THREAD: threading.Thread | None = None
-_ASYNC_LOOP_LOCK = threading.Lock()
-
-
-def _run_async_loop_forever(loop: asyncio.AbstractEventLoop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
-
-def _ensure_async_loop() -> asyncio.AbstractEventLoop:
-    global _ASYNC_LOOP, _ASYNC_LOOP_THREAD
-    with _ASYNC_LOOP_LOCK:
-        if _ASYNC_LOOP is None or _ASYNC_LOOP.is_closed():
-            _ASYNC_LOOP = asyncio.new_event_loop()
-            _ASYNC_LOOP_THREAD = threading.Thread(
-                target=_run_async_loop_forever, args=(_ASYNC_LOOP,), daemon=True,
-            )
-            _ASYNC_LOOP_THREAD.start()
-    return _ASYNC_LOOP
-
 import pandas as pd
 import streamlit as st
 import client as client_mod
@@ -34,7 +12,15 @@ from client import create_client, fetch_option_chain, get_yield, get_interest_ra
 from streaming_service import StreamingService
 from option_streaming_service import AtmOptionVolumeService
 from chart_component import render_chart
-from flow import render_atm_order_flow_grid
+from flow import (
+    _ensure_async_loop,
+    _STREAM_SYMBOL_MAP,
+    ensure_atm_streaming,
+    render_atm_order_flow_grid,
+    render_flow_frag,
+    render_market_status,
+    run_async,
+)
 from news_service import NewsService
 from calculations import (
     aggregate_by_strike,
@@ -46,17 +32,14 @@ from analytics import compute_analytics
 from signals import generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import _get_style, _get_css
-from flow import render_market_status
 
 
 from zoneinfo import ZoneInfo
 
-_STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
-
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
 # imported by another module — calling it twice raises StreamlitAPIException.
 # Guard it so the module is safely importable for its helper functions
-# (ensure_atm_streaming, fetch_data, etc.).
+# (fetch_data, compute_iv_rank, etc.).
 try:
     st.set_page_config(
         page_title="GammaEx - GEX Analytics",
@@ -203,12 +186,6 @@ def init_client():
         asyncio.run_coroutine_threadsafe(_news_poll_loop(), loop)
 
     return True
-
-
-def run_async(coro):
-    loop = _ensure_async_loop()
-    fut = asyncio.run_coroutine_threadsafe(coro, loop)
-    return fut.result()
 
 
 def fetch_data(symbol: str) -> bool:
@@ -747,10 +724,8 @@ def render_sidebar():
         if refresh and symbol:
             with st.spinner(f"Loading {symbol} option chain..."):
                 fetch_data(symbol)
-            # Invalidate the candle cache timestamp so the chart
-            # auto-refreshes on the next render with fresh data.
-            for tf in TIMEFRAMES:
-                st.session_state.candle_last_fetch.pop(f"{symbol}|{tf}", None)
+            # Signal render_candlesticks to force a refresh on next tick
+            st.session_state["_force_candle_refresh"] = symbol
 
         st.markdown("### Expiration")
         all_exps = st.session_state.expirations
@@ -809,204 +784,6 @@ def _build_candlestick_df(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return resampled.reset_index().rename(columns={"index": "datetime"})
 
 
-def ensure_atm_streaming(stream_symbol: str):
-    """Start the equity + ATM option streaming services for ``stream_symbol``
-    and register the ATM option volume service (subscribing to the front
-    expiration).  Idempotent — safe to call on every render.
-
-    Extracted from render_candlesticks so the dedicated ATM Order Flow page
-    can start streaming on its own without re-running the whole chart render.
-    Shared session state (streaming_service / atm_option_service) is reused.
-    """
-    s = st.session_state
-    stream_symbol = _STREAM_SYMBOL_MAP.get(stream_symbol.upper().lstrip("$"), stream_symbol)
-
-    svc = s.get("streaming_service")
-    if svc:
-        if not svc.is_running:
-            svc.start(stream_symbol)
-        elif svc.symbol != stream_symbol:
-            svc.stop()
-            svc.start(stream_symbol)
-
-    atm_svc = s.get("atm_option_service")
-    # Register reconnect callback once so ATM options re-subscribe
-    # automatically after the equity WebSocket reconnects.
-    if svc and atm_svc and not getattr(atm_svc, "_reconnect_registered", False):
-        async def _delayed_resubscribe(sc):
-            """Wait briefly for the re-logged-in WebSocket to settle, then
-            re-subscribe ATM options.  If that fails with a dead-connection
-            error the flag will trigger a full re-registration on the next
-            ensure_atm_streaming cycle."""
-            await asyncio.sleep(2)
-            if atm_svc.is_running:
-                await atm_svc._do_subscribe(sc)
-
-        def _on_equity_reconnect():
-            sc = svc.get_stream_client()
-            if sc is not None and atm_svc.is_running:
-                asyncio.run_coroutine_threadsafe(
-                    _delayed_resubscribe(sc), atm_svc._loop,
-                )
-        svc.on_reconnect(_on_equity_reconnect)
-        atm_svc._reconnect_registered = True
-    _sel_exp = s.get("selected_expiration", [])
-    if isinstance(_sel_exp, str):
-        _sel_exp = [_sel_exp]
-    _first_exp = _sel_exp[0] if _sel_exp else None
-    # Spec: always track the ATM *front* expiration.  If the user has not
-    # manually selected an expiration (or it was cleared), fall back to the
-    # nearest expiration in the loaded chain so the service still registers
-    # and the bullish/bearish flow keeps updating.
-    if _first_exp is None and s.get("expirations"):
-        _front_exp = sorted(s["expirations"])[0]
-        _first_exp = _front_exp
-        s.selected_expiration = [_front_exp]
-
-    if svc and svc.is_connected and atm_svc and _first_exp:
-        _all_tickers = s.get("ticker_history", [])
-
-        # Pre-fetch spots via REST only every ~10 s to avoid blocking the
-        # Streamlit thread on every 2-second fragment tick.  Between fetches
-        # we feed whatever is already in spot_cache.
-        import time as _time
-        _last_fetch_ts = s.get("_spot_fetch_ts", 0.0)
-        if _time.time() - _last_fetch_ts >= 10:
-            s["_spot_fetch_ts"] = _time.time()
-            _stream_symbols = [
-                _STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$"))
-                for t in _all_tickers
-            ]
-            try:
-                from client import fetch_quotes
-                _INDEX_QUOTE_MAP = {"SPX": "$SPX:X", "SPXW": "$SPX:X",
-                                    "RUT": "$RUT:X", "RUTW": "$RUT:X",
-                                    "NDX": "$NDX:X", "NDXP": "$NDX:X"}
-                _index_syms_to_fetch = []
-                _index_to_disp = {}
-                for _t in _all_tickers:
-                    _t_upper = _t.upper().lstrip("$")
-                    if _t_upper in _INDEX_QUOTE_MAP:
-                        _iq = _INDEX_QUOTE_MAP[_t_upper]
-                        _index_syms_to_fetch.append(_iq)
-                        _index_to_disp[_iq] = _t_upper
-
-                quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
-                for disp_sym, _sym in zip(_all_tickers, _stream_symbols):
-                    _disp_upper = disp_sym.upper().lstrip("$")
-                    # Skip index symbols — their spot comes from the
-                    # index quote, not the ETF proxy quote.
-                    if _disp_upper in _INDEX_QUOTE_MAP:
-                        continue
-                    qd = quote_resp.get(_sym, {}) or {}
-                    quote = qd.get("quote", {}) or qd.get(_sym, {})
-                    last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                    if last is not None and float(last) > 0:
-                        s.spot_cache[_disp_upper] = float(last)
-
-                # Fetch actual index quotes for SPX, RUT, NDX
-                if _index_syms_to_fetch:
-                    try:
-                        idx_resp = run_async(fetch_quotes(s.client, _index_syms_to_fetch))
-                        for _iq, _disp_upper in _index_to_disp.items():
-                            qd = idx_resp.get(_iq, {}) or {}
-                            quote = qd.get("quote", {}) or qd.get(_iq, {})
-                            last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                            if last is not None and float(last) > 0:
-                                s.spot_cache[_disp_upper] = float(last)
-                    except Exception as e:
-                        print(f"[ensure_atm_streaming] index quote fetch failed: {e}")
-            except Exception as e:
-                print(f"[ensure_atm_streaming] spot pre-fetch failed: {e}")
-
-        _was_reconnect = getattr(atm_svc, "_needs_reconnect", False)
-        _need_register = (
-            not atm_svc.is_running
-            or atm_svc.symbol != stream_symbol
-            or getattr(atm_svc, "_expiration", None) != _first_exp
-            or _was_reconnect
-        )
-        if _need_register:
-            sc = svc.get_stream_client()
-            if sc is not None:
-                atm_svc._needs_reconnect = False
-                atm_svc.register(sc, stream_symbol, _first_exp)
-                atm_svc.start()
-            # When re-registering due to a reconnect, skip feeding spots —
-            # the equity streaming service's reconnection callback
-            # (_delayed_resubscribe) will re-subscribe after the WebSocket
-            # session is fully established.  Feeding spots now would just
-            # trigger a _do_subscribe that hits a dead connection.
-            if _was_reconnect:
-                return
-
-        # Feed live spot so ATM strike tracking stays current
-        if svc.last_price and svc.last_price > 0:
-            atm_svc.update_spot(svc.last_price)
-            s.spot_cache[stream_symbol] = svc.last_price
-
-        # Lazily fetch front expiration for tracked tickers that haven't
-        # been verified yet (throttled to once per minute).
-        import time as _t_mod
-        _exp_ts = s.get("_exp_fetch_ts", 0.0)
-        if _t_mod.time() - _exp_ts >= 60:
-            s["_exp_fetch_ts"] = _t_mod.time()
-            for _t in _all_tickers:
-                _t_upper = _t.upper().lstrip("$")
-                if _t_upper not in atm_svc._expiration_verified:
-                    try:
-                        from client import fetch_front_expiration
-                        _exp = run_async(fetch_front_expiration(s.client, _t_upper))
-                        if _exp:
-                            atm_svc.set_ticker_expiration(_t_upper, _exp)
-                    except Exception:
-                        pass
-
-        # Lazily fetch full option-chain analytics (put/call walls) for
-        # tracked tickers that haven't been verified yet.  Process at most
-        # ONE ticker per `ensure_atm_streaming` call to avoid blocking the
-        # Streamlit thread for seconds at a time on the full REST query.
-        #
-        # Periodically re-invalidate walls (every ~5 min per ticker) so the
-        # Support/Resistance columns in the ATM Order Flow grid refresh
-        # intraday as open interest shifts even when the ATM strike never
-        # crosses.  Without this, walls are only recomputed once at startup
-        # and on a strike crossing, leaving the columns stale in real time.
-        _WALL_REVERIFY_INTERVAL = 300.0  # seconds
-        _now_ts = _t_mod.monotonic()
-        for _t in _all_tickers:
-            _t_upper = _t.upper().lstrip("$")
-            if _t_upper in atm_svc._walls_verified and \
-               _now_ts - atm_svc._wall_refresh_ts.get(_t_upper, 0.0) >= _WALL_REVERIFY_INTERVAL:
-                atm_svc._walls_verified.discard(_t_upper)
-
-        _walls_pending = [
-            _t for _t in _all_tickers
-            if _t.upper().lstrip("$") not in atm_svc._walls_verified
-        ]
-        if _walls_pending:
-            _next_t = _walls_pending[0]
-            try:
-                _run_ticker_signals(_next_t)
-            except Exception:
-                pass
-
-        # Keep the news service ticker list in sync
-        news_svc2 = s.get("news_service")
-        if news_svc2:
-            news_svc2.update_tickers(_all_tickers)
-
-        # Feed pre-fetched spots from spot_cache into ATM service for all
-        # tracked tickers.
-        _spot_map = {}
-        for _t in _all_tickers:
-            _t_upper = _t.upper().lstrip("$")
-            if _t_upper in s.spot_cache:
-                _spot_map[_t_upper] = s.spot_cache[_t_upper]
-        if _spot_map:
-            atm_svc.bulk_update_spots(_spot_map)
-
-
 def render_candlesticks():
     s = st.session_state
     if not s.get("client"):
@@ -1057,6 +834,13 @@ def render_candlesticks():
                 stale_threshold_secs = max(60, tf_minutes * 60 * 2)
             age_secs = (now_dt - last_bar_dt).total_seconds()
             forced_refresh = age_secs > stale_threshold_secs
+
+        # If the sidebar Refresh button was just clicked for the current
+        # symbol, force a fresh candle pull regardless of cache staleness.
+        _force_refresh_symbol = s.get("_force_candle_refresh")
+        if _force_refresh_symbol == symbol:
+            s["_force_candle_refresh"] = None
+            forced_refresh = True
 
         # Also short-circuit if the client isn't ready — refresh can't help.
         client_ok = s.get("client") is not None
@@ -1903,12 +1687,13 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
         if is_index_symbol and spot > 0:
             atm_svc.set_ticker_spot(_sym, spot)
             st.session_state.spot_cache[_sym] = spot
-        # For index symbols (SPX/RUT/NDX) there is no LEVELONE_OPTIONS
-        # stream of their own — only the ETF proxy streams.  Populate
-        # Call Price / Put Price columns from the REST option-chain
-        # ATM marks so the ATM Order Flow grid updates in real time
-        # alongside the periodic wall refresh.
-        if is_index_symbol and atm_svc:
+        # Populate Call Price / Put Price columns from the REST
+        # option-chain ATM marks so the ATM Order Flow grid updates
+        # in real time alongside the periodic wall refresh.  This
+        # applies to ALL tracked tickers — index symbols need it
+        # (they have no own LEVELONE_OPTIONS stream) and equity
+        # tickers benefit too as a fallback before WebSocket ticks arrive.
+        if atm_svc:
             _atm_k = min(
                 (e["strike"] for e in filtered_data),
                 key=lambda k: abs(k - spot),
@@ -2310,47 +2095,6 @@ div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
 
 
 
-
-@st.fragment(run_every=2)
-def render_flow_frag():
-    """Renders the Order Flow dataframe with fast updates.
-
-    Includes a watchdog: if no option ticks arrive for 60 s while the
-    market is open, the feed is assumed dead and a reconnection is forced.
-    """
-    from flow import render_flow_legend_and_style
-    s = st.session_state
-    if not s.get("client"):
-        return
-    stream_symbol = s.get("symbol", "SPY").upper().lstrip("$")
-    mapped = _STREAM_SYMBOL_MAP.get(stream_symbol, stream_symbol)
-
-    # Watchdog: detect a silently dead option feed.  If the market is
-    # open and no ticks have arrived for 60 s, force re-registration
-    # so the next ensure_atm_streaming cycle re-subscribes everything.
-    from flow import is_market_open
-    atm_svc = s.get("atm_option_service")
-    if atm_svc and is_market_open() and atm_svc.is_running:
-        if atm_svc.is_feed_stale(max_age_seconds=60):
-            print("[_flow_grid] watchdog: feed stale >60 s, forcing reconnect")
-            atm_svc._needs_reconnect = True
-
-    ensure_atm_streaming(mapped)
-    st.subheader("ATM Order Flow")
-    # Market status indicator at the header row
-    from flow import render_market_status
-    render_market_status()
-    # CSS styles for the dataframe (only need to inject once)
-    if "_flow_css_injected" not in s:
-        from flow import render_flow_legend_and_style
-        render_flow_legend_and_style()
-        s["_flow_css_injected"] = True
-    render_atm_order_flow_grid()
-    # Drive wall-zone Telegram alerts from the *streaming* spot the grid
-    # displays, so alerts fire in real time when the grid colors a cell
-    # even if the standalone cron job's REST fetch hasn't sampled again.
-    from flow import maybe_fire_wall_zone_alerts
-    maybe_fire_wall_zone_alerts()
 
 
 @st.fragment(run_every=60)
