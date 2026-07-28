@@ -1,27 +1,25 @@
 import asyncio
 import json
 import os
-import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
 import client as client_mod
+from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
 from client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from streaming_service import StreamingService
 from option_streaming_service import AtmOptionVolumeService
-from chart_component import render_chart, build_update_data, compute_latest_indicators
+from chart_component import render_chart
 from flow import (
     _ensure_async_loop,
-    _STREAM_SYMBOL_MAP,
     ensure_atm_streaming,
-    render_atm_order_flow_grid,
     render_flow_frag,
-    render_market_status,
     run_async,
 )
 from news_service import NewsService
+from index_spot_poller import IndexSpotPoller
 from calculations import (
     aggregate_by_strike,
     aggregate_by_expiration,
@@ -103,6 +101,7 @@ _SESSION_DEFAULTS = {
     "flow_cache": {},
     "spot_cache": {},
     "news_service": None,
+    "index_spot_poller": None,
 }
 
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
@@ -145,6 +144,16 @@ if st.session_state.get("client") is not None:
             atm_opt.stop()
         st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
 
+    poller = st.session_state.get("index_spot_poller")
+    if poller is None or getattr(poller, '_loop', None) is not loop:
+        if poller is not None:
+            poller.stop()
+        poller = IndexSpotPoller(st.session_state.client, loop)
+        st.session_state.index_spot_poller = poller
+    if not poller.is_running and st.session_state.get("atm_option_service"):
+        poller.update_tickers(list(st.session_state.get("ticker_history", [])))
+        poller.start(st.session_state.atm_option_service)
+
 
 def init_client():
     loop = _ensure_async_loop()
@@ -166,6 +175,16 @@ def init_client():
         if atm_opt is not None:
             atm_opt.stop()
         st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
+
+    poller = st.session_state.get("index_spot_poller")
+    if poller is None or getattr(poller, '_loop', None) is not loop:
+        if poller is not None:
+            poller.stop()
+        poller = IndexSpotPoller(st.session_state.client, loop)
+        st.session_state.index_spot_poller = poller
+    if not poller.is_running and st.session_state.get("atm_option_service"):
+        poller.update_tickers(list(st.session_state.get("ticker_history", [])))
+        poller.start(st.session_state.atm_option_service)
 
     # News service (Yahoo Finance RSS polling)
     news_svc = st.session_state.get("news_service")
@@ -192,8 +211,9 @@ def fetch_data(symbol: str) -> bool:
     if not init_client():
         return False
     _sym = symbol.upper().lstrip("$")
-    sym_map = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
-    is_index_symbol = _sym in sym_map
+    is_index_symbol = _sym in STREAM_SYMBOL_MAP
+
+    is_index_symbol = _sym in STREAM_SYMBOL_MAP
 
     raw = None
     try:
@@ -219,7 +239,7 @@ def fetch_data(symbol: str) -> bool:
         try:
             fb_raw = run_async(
                 fetch_option_chain(
-                    st.session_state.client, sym_map[_sym], strike_count=75, include_quotes=True,
+                    st.session_state.client, STREAM_SYMBOL_MAP[_sym], strike_count=75, include_quotes=True,
                 )
             )
             fallback_greeks = build_greeks_lookup(fb_raw)
@@ -886,7 +906,7 @@ def render_candlesticks_frag():
             return
 
         # --- Start streaming services (equity + ATM option) ---
-        stream_symbol = _STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"), symbol)
+        stream_symbol = STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"), symbol)
         ensure_atm_streaming(stream_symbol)
 
         # Periodically refresh spots for all tickers (every 2s)
@@ -897,28 +917,25 @@ def render_candlesticks_frag():
             import time as _time_mod
             _now = _time_mod.time()
             _last_spot_refresh = s.get("_last_spot_refresh", 0)
-            if _now - _last_spot_refresh > 2:
+            if _now - _last_spot_refresh >= 2:
                 s._last_spot_refresh = _now
                 _all_tickers = s.get("ticker_history", [])
-                _stream_symbols = [_STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$")) for t in _all_tickers]
+                _stream_symbols = [STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$")) for t in _all_tickers]
                 try:
                     from client import fetch_quotes
-                    _INDEX_QUOTE_MAP2 = {"SPX": "$SPX:X", "SPXW": "$SPX:X",
-                                         "RUT": "$RUT:X", "RUTW": "$RUT:X",
-                                         "NDX": "$NDX:X", "NDXP": "$NDX:X"}
                     _idx_fetch = []
                     _idx_disp_map = {}
                     for _t in _all_tickers:
                         _t_upper = _t.upper().lstrip("$")
-                        if _t_upper in _INDEX_QUOTE_MAP2:
-                            _iq = _INDEX_QUOTE_MAP2[_t_upper]
+                        if _t_upper in INDEX_QUOTE_MAP:
+                            _iq = INDEX_QUOTE_MAP[_t_upper]
                             _idx_fetch.append(_iq)
                             _idx_disp_map[_iq] = _t_upper
 
                     quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                     for disp_sym, stream_sym in zip(_all_tickers, _stream_symbols):
                         _disp_upper = disp_sym.upper().lstrip("$")
-                        if _disp_upper in _INDEX_QUOTE_MAP2:
+                        if _disp_upper in INDEX_QUOTE_MAP:
                             continue
                         qd = quote_resp.get(stream_sym, {}) or {}
                         quote = qd.get("quote", {}) or qd.get(stream_sym, {})
@@ -1150,11 +1167,14 @@ def render_candlesticks_frag():
         # candlesticks update like equities.  Index symbols cannot be streamed
         # via the equity WebSocket (Schwab only supports LEVELONE_EQUITIES for
         # real equities, not indices), so we fall back to REST polling ---- #
-        _INDEX_SYMBOLS_SET = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP"}
+        INDEX_SYMBOLS = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP", "VIX", "VIXW"}
         _sym_norm_idx = symbol.upper().lstrip("$")
-        if _sym_norm_idx in _INDEX_SYMBOLS_SET and not chart_df.empty:
+        if _sym_norm_idx in INDEX_SYMBOLS and not chart_df.empty:
             try:
-                _idx_spot = s.spot_cache.get(_sym_norm_idx)
+                _atm_svc = s.get("atm_option_service")
+                _idx_spot = _atm_svc.get_ticker_spot(_sym_norm_idx) if _atm_svc else None
+                if _idx_spot is None:
+                    _idx_spot = s.spot_cache.get(_sym_norm_idx)
                 if _idx_spot is not None and float(_idx_spot) > 0:
                     _idx_spot = float(_idx_spot)
                     _tf_min_idx = (client_mod.TIMEFRAMES.get(timeframe) or {}).get("minutes")
@@ -1363,10 +1383,10 @@ def render_metrics_frag():
     # For index symbols (SPX, RUT, NDX) the stream subscribes to the
     # ETF proxy (SPY, IWM, QQQ) which has a completely different price
     # scale — never use the ETF's live price as the index spot.
-    _INDEX_SYMBOLS = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP"}
+    INDEX_SYMBOLS = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP"}
     _sym = s.get("symbol", "").upper().lstrip("$")
     live = None
-    if _sym not in _INDEX_SYMBOLS:
+    if _sym not in INDEX_SYMBOLS:
         svc = s.get("streaming_service")
         if svc:
             live = svc.last_price
@@ -1639,8 +1659,7 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     if not init_client():
         return None
     _sym = symbol.upper().lstrip("$")
-    sym_map = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
-    is_index_symbol = _sym in sym_map
+    is_index_symbol = _sym in STREAM_SYMBOL_MAP
 
     raw = None
     try:
@@ -1676,7 +1695,7 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     if is_index_symbol:
         try:
             fb_raw = run_async(
-                fetch_option_chain(st.session_state.client, sym_map[_sym], strike_count=75, include_quotes=True)
+                fetch_option_chain(st.session_state.client, STREAM_SYMBOL_MAP[_sym], strike_count=75, include_quotes=True)
             )
             fallback_greeks = build_greeks_lookup(fb_raw)
             etf_data, etf_spot = parse_option_chain(fb_raw, r=r, q=q)

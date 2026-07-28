@@ -4,7 +4,8 @@ import os
 import threading
 import time as _time_mod
 import pandas as pd
-from calculations import calculate_atm_strike
+from _constants import STREAM_SYMBOL_MAP
+from calculations import calculate_atm_strike, get_strike_spacing
 
 MAX_ROWS = 200
 
@@ -15,7 +16,6 @@ MAX_ROWS = 200
 _WALL_REFRESH_MIN_INTERVAL = 30.0
 
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
-_STREAM_SYMBOL_MAP = {"SPX": "SPY", "SPXW": "SPY", "RUT": "IWM", "RUTW": "IWM", "NDX": "QQQ", "NDXP": "QQQ"}
 
 
 def _load_ticker_history() -> list[str]:
@@ -35,7 +35,7 @@ def _make_option_symbol(root: str, yymmdd: str, call_put: str, strike: float) ->
 
 def _get_stream_symbol(display_symbol: str) -> str:
     sym = display_symbol.upper().lstrip("$")
-    return _STREAM_SYMBOL_MAP.get(sym, sym)
+    return STREAM_SYMBOL_MAP.get(sym, sym)
 
 
 def _normalize_display_symbol(symbol: str) -> str:
@@ -48,15 +48,15 @@ def _normalize_display_symbol(symbol: str) -> str:
 
 
 def _find_flow_for_display(spots: dict, display_symbol: str) -> dict | None:
-    """Return the matching _ticker_flows entry for a (possibly un-stripped,
-    possibly ETF-proxy) display symbol, or None."""
+    """Return the matching _ticker_flows entry for a display symbol.
+    Looks up by direct key first, then by normalized (uppercase, no $)
+    form.  Does NOT fall back to the ETF proxy mapping, so index symbols
+    (SPX) never accidentally match their ETF proxy entry (SPY)."""
     if display_symbol is None:
         return None
-    # 1. Direct
     tk = spots.get(display_symbol)
     if tk is not None:
         return tk
-    # 2. Normalized
     norm = _normalize_display_symbol(display_symbol)
     tk = spots.get(norm)
     if tk is not None:
@@ -64,23 +64,6 @@ def _find_flow_for_display(spots: dict, display_symbol: str) -> dict | None:
     for key in spots:
         if _normalize_display_symbol(key) == norm:
             return spots[key]
-    # 3. ETF proxy (SPX asked -> SPY tracked) and reverse
-    proxy = _STREAM_SYMBOL_MAP.get(norm)
-    if proxy is not None:
-        tk = spots.get(proxy)
-        if tk is not None:
-            return tk
-        for key in spots:
-            if _normalize_display_symbol(key) == proxy:
-                return spots[key]
-    for src, p in _STREAM_SYMBOL_MAP.items():
-        if norm == p:
-            if src in spots:
-                return spots[src]
-            for key in spots:
-                if _normalize_display_symbol(key) == src:
-                    return spots[key]
-            break
     return None
 
 
@@ -361,6 +344,7 @@ class AtmOptionVolumeService:
                     "stream_symbol": stream_sym,
                     "spot": 0.0,
                     "atm_strike": 0.0,
+                    "last_atm_reference": 0.0,
                     "expiration": self._expiration,
                     "call_wall": None,
                     "put_wall": None,
@@ -413,6 +397,7 @@ class AtmOptionVolumeService:
                 "stream_symbol": stream_symbol,
                 "spot": spot,
                 "atm_strike": 0.0,
+                "last_atm_reference": 0.0,
                 "expiration": self._expiration,
                 "call_wall": None,
                 "put_wall": None,
@@ -633,31 +618,80 @@ class AtmOptionVolumeService:
                 ticker["put_bid"] = float(put_price)
                 ticker["put_ask"] = float(put_price)
 
+    def _find_ticker_entry(self, display_symbol: str) -> dict | None:
+        """Find a ticker entry by direct or normalized key lookup.
+        Unlike _find_flow_for_display, this does NOT fall back to the
+        ETF proxy lookup, so index symbols (SPX) won't accidentally
+        match their ETF proxy entry (SPY)."""
+        if display_symbol is None:
+            return None
+        tk = self._ticker_flows.get(display_symbol)
+        if tk is not None:
+            return tk
+        norm = _normalize_display_symbol(display_symbol)
+        tk = self._ticker_flows.get(norm)
+        if tk is not None:
+            return tk
+        for key in self._ticker_flows:
+            if _normalize_display_symbol(key) == norm:
+                return self._ticker_flows[key]
+        return None
+
     def set_ticker_spot(self, display_symbol: str, spot: float):
         """Set the spot price for a tracked ticker and recalculate its ATM
         strike.  Used for index symbols (SPX, RUT, NDX) whose actual spot
         differs from the ETF proxy (SPY, IWM, QQQ) used for streaming.
         Does NOT trigger a re-subscribe — index tickers share the ETF
-        proxy's option subscription."""
+        proxy's option subscription.
+
+        If the ticker has no entry in _ticker_flows yet (e.g. the
+        IndexSpotPoller runs before ensure_atm_streaming has initialised
+        it), a new entry is created automatically so the spot update is
+        never silently dropped."""
         if not spot or spot <= 0:
             return
         with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is not None:
-                old = ticker["spot"]
+            ticker = self._find_ticker_entry(display_symbol)
+            if ticker is None:
+                norm = _normalize_display_symbol(display_symbol)
+                stream_sym = _get_stream_symbol(norm)
+                self._ticker_flows[norm] = {
+                    "stream_symbol": stream_sym,
+                    "spot": spot,
+                    "atm_strike": calculate_atm_strike(spot),
+                    "last_atm_reference": spot,
+                    "expiration": self._expiration,
+                    "call_wall": None,
+                    "put_wall": None,
+                    "call_sym": None,
+                    "put_sym": None,
+                    "call_bid": None,
+                    "call_ask": None,
+                    "put_bid": None,
+                    "put_ask": None,
+                    "bullish": 0,
+                    "bearish": 0,
+                    "flow_history": [],
+                    "trend": "flat",
+                }
+                self._spot_changed = True
+                return
+            old = ticker["spot"]
+            ticker["spot"] = spot
+            # Only recalc ATM strike when the spot has moved by at least
+            # half a strike increment from the last reference price.
+            _last_ref = ticker.get("last_atm_reference", old)
+            _spacing = get_strike_spacing(spot)
+            if abs(spot - _last_ref) >= _spacing / 2:
                 old_atm = ticker.get("atm_strike")
-                ticker["spot"] = spot
                 new_atm = calculate_atm_strike(spot)
                 ticker["atm_strike"] = new_atm
-                # Invalidate put/call walls on an ATM strike crossing so the
-                # lazy fetcher re-fetches fresh OI from REST.  Index symbols
-                # share the ETF proxy subscription, but their walls are
-                # still computed from the index option chain.
+                ticker["last_atm_reference"] = spot
                 self._maybe_invalidate_walls_on_strike_change(
                     display_symbol, old_atm, new_atm,
                 )
-                if abs(spot - old) / max(old, 1) > 0.001:
-                    self._spot_changed = True
+            if abs(spot - old) / max(old, 1) > 0.001:
+                self._spot_changed = True
 
     def get_ticker_put_wall(self, display_symbol: str) -> float | None:
         with self._lock:
@@ -682,15 +716,19 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return
             old_spot = ticker["spot"]
-            old_atm = ticker.get("atm_strike")
             ticker["spot"] = spot
-            new_atm = calculate_atm_strike(spot)
-            ticker["atm_strike"] = new_atm
-            # Invalidate put/call walls on an ATM strike crossing so the
-            # lazy fetcher re-fetches fresh open interest from REST.
-            self._maybe_invalidate_walls_on_strike_change(
-                display_symbol, old_atm, new_atm,
-            )
+            # Only recalc ATM strike when the spot has moved by at least
+            # half a strike increment from the last reference price.
+            _last_ref = ticker.get("last_atm_reference", old_spot)
+            _spacing = get_strike_spacing(spot)
+            if abs(spot - _last_ref) >= _spacing / 2:
+                old_atm = ticker.get("atm_strike")
+                new_atm = calculate_atm_strike(spot)
+                ticker["atm_strike"] = new_atm
+                ticker["last_atm_reference"] = spot
+                self._maybe_invalidate_walls_on_strike_change(
+                    display_symbol, old_atm, new_atm,
+                )
             if ticker["call_sym"] is None or ticker["put_sym"] is None or \
                abs(spot - old_spot) / max(old_spot, 1) > 0.001:
                 if self._running and self._expiration:
@@ -717,15 +755,19 @@ class AtmOptionVolumeService:
                 ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
                 if ticker is not None:
                     old = ticker["spot"]
-                    old_atm = ticker.get("atm_strike")
                     ticker["spot"] = spot
-                    new_atm = calculate_atm_strike(spot)
-                    ticker["atm_strike"] = new_atm
-                    # Invalidate put/call walls on an ATM strike crossing so
-                    # the lazy fetcher re-fetches fresh OI from REST.
-                    self._maybe_invalidate_walls_on_strike_change(
-                        display_symbol, old_atm, new_atm,
-                    )
+                    # Only recalc ATM strike when the spot has moved by at
+                    # least half a strike increment from the last reference.
+                    _last_ref = ticker.get("last_atm_reference", old)
+                    _spacing = get_strike_spacing(spot)
+                    if abs(spot - _last_ref) >= _spacing / 2:
+                        old_atm = ticker.get("atm_strike")
+                        new_atm = calculate_atm_strike(spot)
+                        ticker["atm_strike"] = new_atm
+                        ticker["last_atm_reference"] = spot
+                        self._maybe_invalidate_walls_on_strike_change(
+                            display_symbol, old_atm, new_atm,
+                        )
                     # Only trigger re-subscribe for non-index tickers
                     # (index symbols share the ETF proxy subscription).
                     _disp_norm = _normalize_display_symbol(display_symbol)
@@ -816,7 +858,7 @@ class AtmOptionVolumeService:
                     # that was set from the index quote ($SPX:X etc.).
                     _is_idx = (
                         ticker_display is not None
-                        and ticker_display.upper().lstrip("$") in _STREAM_SYMBOL_MAP
+                        and ticker_display.upper().lstrip("$") in STREAM_SYMBOL_MAP
                     )
                     if contract_type in ("CALL", "C"):
                         if underlying is not None and not _is_idx:
