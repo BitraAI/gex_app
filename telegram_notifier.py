@@ -96,15 +96,18 @@ def send_telegram(text: str, *, disable_notification: bool = False) -> bool:
 def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None) -> str:
+def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None, iv_rank: Optional[float] = None) -> str:
     """Build an HTML-formatted message from a list of alert strings."""
     header_lines = []
     if symbol:
         header_lines.append(f"<b>{_escape_html(symbol)}</b>")
     if spot is not None:
         header_lines.append(f"Price: <code>{spot:,.2f}</code>")
+    if iv_rank is not None:
+        emoji = "🟢" if iv_rank < 40 else "🔴" if iv_rank > 50 else "🟡"
+        header_lines.append(f"{emoji} IV Rank: <code>{iv_rank:.1f}%</code>")
     if vrp is not None:
-        emoji = "🟢" if vrp < 0 else "🔴"
+        emoji = "🟢" if vrp < -2 else "🔴" if vrp > 5 else "🟡"
         header_lines.append(f"{emoji} VRP: <code>{vrp:.1f}%</code>")
     if gex is not None:
         emoji = "🟢" if gex > 0 else "🔴"
@@ -122,6 +125,7 @@ def notify_alerts(
     spot: Optional[float] = None,
     gex: Optional[float] = None,
     vrp: Optional[float] = None,
+    iv_rank: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
     """Push a batch of alert strings to Telegram as one message.
@@ -133,7 +137,7 @@ def notify_alerts(
     alerts = list(alerts)
     if not alerts:
         return False
-    text = _format(alerts, symbol=symbol, spot=spot, gex=gex, vrp=vrp)
+    text = _format(alerts, symbol=symbol, spot=spot, gex=gex, vrp=vrp, iv_rank=iv_rank)
     return send_telegram(text, disable_notification=disable_notification)
 
 
@@ -167,12 +171,12 @@ def diff_alerts(
         "atm_strike": analytics.get("atm_strike"),
     }
 
-    _BUFFER = 0.0002  # 0.02 %
+    _WALL_ZONE_BUFFER = 0.0002  # 0.02 %
     pw = cur["put_wall"]
     cw = cur["call_wall"]
-    if pw is not None and spot <= pw + abs(pw) * _BUFFER:
+    if pw is not None and spot <= pw + abs(pw) * _WALL_ZONE_BUFFER:
         cur["wall_zone"] = "support"
-    elif cw is not None and spot >= cw - abs(cw) * _BUFFER:
+    elif cw is not None and spot >= cw - abs(cw) * _WALL_ZONE_BUFFER:
         cur["wall_zone"] = "resistance"
 
     if not prev:
@@ -205,14 +209,14 @@ def diff_alerts(
     prev_zone = prev.get("wall_zone")
     cur_zone = cur["wall_zone"]
     if cur_zone == "support" and prev_zone != "support" and pw is not None:
-        new_alerts.append(f"🟢 Near Support ${pw:.2f}")
+        new_alerts.append(f"🟢 Near Support")
         atm = cur.get("atm_strike")
         if atm:
-            new_alerts.append(f"Signal: BUY CALL ${atm}")
+            new_alerts.append(f"Signal: BUY CALL ${pw:.2f}")
     if cur_zone == "resistance" and prev_zone != "resistance" and cw is not None:
-        new_alerts.append(f"🔴 Near Resistance ${cw:.2f}")
+        new_alerts.append(f"🔴 Near Resistance")
         atm = cur.get("atm_strike")
         if atm:
-            new_alerts.append(f"Signal: BUY PUT ${atm}")
+            new_alerts.append(f"Signal: BUY PUT ${cw:.2f}")
 
     return new_alerts, cur

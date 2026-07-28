@@ -60,6 +60,7 @@ from client import (
 )
 from signals import generate_recommendations
 from telegram_notifier import diff_alerts, notify_alerts
+from _constants import STREAM_SYMBOL_MAP
 
 logger = logging.getLogger("telegram_alerts")
 
@@ -67,12 +68,6 @@ _BASE_DIR = os.path.expanduser("~/.local/share/gex_app")
 TICKER_HISTORY_FILE = os.path.join(_BASE_DIR, "ticker_history.json")
 ALERT_STATE_FILE = os.path.join(_BASE_DIR, "alert_state.json")
 _STRIKE_COUNT = 75
-# Index symbols lack Greeks in the Schwab response; mirror app.py's fallback map.
-_FALLBACK_SYMBOLS = {
-    "SPX": "SPY", "SPXW": "SPY",
-    "RUT": "IWM", "RUTW": "IWM",
-    "NDX": "QQQ", "NDXP": "QQQ",
-}
 _NY_TZ = ZoneInfo("America/New_York")
 
 
@@ -233,7 +228,7 @@ async def _compute_for_symbol(client, symbol: str) -> Optional[dict[str, Any]]:
 
     fallback_greeks = None
     etf_analytics = None
-    fallback_sym = _FALLBACK_SYMBOLS.get(symbol.upper().lstrip("$"))
+    fallback_sym = STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"))
     if fallback_sym:
         try:
             fb_raw = await fetch_option_chain(
