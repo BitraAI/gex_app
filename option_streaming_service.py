@@ -357,7 +357,11 @@ class AtmOptionVolumeService:
                     "bullish": 0,
                     "bearish": 0,
                     "flow_history": [],
+                    "flow_speed": 0,
+                    "book_imbalance": None,
+                    "book_imbalance_history": [],
                     "trend": "flat",
+                    "trend_reversal": None,
                 }
 
     def _get_stream_client(self):
@@ -387,55 +391,6 @@ class AtmOptionVolumeService:
     # Per-ticker flow tracking API
     # ------------------------------------------------------------------ #
 
-    def add_ticker(self, display_symbol: str, stream_symbol: str, spot: float):
-        """Add a ticker to tracking (does NOT subscribe individually - all
-        tickers are subscribed in a single call via _do_subscribe)."""
-        with self._lock:
-            if display_symbol in self._ticker_flows:
-                return
-            self._ticker_flows[display_symbol] = {
-                "stream_symbol": stream_symbol,
-                "spot": spot,
-                "atm_strike": 0.0,
-                "last_atm_reference": 0.0,
-                "expiration": self._expiration,
-                "call_wall": None,
-                "put_wall": None,
-                "call_sym": None,
-                "put_sym": None,
-                "call_bid": None,
-                "call_ask": None,
-                "put_bid": None,
-                "put_ask": None,
-                "bullish": 0,
-                "bearish": 0,
-                "flow_history": [],
-                "trend": "flat",
-            }
-        # Trigger a full re-subscription to include the new ticker
-        if self._running and self._expiration:
-            sc = self._get_stream_client()
-            if sc is not None:
-                asyncio.run_coroutine_threadsafe(
-                    self._do_subscribe(sc), self._loop,
-                )
-
-    def remove_ticker(self, display_symbol: str):
-        """Stop tracking flow for a ticker."""
-        with self._lock:
-            ticker = self._ticker_flows.pop(display_symbol, None)
-            if ticker:
-                if ticker["call_sym"]:
-                    self._sym_to_ticker.pop(ticker["call_sym"], None)
-                if ticker["put_sym"]:
-                    self._sym_to_ticker.pop(ticker["put_sym"], None)
-        # Trigger re-subscription to remove the unsubscribed symbols
-        if self._running and self._expiration:
-            sc = self._get_stream_client()
-            if sc is not None:
-                asyncio.run_coroutine_threadsafe(
-                    self._do_subscribe(sc), self._loop,
-                )
 
     def get_ticker_flow(self, display_symbol: str) -> tuple:
         """Return (bullish_vol, bearish_vol) for a tracked ticker,
@@ -1117,11 +1072,6 @@ class AtmOptionVolumeService:
                 self._subscribed_call_sym = primary_info.get("call_sym")
                 self._subscribed_put_sym = primary_info.get("put_sym")
 
-    async def _do_resubscribe(self):
-        pass  # re-subscription is triggered by update_spot, but since we no
-              # longer own the StreamClient, re-subscribing needs the shared
-              # client — handled via app.py feeding update_spot + re-register
-
     def _aggregate_tick(self, tick_time_ms: int, price: float, size: int, opt_type: str):
         """Merge a raw option tick into the 1-second OHLCV aggregation.
         opt_type: 'CALL' or 'PUT'.
@@ -1197,16 +1147,6 @@ class AtmOptionVolumeService:
                     bar["put_buy_vol"] += half
                     bar["put_sell_vol"] += rem
 
-    def get_ticker_trend(self, display_symbol: str) -> str:
-        """Return the Trend direction for a tracked ticker:
-        'up', 'down', or 'flat'.
-        None if not tracked."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return "flat"
-            return ticker.get("trend", "flat")
-
     def get_ticker_trend_data(self, display_symbol: str) -> dict:
         """Atomically return trend, book_imbalance, and trend_reversal
         for a ticker under a single lock, avoiding race conditions where
@@ -1219,6 +1159,9 @@ class AtmOptionVolumeService:
                 "trend": ticker.get("trend", "flat"),
                 "book_imbalance": ticker.get("book_imbalance"),
                 "trend_reversal": ticker.get("trend_reversal"),
+                "flow_speed": ticker.get("flow_speed"),
+                "book_imbalance_history": ticker.get("book_imbalance_history"),
+                "flow_history": ticker.get("flow_history"),
             }
 
     def _calculate_book_imbalance(self, bid_size: float, ask_size: float) -> float:
@@ -1332,7 +1275,7 @@ class AtmOptionVolumeService:
             else:
                 ticker["bullish"] += size
         else:
-            # Unknown — split evenly
+            # Unknown direction — split evenly between bullish and bearish
             half = size // 2
             ticker["bullish"] += half
             ticker["bearish"] += size - half

@@ -34,23 +34,13 @@ def _filter_active_expirations(data: list[dict[str, Any]], max_exp: int = 4) -> 
 def _filter_strikes_near_atm(data: list[dict[str, Any]], spot: float, n: int = 20) -> list[dict[str, Any]]:
     """Filter strikes to n strikes below, ATM strike, and n strikes above (price-based)."""
     strikes = sorted(set(e["strike"] for e in data))
-    
     if not strikes:
         return []
-    
-    # Find ATM strike (closest to spot)
     atm_strike = min(strikes, key=lambda k: abs(k - spot))
-    
-    # Get strikes below ATM, sorted by absolute distance (closest first)
-    below_strikes = sorted([s for s in strikes if s < atm_strike], key=lambda x: abs(x - atm_strike))[:n]
-    
-    # Get strikes above ATM, sorted by absolute distance (closest first)
-    above_strikes = sorted([s for s in strikes if s > atm_strike], key=lambda x: abs(x - atm_strike))[:n]
-    
-    # Combine: up to n below + ATM + up to n above
-    selected_strikes = below_strikes + [atm_strike] + above_strikes
-    
-    return [e for e in data if e["strike"] in selected_strikes]
+    below = sorted([s for s in strikes if s < atm_strike], key=lambda x: abs(x - atm_strike))[:n]
+    above = sorted([s for s in strikes if s > atm_strike], key=lambda x: abs(x - atm_strike))[:n]
+    selected = below + [atm_strike] + above
+    return [e for e in data if e["strike"] in selected]
 def get_filtered_strikes_for_analysis(
     data: list[dict[str, Any]], spot: float, n: int = 20
 ) -> list[tuple[float, float, float, float, float, float, float, float, str, str | None]]:
@@ -82,10 +72,10 @@ def get_filtered_strikes_for_analysis(
 
     below_strikes = [s for s in strikes if s < atm_strike]
     below_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
-    
+
     above_strikes = [s for s in strikes if s > atm_strike]
     above_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
-    
+
     selected_below = below_strikes[:n]
     selected_above = above_strikes[:n]
 

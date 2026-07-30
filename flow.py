@@ -20,7 +20,7 @@ import logging
 import os
 from functools import partial
 
-from analytics import compute_analytics
+from analytics import _filter_strikes_near_atm, compute_analytics
 from calculations import aggregate_by_expiration, build_greeks_lookup, parse_option_chain
 from client import (
     fetch_option_chain,
@@ -551,16 +551,6 @@ def _tte_from_dtes(dtes: list[int]) -> float | None:
     return (min(valid) + secs_left / 23400) / 365.0
 
 
-def _filter_strikes_near_atm(data: list[dict], spot: float, n: int = 20) -> list[dict]:
-    strikes = sorted(set(e["strike"] for e in data))
-    if not strikes:
-        return []
-    atm_strike = min(strikes, key=lambda k: abs(k - spot))
-    below = sorted([s for s in strikes if s < atm_strike], key=lambda x: abs(x - atm_strike))[:n]
-    above = sorted([s for s in strikes if s > atm_strike], key=lambda x: abs(x - atm_strike))[:n]
-    selected = below + [atm_strike] + above
-    return [e for e in data if e["strike"] in selected]
-
 
 def _build_by_exp_all(data: list[dict], spot: float = 0.0) -> list[dict]:
     return aggregate_by_expiration(data, spot=spot)
@@ -573,7 +563,7 @@ def _build_strategy_alerts(
     aks = sorted(set(e["strike"] for e in data))
     atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
     sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
-    sd2 = _filter_strikes_near_atm(sd, spot)
+    sd2 = _filter_strikes_near_atm(sd, spot, n=20)
 
     ssvi_surf = analytics.get("ssvi_surface")
     dtes = [e.get("dte", 0) for e in _build_by_exp_all(data, spot)]
@@ -581,7 +571,7 @@ def _build_strategy_alerts(
 
     buy_sd = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55]
     buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - rv < 0]
-    buy_sd = [e for e in buy_sd if 60 <= (e.get("days_to_exp", 0) or 0) <= 90]
+    buy_sd = [e for e in buy_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
     if ssvi_surf and ir_tte:
         buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
 
@@ -875,87 +865,108 @@ def render_atm_order_flow_grid():
     update_flow_cache()
 
     tickers = s.get("ticker_history", [])
-    if not tickers:
-        tickers = [current_sym] if current_sym else []
-
     rows = []
-    for t in tickers:
-        t_upper = t.upper().lstrip("$")
-        cached = s.flow_cache.get(t_upper)
-        bullish = cached.get("bullish") if cached is not None else None
-        bearish = cached.get("bearish") if cached is not None else None
-        has_data = bullish is not None and bearish is not None
-        net = (bullish - bearish) / (bullish + bearish) if has_data and (bullish + bearish) != 0 else 0 if has_data else None
-        opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
-        atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
-        spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
-        trend = atm_svc.get_ticker_trend(t_upper) if atm_svc else "flat"
-        
-        # Get book imbalance and trend reversal from ticker data
-        book_imbalance = None
-        trend_reversal = None
-        if atm_svc:
-            ticker_data = _find_flow_for_display(atm_svc._ticker_flows, t_upper)
-            if ticker_data:
-                book_imbalance = ticker_data.get("book_imbalance")
-                trend_reversal = ticker_data.get("trend_reversal")
-        
-        # Format Trend column - enhanced with liquidity pressure indicators
-        # Keep visual indicators without emojis
-        if book_imbalance is not None:
-            if book_imbalance > 0.3:
-                # Strong bullish pressure
+    if tickers:
+        for t in tickers:
+            t_upper = t.upper().lstrip("$")
+            cached = s.flow_cache.get(t_upper)
+            bullish = cached.get("bullish") if cached is not None else None
+            bearish = cached.get("bearish") if cached is not None else None
+            has_data = bullish is not None and bearish is not None
+            net = (bullish - bearish) / (bullish + bearish) if has_data and (bullish + bearish) != 0 else 0 if has_data else None
+            opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
+            atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
+            spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
+            # Get book imbalance and trend reversal from ticker data
+            book_imbalance = None
+            trend_reversal = None
+            trend = "flat"
+            flow_speed = 0
+            if atm_svc:
+                ticker_data = atm_svc.get_ticker_trend_data(t_upper)
+                if ticker_data:
+                    trend = ticker_data["trend"]
+                    book_imbalance = ticker_data["book_imbalance"]
+                    trend_reversal = ticker_data["trend_reversal"]
+                    flow_speed = ticker_data["flow_speed"]
+            
+            # Enhanced trend display with enhanced indicators based on book imbalance, trend reversal, trend and flow speed
+            # Keep visual indicators without emojis
+            if book_imbalance is not None:
+                if book_imbalance > 0.3:
+                    # Strong bullish pressure
+                    if trend_reversal == "bullish":
+                        trend_display = "↑↑"  # Double bullish
+                    elif trend == "up":
+                        # Enhanced bullish indicators
+                        if flow_speed > 0:
+                            trend_display = "↑↑↑"  # Strong bullish momentum with flow speed
+                        else:
+                            trend_display = "↑"   # Normal bullish
+                    else:
+                        # Building bullish momentum
+                        if flow_speed > 0:
+                            trend_display = "→→→"  # Building bullish momentum with flow
+                        else:
+                            trend_display = "→→"  # Building bullish momentum
+                elif book_imbalance < -0.3:
+                    # Strong bearish pressure
+                    if trend_reversal == "bearish":
+                        trend_display = "↓↓"  # Double bearish
+                    elif trend == "down":
+                        # Enhanced bearish indicators
+                        if flow_speed < 0:
+                            trend_display = "↓↓↓"  # Strong bearish momentum with flow speed
+                        else:
+                            trend_display = "↓"   # Normal bearish
+                    else:
+                        # Building bearish momentum
+                        if flow_speed < 0:
+                            trend_display = "←←←"  # Building bearish momentum with flow
+                        else:
+                            trend_display = "←←"  # Building bearish momentum
+                else:
+                    # Normal pressure
+                    # Enhanced flat indicators based on flow speed
+                    if flow_speed > 0:
+                        trend_display = "→→→"  # Positive momentum building
+                    elif flow_speed < 0:
+                        trend_display = "←←←"  # Negative momentum building
+                    else:
+                        trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
+            else:
+                # Standard trend display
                 if trend_reversal == "bullish":
-                    trend_display = "↑↑"  # Double bullish
-                elif trend == "up":
-                    trend_display = "↑"   # Normal bullish
+                    trend_display = "↑↑"  # Show double bullish for strong reversal
+                elif trend_reversal == "bearish":
+                    trend_display = "↓↓"  # Show double bearish for strong reversal
                 else:
-                    trend_display = "→→" # Building bullish momentum
-            elif book_imbalance < -0.3:
-                # Strong bearish pressure
-                if trend_reversal == "bearish":
-                    trend_display = "↓↓"  # Double bearish
-                elif trend == "down":
-                    trend_display = "↓"   # Normal bearish
-                else:
-                    trend_display = "←←" # Building bearish momentum
-            else:
-                # Normal pressure
-                trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
-        else:
-            # Standard trend display
-            if trend_reversal == "bullish":
-                trend_display = "↑"
-            elif trend_reversal == "bearish":
-                trend_display = "↓"
-            else:
-                trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
-        
-        # Support (Put Wall) / Resistance (Call Wall): prefer per-ticker value
-        # set by fetch_data, fall back to session-state analytics for the
-        # current chart symbol so the columns are never empty without a manual
-        # Refresh.
-        put_wall_val = atm_svc.get_ticker_put_wall(t_upper) if atm_svc else None
-        call_wall_val = atm_svc.get_ticker_call_wall(t_upper) if atm_svc else None
-        if put_wall_val is None and t_upper == current_sym:
-            put_wall_val = (s.get("analytics") or {}).get("put_wall")
-        if call_wall_val is None and t_upper == current_sym:
-            call_wall_val = (s.get("analytics") or {}).get("call_wall")
+                    trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
 
-        rows.append({
-            "Ticker": t_upper,
-            "Spot": spot,
-            "ATM Strike": atm_strike,
-            "Expiration": atm_svc.get_ticker_expiration(t_upper) if atm_svc else None,
-            "Support": put_wall_val,
-            "Resistance": call_wall_val,
-            "Call Price": opt_prices.get("call_price"),
-            "Put Price": opt_prices.get("put_price"),
-            "Bullish Flow": bullish if has_data else 0,
-            "Bearish Flow": bearish if has_data else 0,
-            "Flow Momentum": net if has_data else 0,
-            "Trend": trend_display,
-        })
+            # Support (Put Wall) / Resistance (Call Wall): prefer per-ticker value
+            # set by fetch_data, fall back to session-state analytics for the
+            # current chart symbol so the columns are never empty without a manual
+            # Refresh.
+            put_wall_val = atm_svc.get_ticker_put_wall(t_upper) if atm_svc else None
+            call_wall_val = atm_svc.get_ticker_call_wall(t_upper) if atm_svc else None
+            if put_wall_val is None and t_upper == current_sym:
+                put_wall_val = (s.get("analytics") or {}).get("put_wall")
+            if call_wall_val is None and t_upper == current_sym:
+                call_wall_val = (s.get("analytics") or {}).get("call_wall")
+
+            rows.append({
+                "Ticker": t_upper,
+                "Spot": spot,
+                "ATM Strike": atm_strike,
+                "Expiration": atm_svc.get_ticker_expiration(t_upper) if atm_svc else None,
+                "Support": put_wall_val,
+                "Resistance": call_wall_val,
+                "Call Price": opt_prices.get("call_price"),
+                "Put Price": opt_prices.get("put_price"),
+                "Trend": trend_display,
+                "Book Imbalance": book_imbalance,
+                "Flow Speed": flow_speed,
+            })
 
     if not rows:
         st.info("No tickers tracked yet. Add tickers on the main GammaEx page first.")
@@ -972,8 +983,7 @@ def render_atm_order_flow_grid():
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
-         r["Call Price"], r["Put Price"], r["Bullish Flow"],
-         r["Bearish Flow"], r["Flow Momentum"])
+         r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"])
         for r in rows
     )
     data_hash = hash((data_key, _atm_epoch, _wall_epoch))
@@ -995,10 +1005,35 @@ def render_atm_order_flow_grid():
 
     def _trend_color(val):
         """Color the trend text (up/down/flat) based on trend direction."""
-        return {
-            "up": "color: #00cc96; font-weight: bold;",
-            "down": "color: #ef5350; font-weight: bold;",
-        }.get(val, "color: #808080;")
+        if val is None:
+            return ""
+        if "↑" in val:
+            return "color: #00cc96; font-weight: bold;"
+        if "↓" in val:
+            return "color: #ef5350; font-weight: bold;"
+        if "→" in val or "←" in val:
+            return "color: #ff9800; font-weight: bold;"
+        return "color: #808080;"
+
+    def _book_imbalance_color(val):
+        """Color the book imbalance value based on magnitude."""
+        if val is None:
+            return ""
+        if val > 0.3:
+            return "color: #00cc96; font-weight: bold;"
+        if val < -0.3:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+
+    def _flow_speed_color(val):
+        """Color the flow speed value based on magnitude."""
+        if val is None:
+            return ""
+        if val > 1.0:
+            return "color: #00cc96; font-weight: bold;"
+        if val < -1.0:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
 
     def _spot_wall_bg(row):
         spot = row["Spot"]
@@ -1019,12 +1054,15 @@ def render_atm_order_flow_grid():
 
     _styler = df.style.set_uuid("flow_grid")
     _styler = _styler.apply(_spot_wall_bg, axis=1)
+
     if hasattr(_styler, "map"):
-        _styler = _styler.map(_net_flow_color, subset=["Flow Momentum"])
         _styler = _styler.map(_trend_color, subset=["Trend"])
+        _styler = _styler.map(_book_imbalance_color, subset=["Book Imbalance"])
+        _styler = _styler.map(_flow_speed_color, subset=["Flow Speed"])
     else:
-        _styler = _styler.apply(_net_flow_color, subset=["Flow Momentum"])
         _styler = _styler.apply(_trend_color, subset=["Trend"])
+        _styler = _styler.apply(_book_imbalance_color, subset=["Book Imbalance"])
+        _styler = _styler.apply(_flow_speed_color, subset=["Flow Speed"])
 
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
@@ -1035,9 +1073,8 @@ def render_atm_order_flow_grid():
         "Trend": lambda v: v,
         "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
-        "Bullish Flow": "{:,.0f}",
-        "Bearish Flow": "{:,.0f}",
-        "Flow Momentum": "{:+.2f}",
+        "Book Imbalance": lambda v: f"{v:+.2f}" if v is not None else "",
+        "Flow Speed": lambda v: f"{v:+.2f}" if v is not None else "",
     })
 
     s._flow_styled_hash = data_hash

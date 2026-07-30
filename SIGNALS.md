@@ -6,7 +6,7 @@ The Trade Signals tab in the sidebar (tab 5) provides automated options strategy
 
 ## Market Bias
 
-`assess_market_bias()` in `signals.py:4` computes a directional bias score from five factors.
+`assess_market_bias()` in `signals.py` computes a directional bias score from five factors.
 The IV skew factor **prefers the SSVI-smoothed skew** (`ssvi_skew.iv_skew`) over the raw market `iv_skew` when the surface is available, giving a cleaner, less noisy signal.
 
 The **IV Skew (25Δ)** metric itself is computed for the **selected expiration** (sidebar Expiration selector). It is derived from **OTM strikes only** — OTM puts (`strike < spot`) and OTM calls (`strike > spot`), preferring the quote closest to 25Δ, falling back to the most OTM valid quote when no near-25Δ quote exists. When the market chain lacks usable OTM put/call quotes for the selected expiration (e.g. LEAPS or one-sided weeklies), it falls back to the SSVI-smoothed 25Δ skew at that expiration's tenor, and finally to the front expiration's market skew, so the metric always displays a value when any expiration in the chain carries a valid skew.
@@ -25,7 +25,7 @@ The **IV Skew (25Δ)** metric itself is computed for the **selected expiration**
 
 ## Strategy Recommendations
 
-`generate_recommendations()` in `signals.py:63` produces structured trade recommendations from the filtered option chain.
+`generate_recommendations()` in `signals.py` produces structured trade recommendations from the filtered option chain.
 
 ### VRP computation
 
@@ -87,6 +87,6 @@ Each directional strategy follows a multi-step pipeline. All criteria are checke
 ## Code reference
 
 - `signals.py` — Bias and recommendation logic. `exp_vrp` dict (ATM IV − RV per expiration) built from full chain at function entry. Directional strategies select best expiration from this dict. SSVI-based per-strike richness used for final strike selection within the chosen expiration.
-- `analytics.py:167` — `_calculate_iv_skew()` computes the selected-expiration 25Δ skew from OTM strikes, with SSVI and front-expiration fallbacks.
+- `analytics.py` — `_calculate_iv_skew()` computes the selected-expiration 25Δ skew from OTM strikes, with SSVI and front-expiration fallbacks.
 - `app.py` — `render_trade_signals_frag()` renders the UI, applies the selected-expiration restriction, and calls `generate_recommendations`.
 - `telegram_alerts.py` — `_build_strategy_alerts()` replicates the same filtering logic for standalone Telegram alert generation.
