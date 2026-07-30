@@ -105,14 +105,15 @@ Schwab WebSocket (LEVEL1 + LEVEL2)              Research feed (REST)
         ├──────────────────────────┐                    │
         ▼                          ▼                    │
   LEVEL1 trades              LEVEL2 order book          │
-  (_process_trade_ticker)   (_calculate_book_imbalance) │
-  price vs bid/ask mid      (bid_size - ask_size)       │
-  → buy/sell                ────────────────────        │
-  → bullish/bearish totals   (bid_size + ask_size)      │
+  bid, ask, last,           (_calculate_book_imbalance) │
+  volume, open interest,    (bid_size - ask_size)       │
+  greeks                    ────────────────────        │
+  (_process_trade_ticker)    (bid_size + ask_size)      │
+  → GEX totals                                          │
         │                          │                    │
         ▼                          │                    ▼
-  Cumulative per-ticker totals     │        flow_history = [(t0, net0), ...]
-  { bullish, bearish }             │        flow_speed   = newer_first - older_first
+  Cumulative per-ticker GEX totals │        flow_history = [(t0, net0), ...]
+  { Put Wall, Call Wall }          │        flow_speed   = newer_first - older_first
         │                          │        flow_speed_ratio = flow_diff / older_first
         ▼                          │                    │
   _snapshot_flow                   │                    │
