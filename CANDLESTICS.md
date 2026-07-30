@@ -85,8 +85,7 @@ load_candle_cache (parquet)                    ▼
 
 - Every 10s, `render_candlesticks` refreshes spots for all `ticker_history`
   tickers via `fetch_quotes` and pushes them to `atm_svc.update_ticker_spot`,
-  which keeps the ATM option subscription (Lee-Ready flow) aligned to the live
-  underlying.
+  which keeps the ATM option subscription aligned to the live underlying.
 - The same `StreamClient` connection is shared between the equity stream and
   the ATM option `AtmOptionVolumeService` (no second WebSocket).
 

@@ -145,6 +145,7 @@ def diff_alerts(
     prev: Optional[dict[str, Any]],
     analytics: dict[str, Any],
     spot: float,
+    options_book_data: Optional[dict[str, Any]] = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Pure diff of the previous per-symbol state vs the current analytics.
 
@@ -174,31 +175,25 @@ def diff_alerts(
     _WALL_ZONE_BUFFER = 0.0002  # 0.02 %
     pw = cur["put_wall"]
     cw = cur["call_wall"]
-    if pw is not None and spot <= pw + abs(pw) * _WALL_ZONE_BUFFER:
-        cur["wall_zone"] = "support"
-    elif cw is not None and spot >= cw - abs(cw) * _WALL_ZONE_BUFFER:
-        cur["wall_zone"] = "resistance"
+    wall_zone = pw if pw is not None else cw
+    cur["wall_zone"] = wall_zone
 
     if not prev:
         return [], cur
 
     new_alerts: list[str] = []
 
-    cw = cur["call_wall"]
-    pw = cur["put_wall"]
-    prev_zone = prev.get("wall_zone")
-    cur_zone = cur["wall_zone"]
-    if cur_zone == "support" and prev_zone != "support" and pw is not None:
-        new_alerts.append(f"🟢 Near Support ${pw:.2f}")
-        atm = cur.get("atm_strike")
-        if atm:
-            _call_price = analytics.get("put_wall_mark") or pw
-        new_alerts.append(f"Signal: BUY CALL ${_call_price:.2f}")
-    if cur_zone == "resistance" and prev_zone != "resistance" and cw is not None:
-        new_alerts.append(f"🔴 Near Resistance ${cw:.2f}")
-        atm = cur.get("atm_strike")
-        if atm:
-            _put_price = analytics.get("call_wall_mark") or cw
-            new_alerts.append(f"Signal: BUY PUT ${_put_price:.2f}")
+    if options_book_data:
+        trend = options_book_data.get("trend")
+        if trend:
+            book_imbalance = options_book_data.get("book_imbalance")
+            
+            # Check if options_book trend matches wall zone
+            if book_imbalance > 0.3 and trend == "up" and pw is not None:
+                if pw is not None and spot <= pw + abs(pw) * _WALL_ZONE_BUFFER:
+                    new_alerts.append(f"🟢 Options Book bullish (imbalance: {book_imbalance:.2f}) near Support ${pw:.2f}")
+            elif book_imbalance < -0.3 and trend == "down" and cw is not None:
+                if cw is not None and spot >= cw - abs(cw) * _WALL_ZONE_BUFFER:
+                    new_alerts.append(f"🔴 Options Book bearish (imbalance: {book_imbalance:.2f}) near Resistance ${cw:.2f}")
 
     return new_alerts, cur

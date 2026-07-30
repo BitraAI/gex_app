@@ -16,9 +16,10 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Trend** | Direction of net flow momentum over the last 60 seconds (see below). Enhanced indicators: **↑↑** (strong bullish with OPTIONS_BOOK), **↓↓** (strong bearish with OPTIONS_BOOK), **→→** (building bullish momentum), **←←** (building bearish momentum), **↑** (normal bullish), **↓** (normal bearish), **→** (balanced/flat). |
 | **Call Price** | Mid price of the ATM call option. |
 | **Put Price** | Mid price of the ATM put option. |
-| **Bullish Flow** | Cumulative option volume classified as bullish. |
-| **Bearish Flow** | Cumulative option volume classified as bearish. |
-| **Flow Momentum** | `(Bullish − Bearish) / (Bullish + Bearish)`. Ratio from -1 to 1. Green when positive, red when negative, grey when zero. |
+| **Support** | Put wall value (resistance level from Options data). |
+| **Resistance** | Call wall value (support level from Options data). |
+| **Book Imbalance** | Order book pressure: Positive → bullish, Negative → bearish. Range [-1, 1], updated every 10 trades with history for last 60 seconds. |
+| **Flow Speed** | Net momentum change (bullish - bearish volume) over last 30 seconds. Range [-2, 2], positive → accelerating bullish, negative → accelerating bearish. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -42,48 +43,58 @@ Market-hours detection lives in `flow.is_market_open()`.
 
 ### Trend
 
-Trend reflects the **direction of net-flow momentum** over the last 60 seconds,
-not the absolute level. It is computed in `AtmOptionVolumeService._snapshot_flow`
-(option_streaming_service.py:803-863) and exposed via `get_ticker_trend`.
+Trend reflects the **rate of change of net-flow momentum** over the last 60
+seconds, not the absolute level. It is computed in
+`AtmOptionVolumeService._snapshot_flow` and rendered in
+`flow.render_atm_order_flow_grid`.
+
+Note: Flow direction is derived from **net flow momentum** and **book imbalance** (latest 60s snapshots) — not from cumulative volume.
 
 How it works:
 
-1. Every ~10 trades (line 883 in option_streaming_service.py), a snapshot of
-   `(timestamp, net_flow)` is appended to a per-ticker `flow_history` list.
-2. Snapshots older than 60 seconds are pruned (line 811-816 in option_streaming_service.py).
-3. If fewer than 2 snapshots exist the trend is **flat** (line 820-826 in option_streaming_service.py). The `len(history) < 2` guard also resets `flow_speed` to 0.
-4. The history is split in half. The first points from each segment are extracted:
-   - `older_first = history[0][1]` (first point from entire history)
-   - `newer_first = history[-segment_size][1]` (first point from newer half)
-   - The difference `diff = newer_first - older_first` determines the trend
-   - `diff > 0` → **up** (green arrow)
-   - `diff < 0` → **down** (red arrow)
-   - `diff == 0` → **flat** (grey arrow)
-5. **Enhanced trend detection via book imbalance and trend reversal**:
-   - Compares `previous_trend` with `current_trend`
-   - If trend changed from **up → down**, sets `trend_reversal = "bearish"`
-   - If trend changed from **down → up**, sets `trend_reversal = "bullish"`
-   - Otherwise no reversal (`trend_reversal = None`)
-   - If `book_imbalance > 0.3` (strong bullish pressure), trend becomes **up**
-   - If `book_imbalance < -0.3` (strong bearish pressure), trend becomes **down**
-   - Strong book imbalance overrides the flow-diff trend determination
+1. **Snapshots** — every ~10 trades a `(timestamp, net)` snapshot is appended
+   to the per-ticker `flow_history`, where `net = bullish − bearish`. Snapshots
+   older than 60 seconds are pruned.
+2. **Cold-start guard** — if fewer than 2 snapshots exist the trend is
+   **flat** and `flow_speed` is 0.
+3. **Flow-momentum diff** — the history is split in half and the first point
+   of the newer half is compared with the first point of the entire history:
+   - `older_first = history[0][1]`
+   - `newer_first = history[-segment_size][1]`
+   - `flow_diff = newer_first − older_first`
+   - `flow_diff > 0` → base trend **up**
+   - `flow_diff < 0` → base trend **down**
+   - `flow_diff == 0` → base trend **flat**
+   - `flow_diff` is also stored as `ticker["flow_speed"]`.
+4. **Book-imbalance override** — `_calculate_book_imbalance()` is recorded on
+   every snapshot. If `|imbalance| > 0.3` (strong order-book pressure) it
+   overrides the flow-diff trend:
+   - `> +0.3` → force **up**
+   - `< −0.3` → force **down**
+5. **Reversal detection** — compared against the previous trend:
+   - **up → down** → `trend_reversal = "bearish"`
+   - **down → up** → `trend_reversal = "bullish"`
+   - otherwise → `trend_reversal = None`
 
-**Enhanced trend indicators** in the Trend column (flow.py:218-238):
+The final `trend` and `trend_reversal` are stored on the ticker and read by
+the grid.
+
+**Trend column display** — combines trend, book imbalance,
+and reversal into arrow glyphs:
 
 | Condition | Display |
 |-----------|---------|
-| **up** trend (bullish) | `↑` |
-| **down** trend (bearish) | `↓` |
-| **flat** trend (balanced) | `→` |
-| **bullish reversal** | `↑↑` (strong bullish with OPTIONS_BOOK) |
-| **bearish reversal** | `↓↓` (strong bearish with OPTIONS_BOOK) |
-| **building bullish momentum** | `→→` (momentum building) |
-| **building bearish momentum** | `←←` (momentum building) |
-
-The enhanced trend indicators incorporate OPTIONS_BOOK liquidity pressure:
-- **Strong bullish**: `↑↑` when book imbalance > 0.3
-- **Strong bearish**: `↓↓` when book imbalance < -0.3
-- **Neutral trends**: `↑`, `↓`, `→` for standard trend cases
+| Bullish book imbalance (`> 0.3`) + bullish reversal | `↑↑` (strong bullish) |
+| Bullish book imbalance (`> 0.3`) + trend `up` | `↑` (normal bullish) |
+| Bullish book imbalance (`> 0.3`) + trend not yet `up` | `→→` (building bullish momentum) |
+| Bearish book imbalance (`< −0.3`) + bearish reversal | `↓↓` (strong bearish) |
+| Bearish book imbalance (`< −0.3`) + trend `down` | `↓` (normal bearish) |
+| Bearish book imbalance (`< −0.3`) + trend not yet `down` | `←←` (building bearish momentum) |
+| No strong book imbalance + bullish reversal | `↑` |
+| No strong book imbalance + bearish reversal | `↓` |
+| No strong book imbalance + trend `up` | `↑` |
+| No strong book imbalance + trend `down` | `↓` |
+| No strong book imbalance + trend `flat` | `→` |
 
 
 ## Data pipeline
@@ -97,7 +108,7 @@ AtmOptionVolumeService (option_streaming_service.py)
     ticker_history.json, in a single Level-One Options subscription
   • maintains per-ticker flow in _ticker_flows[display_symbol]
         │
-        ▼  Lee-Ready direction inference (_infer_dir: price vs bid/ask mid)
+        ▼  Direction inference (_infer_dir: price vs bid/ask mid)
    CALL buy  -> Bullish     CALL sell -> Bearish
    PUT  sell -> Bullish     PUT  buy  -> Bearish
    (unknown spread -> split evenly)
@@ -141,11 +152,20 @@ automatically via `ensure_atm_streaming`.
 | File | Role |
 | --- | --- |
 | `flow.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. |
-| `option_streaming_service.py` | `AtmOptionVolumeService` — WebSocket handling, Lee-Ready classification, per-ticker flow. |
+| `option_streaming_service.py` | `AtmOptionVolumeService` — WebSocket handling, classification, per-ticker flow. |
 | `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. |
 | `client.py` | `fetch_quotes` — REST spot pre-fetch for all tickers. |
 
 ## Architecture: streaming & spot feeding
+
+### Index Symbol Spot Handling
+
+The updated ATM streaming service includes enhanced spot price handling for index symbols:
+
+- The `set_ticker_spot()` method now **triggers a re-subscription** when a ticker has no option subscriptions yet (`call_sym`/`put_sym` are `None`) and the service is running
+- This ensures index tickers like `$SPX`, `$RUT`, and `$NDX` gain their option symbols after `register()` wipes `_ticker_flows` or when the IndexSpotPoller delivers a fresh spot
+- For index symbols, actual spot prices are stored in the **display symbol** (`$SPX`, etc.) rather than the ETF proxy (`SPY`, `IWM`, `QQQ`) that is used for WebSocket streaming
+- The flow tracking uses the **original display symbol** as the key, with ETF-proxy remapping (`SPX→SPY`, `RUT→IWM`, `NDX→QQQ`) handled internally for the WebSocket subscription only
 
 ### Shared StreamClient
 
@@ -253,7 +273,7 @@ sets are not re-sent — re-sending identical subscription requests every
 ## Notes / limitations
 
 - Flow totals are **cumulative** for the session, not a rolling window.
-- Lee-Ready uses the option bid/ask mid as the trade-direction threshold. If
+- Uses the option bid/ask mid as the trade-direction threshold. If
   bid/ask has not yet arrived for an option, the trade is split evenly between
   bullish and bearish.
 - Each ticker uses its own per-ticker expiration (fetched lazily via

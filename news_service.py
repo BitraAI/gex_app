@@ -41,16 +41,6 @@ class NewsService:
     def get_all_news(self, max_items: int = 30) -> list[dict[str, Any]]:
         return self._articles[:max_items]
 
-    def get_new_alerts(self) -> list[str]:
-        """Return all unseen headlines as alerts."""
-        alerts: list[str] = []
-        for item in self._articles:
-            link = item.get("link", "")
-            if link not in self._seen:
-                alerts.append(item.get("title", ""))
-        self._seen.update(a.get("link", "") for a in self._articles)
-        return alerts
-
     async def poll(self, symbols: list[str]):
         """Poll RSS feeds for all tracked symbols.  Skips polling if
         less than ``POLL_INTERVAL`` seconds have passed since the last

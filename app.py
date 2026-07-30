@@ -16,6 +16,7 @@ from chart_component import render_chart
 from flow import (
     _ensure_async_loop,
     _ticker_analytics_cache,
+    _tte_from_dtes,
     _WALL_ZONE_ALERT_COOLDOWN,
     ensure_atm_streaming,
     render_flow_frag,
@@ -29,7 +30,7 @@ from calculations import (
     parse_option_chain,
     build_greeks_lookup,
 )
-from analytics import compute_analytics
+from analytics import _filter_strikes_near_atm, compute_analytics
 from signals import generate_recommendations, assess_market_bias
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import _get_style, _get_css
@@ -132,30 +133,6 @@ if not st.session_state.ticker_history:
     st.session_state.ticker_history = _load_ticker_history()
 
 st.markdown(_get_css(), unsafe_allow_html=True)
-
-# Replace streaming service if it was created with old code (no shared loop)
-if st.session_state.get("client") is not None:
-    loop = _ensure_async_loop()
-    old = st.session_state.get("streaming_service")
-    if old is None or getattr(old, '_loop', None) is None:
-        if old is not None:
-            old.stop()
-        st.session_state.streaming_service = StreamingService(st.session_state.client, loop)
-    atm_opt = st.session_state.get("atm_option_service")
-    if atm_opt is None or getattr(atm_opt, '_loop', None) is None:
-        if atm_opt is not None:
-            atm_opt.stop()
-        st.session_state.atm_option_service = AtmOptionVolumeService(st.session_state.client, loop)
-
-    poller = st.session_state.get("index_spot_poller")
-    if poller is None or getattr(poller, '_loop', None) is not loop:
-        if poller is not None:
-            poller.stop()
-        poller = IndexSpotPoller(st.session_state.client, loop)
-        st.session_state.index_spot_poller = poller
-    if not poller.is_running and st.session_state.get("atm_option_service"):
-        poller.update_tickers(list(st.session_state.get("ticker_history", [])))
-        poller.start(st.session_state.atm_option_service)
 
 
 def init_client():
@@ -403,20 +380,6 @@ def compute_state():
     ))
 
 
-def _compute_flow(atm_svc):
-    """Aggregate ATM option streaming into bullish/bearish flow totals."""
-    if atm_svc is None or not getattr(atm_svc, "is_running", False):
-        return None, None
-    try:
-        df = atm_svc.get_candles()
-        if df.empty:
-            return None, None
-        bullish = int(df["call_buy_vol"].sum() + df["put_sell_vol"].sum())
-        bearish = int(df["call_sell_vol"].sum() + df["put_buy_vol"].sum())
-        return bullish, bearish
-    except Exception:
-        return None, None
-
 
 def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime], rv: float = 0.0, iv_rank: float | None = None, iv_skew: float | None = None):
     col1, col2, col3, col4 = st.columns(4)
@@ -556,10 +519,10 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
     aks = sorted(set(e["strike"] for e in data))
     atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
     sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and (e.get("iv", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
-    sd2 = _filter_strikes_near_atm(sd, spot)
+    sd2 = _filter_strikes_near_atm(sd, spot, n=20)
     ssvi_surf = analytics.get("ssvi_surface")
     dtes = [e.get("dte", 0) for e in st.session_state.get("by_exp_all", [])]
-    ir_tte = _compute_ssvi_tte(dtes) if ssvi_surf and dtes else None
+    ir_tte = _tte_from_dtes(dtes) if ssvi_surf and dtes else None
     bias, _ = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))
     alerts = []
     recs = generate_recommendations(sd2, spot, strategy="All", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias)
@@ -572,35 +535,31 @@ def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]
 
 
 def check_alerts(analytics: dict, spot: float):
-    prev = st.session_state.prev_alerts_state
-    new_alerts, next_state = diff_alerts(prev, analytics, spot)
-    st.session_state.prev_alerts_state = next_state
+    s = st.session_state
+    prev = s.prev_alerts_state
+    
+    # Collect options book trend data for wall zone verification
+    atm_svc = s.get("atm_option_service")
+    options_book_check_data = None
+    if atm_svc is not None:
+        try:
+            current_sym = s.get("symbol", "").upper().lstrip("$")
+            trend_data = atm_svc.get_ticker_trend_data(current_sym)
+            if trend_data:
+                options_book_check_data = {
+                    "book_imbalance": trend_data.get("book_imbalance"),
+                    "trend": trend_data.get("trend"),
+                }
+        except Exception as e:
+            pass  # Use existing alerts if options_book data unavailable
+    
+    new_alerts, next_state = diff_alerts(prev, analytics, spot, options_book_check_data)
+    s.prev_alerts_state = next_state
 
-    rv = st.session_state.get("underlying_20d_rv", 0.0)
+    rv = s.get("underlying_20d_rv", 0.0)
     strat_alerts = _build_strategy_alerts(analytics, spot, rv) if rv > 0 else []
 
-    # Flow dominance alerts
-    flow_alerts = []
-    atm_svc = st.session_state.get("atm_option_service")
-    if atm_svc is not None and getattr(atm_svc, "is_running", False):
-        bf, brf = _compute_flow(atm_svc)
-        if bf is not None and brf is not None:
-            prev_flow = st.session_state.get("prev_flow_state")
-            cur_dominant = "bullish" if bf > brf else "bearish" if brf > bf else "neutral"
-            if prev_flow is not None:
-                prev_dominant = prev_flow.get("dominant", "neutral")
-                if prev_dominant != cur_dominant and cur_dominant != "neutral":
-                    flow_alerts.append(
-                        f"Flow flipped to {cur_dominant.upper()} — "
-                        f"Bullish: {bf:,} | Bearish: {brf:,}"
-                    )
-            st.session_state.prev_flow_state = {
-                "bullish": bf,
-                "bearish": brf,
-                "dominant": cur_dominant,
-            }
-
-    all_alerts = new_alerts + strat_alerts + flow_alerts
+    all_alerts = new_alerts + strat_alerts
 
     _last_alert_ts = st.session_state.get("_last_check_alert_ts", 0.0)
     _now = time.time()
@@ -1438,7 +1397,7 @@ def render_market_structure():
         else:
             from charts import create_dealer_gamma_curve
             dm = st.radio("Select", ["GEX", "VEX", "CEX"], horizontal=True, label_visibility="collapsed")
-            _dc_strikes = _filter_strikes_near_atm(strikes, s.spot)
+            _dc_strikes = _filter_strikes_near_atm(strikes, s.spot, n=20)
             fig = create_dealer_gamma_curve(_dc_strikes, s.spot, mode=dm.lower(), gamma_flip=s.analytics.get("gamma_flip"), call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), vex_magnet=s.analytics.get("vex_magnet"), vex_repellent=s.analytics.get("vex_repellent"))
             st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="dealer_curve_chart")
 
@@ -1467,7 +1426,7 @@ def render_positioning():
     if not raw_data:
         st.info("No positioning data available")
         return
-    raw_data = _filter_strikes_near_atm(raw_data, s.spot)
+    raw_data = _filter_strikes_near_atm(raw_data, s.spot, n=20)
     positioning_data = aggregate_by_strike(
         raw_data, s.spot, show_calls=s.show_calls, show_puts=s.show_puts
     )
@@ -1560,9 +1519,9 @@ def render_volatility():
         raw = [e for e in s.data if e["expiration"] in se] if se else list(s.data)
         if not s.get("show_itm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
         if not s.get("show_otm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
-        raw = _filter_strikes_near_atm(raw, s.spot)
+        raw = _filter_strikes_near_atm(raw, s.spot, n=20)
         vk = aggregate_by_strike(raw, s.spot, show_calls=s.show_calls, show_puts=s.show_puts)
-        _ssvi_tte = _compute_ssvi_tte([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
+        _ssvi_tte = _tte_from_dtes([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
         if tm == "IV":
             if vk:
                 st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=s.get("iv_rank"), ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
@@ -1619,7 +1578,7 @@ def render_heatmaps():
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_oi_slider")
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
-            fl = _filter_strikes_near_atm(fl, s.spot)
+            fl = _filter_strikes_near_atm(fl, s.spot, n=20)
             otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
             fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_oi_chart")
@@ -1630,7 +1589,7 @@ def render_heatmaps():
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_v_slider")
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
-            fl = _filter_strikes_near_atm(fl, s.spot)
+            fl = _filter_strikes_near_atm(fl, s.spot, n=20)
             otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
             fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_v_chart")
@@ -1641,14 +1600,14 @@ def render_heatmaps():
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_ir_slider")
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             vd = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
-            vd = _filter_strikes_near_atm(vd, s.spot)
+            vd = _filter_strikes_near_atm(vd, s.spot, n=20)
             smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
             _ssvi = None
             try:
                 _ssvi = s.analytics.get("ssvi_surface")
             except Exception:
                 pass
-            _ssvi_tte = _compute_ssvi_tte([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi is not None and s.get("by_exp_all") else None
+            _ssvi_tte = _tte_from_dtes([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi is not None and s.get("by_exp_all") else None
             if _ssvi is not None and _ssvi_tte is not None:
                 fig = create_vol_surface_2d(vd, 0, smi, sma, s.spot, mode="iv_richness", ssvi_surface=_ssvi, ssvi_tte=_ssvi_tte)
                 st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_ir_chart")
@@ -1841,7 +1800,7 @@ def _build_signals(
         _rec_stg = "Long Calls"
 
     _ssvi_surf = analytics.get("ssvi_surface")
-    _ir_tte = _compute_ssvi_tte([e.get("dte", 0) for e in by_exp_all]) if (_ssvi_surf is not None and by_exp_all) else None
+    _ir_tte = _tte_from_dtes([e.get("dte", 0) for e in by_exp_all]) if (_ssvi_surf is not None and by_exp_all) else None
 
     if stg in ("Long Calls", "Long Puts", "Call Debit Spread", "Put Debit Spread"):
         sd2 = [e for e in sd2 if e["type"] == "CALL"] if "Call" in stg else [e for e in sd2 if e["type"] == "PUT"]
@@ -1998,33 +1957,6 @@ def render_options_data():
         except Exception as e:
             st.error(f"Error loading options table: {e}")
 
-def _filter_strikes_near_atm(data: list[dict], spot: float, n: int = 20) -> list[dict]:
-    """Filter strikes to n strikes below, ATM strike, and n strikes above (price-based)."""
-    strikes = sorted(set(e["strike"] for e in data))
-    
-    if not strikes:
-        return []
-    
-    # Find ATM strike (closest to spot)
-    atm_strike = min(strikes, key=lambda k: abs(k - spot))
-    
-    # Get strikes below ATM, sorted by distance (closest first)
-    below_strikes = [s for s in strikes if s < atm_strike]
-    below_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
-    
-    # Get strikes above ATM, sorted by distance (closest first)
-    above_strikes = [s for s in strikes if s > atm_strike]
-    above_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
-    
-    # Select exactly n strikes below and n strikes above
-    # If there are fewer available strikes than n, use all available strikes
-    selected_below = below_strikes[:n]
-    selected_above = above_strikes[:n]
-    
-    # Combine: exactly n strikes below + ATM strike + exactly n strikes above (in this order)
-    selected_strikes = selected_below + [atm_strike] + selected_above
-    
-    return [e for e in data if e["strike"] in selected_strikes]
 
 def _get_filtered_data_for_walls(data: list[dict], selected_expirations: list[str] | None) -> list[dict]:
     """Get filtered data for wall calculations, matching charts behavior.
@@ -2059,16 +1991,6 @@ def _get_filtered_data_for_walls(data: list[dict], selected_expirations: list[st
     # Apply the _filter_strikes_near_atm filter to get all required strikes
     return _filter_strikes_near_atm(filtered, spot, n=20)
 
-def _compute_ssvi_tte(dtes: list[int]) -> float | None:
-    valid = [d for d in dtes if d > 0]
-    if not valid:
-        return None
-    _ny = ZoneInfo("America/New_York")
-    _ny_now = datetime.now(_ny)
-    _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
-    _secs_since_930 = max(0, min(_secs_since_930, 23400))
-    _secs_left = 23400 - _secs_since_930
-    return (min(valid) + _secs_left / 23400) / 365.0
 
 def render_table():
     st.markdown("#### Options Data")
@@ -2115,7 +2037,7 @@ def render_table():
     tte = None
     if ssvi_surf is not None and st.session_state.get("by_exp_all"):
         dtes = [e.get("dte", 0) for e in st.session_state.by_exp_all if e.get("dte", 0) > 0]
-        tte = _compute_ssvi_tte(dtes)
+        tte = _tte_from_dtes(dtes)
     if ssvi_surf is not None and tte is not None:
         df["SSVI IV"] = [ssvi_surf.iv(float(k), float(tte)) for k in df["Strike"]]
         df["IV (pp)"] = df["IV"] - df["SSVI IV"]
