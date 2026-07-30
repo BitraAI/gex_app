@@ -162,11 +162,16 @@ def generate_recommendations(
                         recs.append(f"No OTM calls with delta 0.35-0.55 in {best_exp[-5:]}.")
                     else:
                         best = min(best_exp_candidates, key=_rich)
-                        recs.append(
-                            f"**Buy CALL @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
-                            f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
-                            f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
-                        )
+                        if _rich(best) >= -0.015:
+                            recs.append(
+                                f"IV (pp) {_rich(best) * 100:+.2f}% — not cheap enough; skip Long Calls."
+                            )
+                        else:
+                            recs.append(
+                                f"**Buy CALL @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                                f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
+                                f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
+                            )
 
     if strategy in ("Long Puts",):
         if not bias or bias != "Bearish":
@@ -197,11 +202,16 @@ def generate_recommendations(
                         recs.append(f"No OTM puts with delta 0.35-0.55 in {best_exp[-5:]}.")
                     else:
                         best = min(best_exp_candidates, key=_rich)
-                        recs.append(
-                            f"**Buy PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
-                            f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
-                            f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
-                        )
+                        if _rich(best) >= -0.015:
+                            recs.append(
+                                f"IV (pp) {_rich(best) * 100:+.2f}% — not cheap enough; skip Long Puts."
+                            )
+                        else:
+                            recs.append(
+                                f"**Buy PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                                f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
+                                f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
+                            )
 
     if strategy in ("Short Calls",):
         if not bias or bias != "Bearish":
@@ -232,11 +242,16 @@ def generate_recommendations(
                         recs.append(f"No OTM calls with delta 0.15-0.20 in {best_exp[-5:]}.")
                     else:
                         best = max(best_exp_candidates, key=_rich)
-                        recs.append(
-                            f"**Sell CALL @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
-                            f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
-                            f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
-                        )
+                        if _rich(best) <= 0.015:
+                            recs.append(
+                                f"IV (pp) {_rich(best) * 100:+.2f}% — not rich enough; skip Short Calls."
+                            )
+                        else:
+                            recs.append(
+                                f"**Sell CALL @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                                f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
+                                f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
+                            )
 
     if strategy in ("Short Puts",):
         if not bias or bias != "Bullish":
@@ -267,11 +282,16 @@ def generate_recommendations(
                         recs.append(f"No OTM puts with delta 0.15-0.20 in {best_exp[-5:]}.")
                     else:
                         best = max(best_exp_candidates, key=_rich)
-                        recs.append(
-                            f"**Sell PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
-                            f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
-                            f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
-                        )
+                        if _rich(best) <= 0.015:
+                            recs.append(
+                                f"IV (pp) {_rich(best) * 100:+.2f}% — not rich enough; skip Short Puts."
+                            )
+                        else:
+                            recs.append(
+                                f"**Sell PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                                f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
+                                f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
+                            )
 
     if strategy in ("Call Debit Spread",):
         calls = sorted(

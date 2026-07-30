@@ -84,13 +84,13 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 ### Installation
 
 ```bash
-$ python3 -m venv gex_env
+$ python3 -m venv gex_venv
 $ source gex_env/bin/activate
-(gex_env) $ python -m pip install -U pip
-(gex_env) $ python -m pip install -U uv
-(gex_env) $ git clone https://github.com/BitraAI/gex_app.git
-(gex_env) $ cd gex_app
-(gex_env) $ uv pip install -r requirements.txt
+(gex_venv) $ python -m pip install -U pip
+(gex_venv) $ python -m pip install -U uv
+(gex_venv) $ git clone https://github.com/BitraAI/gex_app.git
+(gex_venv) $ cd gex_app
+(gex_venv) $ uv pip install -r requirements.txt
 ```
 
 ### Create a Schwab Developer Portal Account
@@ -184,7 +184,7 @@ The alert types fired are identical to the in-app `check_alerts` flow — both p
 Run the auth script to perform the OAuth browser flow and save a token:
 
 ```bash
-(gex_env) $ uv run schwab_auth.py
+(gex_venv) $ uv run schwab_auth.py
 ```
 
 This opens a browser for Schwab login. The token is automatically refreshed by the client library.
@@ -206,13 +206,13 @@ This opens a browser for Schwab login. The token is automatically refreshed by t
 ### Running
 
 ```bash
-(gex_env) $ ./run.sh
+(gex_venv) $ ./run.sh
 ```
 
 Or directly:
 
 ```bash
-(gex_env) $ uv run streamlit run app.py
+(gex_venv) $ uv run streamlit run app.py
 ```
 
 The app will be available at `http://localhost:8501`.

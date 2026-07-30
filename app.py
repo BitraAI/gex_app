@@ -1580,7 +1580,7 @@ def render_volatility():
                 cols = st.columns(len(legend_items) + 2)
                 cols[0].markdown(
                     '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                    '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Cheap</span></div>',
+                    '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Buy Premium</span></div>',
                     unsafe_allow_html=True,
                 )
                 for ci, (color, label) in zip(cols[1:-1], legend_items):
@@ -1592,7 +1592,7 @@ def render_volatility():
                     )
                 cols[-1].markdown(
                     '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                    '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Expensive</span></div>',
+                    '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
                     unsafe_allow_html=True,
                 )
                 st.plotly_chart(create_iv_richness_by_strike(vk, s.spot, _ssvi_surf, _ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_by_strike")
