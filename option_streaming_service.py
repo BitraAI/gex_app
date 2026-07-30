@@ -641,8 +641,11 @@ class AtmOptionVolumeService:
         """Set the spot price for a tracked ticker and recalculate its ATM
         strike.  Used for index symbols (SPX, RUT, NDX) whose actual spot
         differs from the ETF proxy (SPY, IWM, QQQ) used for streaming.
-        Does NOT trigger a re-subscribe — index tickers share the ETF
-        proxy's option subscription.
+
+        Triggers a re-subscribe when the ticker has no option subscriptions
+        yet (call_sym/put_sym are None) and the service is running, so that
+        index tickers gain their option symbols after register() wipes
+        _ticker_flows or when the IndexSpotPoller delivers a fresh spot.
 
         If the ticker has no entry in _ticker_flows yet (e.g. the
         IndexSpotPoller runs before ensure_atm_streaming has initialised
@@ -650,6 +653,7 @@ class AtmOptionVolumeService:
         never silently dropped."""
         if not spot or spot <= 0:
             return
+        sc = None
         with self._lock:
             ticker = self._find_ticker_entry(display_symbol)
             if ticker is None:
@@ -675,23 +679,32 @@ class AtmOptionVolumeService:
                     "trend": "flat",
                 }
                 self._spot_changed = True
-                return
-            old = ticker["spot"]
-            ticker["spot"] = spot
-            # Only recalc ATM strike when the spot has moved by at least
-            # half a strike increment from the last reference price.
-            _last_ref = ticker.get("last_atm_reference", old)
-            _spacing = get_strike_spacing(spot)
-            if abs(spot - _last_ref) >= _spacing / 2:
-                old_atm = ticker.get("atm_strike")
-                new_atm = calculate_atm_strike(spot)
-                ticker["atm_strike"] = new_atm
-                ticker["last_atm_reference"] = spot
-                self._maybe_invalidate_walls_on_strike_change(
-                    display_symbol, old_atm, new_atm,
-                )
-            if abs(spot - old) / max(old, 1) > 0.001:
-                self._spot_changed = True
+                if self._running and self._expiration:
+                    sc = self._stream_client
+            else:
+                old = ticker["spot"]
+                ticker["spot"] = spot
+                # Only recalc ATM strike when the spot has moved by at least
+                # half a strike increment from the last reference price.
+                _last_ref = ticker.get("last_atm_reference", old)
+                _spacing = get_strike_spacing(spot)
+                if abs(spot - _last_ref) >= _spacing / 2:
+                    old_atm = ticker.get("atm_strike")
+                    new_atm = calculate_atm_strike(spot)
+                    ticker["atm_strike"] = new_atm
+                    ticker["last_atm_reference"] = spot
+                    self._maybe_invalidate_walls_on_strike_change(
+                        display_symbol, old_atm, new_atm,
+                    )
+                if abs(spot - old) / max(old, 1) > 0.001:
+                    self._spot_changed = True
+                if (ticker["call_sym"] is None or ticker["put_sym"] is None) and \
+                   self._running and self._expiration:
+                    sc = self._stream_client
+        if sc is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._do_subscribe(sc), self._loop,
+            )
 
     def get_ticker_put_wall(self, display_symbol: str) -> float | None:
         with self._lock:

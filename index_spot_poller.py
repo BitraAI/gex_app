@@ -10,7 +10,7 @@ grid and the main chart display.
 
 import asyncio
 import logging
-from typing import Any, List
+from typing import Any, Dict, List
 
 from client import fetch_quotes
 from _constants import INDEX_QUOTE_MAP
@@ -130,8 +130,16 @@ class IndexSpotPoller:
                     continue
                     
                 try:
-                    # Fetch quotes via REST API
-                    idx_resp = await fetch_quotes(self._client, index_syms_to_fetch)
+                    MAX_RETRIES = 3
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            idx_resp = await fetch_quotes(self._client, index_syms_to_fetch)
+                            break
+                        except Exception:
+                            if attempt < MAX_RETRIES - 1:
+                                await asyncio.sleep(1.0)
+                            else:
+                                raise
                     
                     self._last_poll_time = current_time
                     self._last_quotes = idx_resp

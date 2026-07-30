@@ -184,39 +184,21 @@ def diff_alerts(
 
     new_alerts: list[str] = []
 
-    gf = cur["gamma_flip"]
-    prev_gf = prev.get("gamma_flip")
-    if gf != prev_gf and prev_gf is not None and gf is not None:
-        new_alerts.append(f"Gamma Flip changed: ${prev_gf:.2f} → ${gf:.2f}")
-
     cw = cur["call_wall"]
-    prev_cw = prev.get("call_wall")
-    if cw != prev_cw and prev_cw is not None and cw is not None:
-        new_alerts.append(f"Call Wall changed: ${prev_cw:.2f} → ${cw:.2f}")
-
     pw = cur["put_wall"]
-    prev_pw = prev.get("put_wall")
-    if pw != prev_pw and prev_pw is not None and pw is not None:
-        new_alerts.append(f"Put Wall changed: ${prev_pw:.2f} → ${pw:.2f}")
-
-    dp = cur["dealer_position"]
-    prev_dp = prev.get("dealer_position")
-    if prev_dp == "Long Gamma" and dp == "Short Gamma":
-        new_alerts.append("Dealer flipped from Long Gamma to Short Gamma")
-    elif prev_dp == "Short Gamma" and dp == "Long Gamma":
-        new_alerts.append("Dealer flipped from Short Gamma to Long Gamma")
-
     prev_zone = prev.get("wall_zone")
     cur_zone = cur["wall_zone"]
     if cur_zone == "support" and prev_zone != "support" and pw is not None:
-        new_alerts.append(f"🟢 Near Support")
+        new_alerts.append(f"🟢 Near Support ${pw:.2f}")
         atm = cur.get("atm_strike")
         if atm:
-            new_alerts.append(f"Signal: BUY CALL ${pw:.2f}")
+            _call_price = analytics.get("put_wall_mark") or pw
+        new_alerts.append(f"Signal: BUY CALL ${_call_price:.2f}")
     if cur_zone == "resistance" and prev_zone != "resistance" and cw is not None:
-        new_alerts.append(f"🔴 Near Resistance")
+        new_alerts.append(f"🔴 Near Resistance ${cw:.2f}")
         atm = cur.get("atm_strike")
         if atm:
-            new_alerts.append(f"Signal: BUY PUT ${cw:.2f}")
+            _put_price = analytics.get("call_wall_mark") or cw
+            new_alerts.append(f"Signal: BUY PUT ${_put_price:.2f}")
 
     return new_alerts, cur

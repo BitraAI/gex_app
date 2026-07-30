@@ -12,6 +12,25 @@ from svi import skew_for_tte as ssvi_skew_for_tte
 logger = logging.getLogger(__name__)
 
 
+def _filter_active_expirations(data: list[dict[str, Any]], max_exp: int = 4) -> list[dict[str, Any]]:
+    exp_info: dict[str, dict] = {}
+    for e in data:
+        exp = e.get("expiration")
+        if not exp:
+            continue
+        if exp not in exp_info:
+            exp_info[exp] = {"dte": e.get("days_to_exp", 999), "active": False}
+        if e.get("open_interest", 0) > 0 or e.get("volume", 0) > 0:
+            exp_info[exp]["active"] = True
+    active = sorted(
+        [exp for exp, info in exp_info.items() if info["active"]],
+        key=lambda e: exp_info[e]["dte"],
+    )
+    keep = set(active[:max_exp])
+    result = [e for e in data if e.get("expiration") in keep]
+    return result if result else data
+
+
 def _filter_strikes_near_atm(data: list[dict[str, Any]], spot: float, n: int = 20) -> list[dict[str, Any]]:
     """Filter strikes to n strikes below, ATM strike, and n strikes above (price-based)."""
     strikes = sorted(set(e["strike"] for e in data))
@@ -99,9 +118,12 @@ def compute_analytics(
     expiration: str | None = None,
     filter_strikes_to_chart_range: bool = False,
 ) -> dict[str, Any]:
-    # For wall calculations in ATM Order Flow, use the same 41 strikes as charts
-    if filter_strikes_to_chart_range:
-        data = _filter_strikes_near_atm(data, spot)
+    # Preserve full chain for SSVI/IV skew before filtering
+    _full = data_full if data_full is not None else data
+
+    # GEX / walls: nearest 4 active expirations, ±20 strikes around ATM
+    data = _filter_active_expirations(data, max_exp=4)
+    data = _filter_strikes_near_atm(data, spot, n=20)
 
     strikes = aggregate_by_strike(data, spot, show_calls=show_calls, show_puts=show_puts)
     by_exp = aggregate_by_expiration(data, show_calls=show_calls, show_puts=show_puts, spot=spot)
@@ -117,6 +139,11 @@ def compute_analytics(
     put_wall = _find_put_wall(strikes, spot)
     analytics["call_wall"] = call_wall
     analytics["put_wall"] = put_wall
+
+    _call_wall_opts = [e for e in data if e["strike"] == call_wall and e["type"] == "CALL"] if call_wall else []
+    _put_wall_opts = [e for e in data if e["strike"] == put_wall and e["type"] == "PUT"] if put_wall else []
+    analytics["call_wall_mark"] = min(_call_wall_opts, key=lambda e: e.get("days_to_exp", 999)).get("mark") if _call_wall_opts else None
+    analytics["put_wall_mark"] = min(_put_wall_opts, key=lambda e: e.get("days_to_exp", 999)).get("mark") if _put_wall_opts else None
 
     atm_strike = min(strikes, key=lambda s: abs(s["strike"] - spot))["strike"] if strikes else None
     analytics["atm_strike"] = atm_strike
@@ -146,7 +173,7 @@ def compute_analytics(
     # Calibrated on the unfiltered chain (``data_full``) when available,
     # so the surface sees as many OTM quotes as possible across expirations.
     try:
-        ssvi_res = calibrate_ssvi(data_full if data_full else data, spot, r=r, q=q)
+        ssvi_res = calibrate_ssvi(_full, spot, r=r, q=q)
         analytics["ssvi_surface"] = ssvi_res["surface"]
         analytics["ssvi_skew"] = ssvi_res["skew"]
         if analytics.get("atm_iv") is None and ssvi_res["atm_iv"] is not None:
@@ -158,24 +185,23 @@ def compute_analytics(
 
     # Compute the skew on the full (untruncated) chain so every strike for the
     # selected expiration is available — ``data`` may be ATM-range limited.
-    _skew_src = data_full if data_full else data
-    iv_skew_result = _calculate_iv_skew(_skew_src, spot, expiration=expiration)
+    iv_skew_result = _calculate_iv_skew(_full, spot, expiration=expiration)
     if isinstance(iv_skew_result, dict):
         analytics["iv_skew"] = iv_skew_result["iv_skew"]
         analytics["put_iv_25d"] = iv_skew_result["put_iv_25d"]
         analytics["call_iv_25d"] = iv_skew_result["call_iv_25d"]
-        analytics["atm_iv"] = iv_skew_result["atm_iv"]
+        if iv_skew_result["atm_iv"] is not None:
+            analytics["atm_iv"] = iv_skew_result["atm_iv"]
     else:
         analytics["iv_skew"] = None
         analytics["put_iv_25d"] = None
         analytics["call_iv_25d"] = None
-        analytics["atm_iv"] = None
 
     # Fall back to the SSVI-smoothed 25Δ skew for the selected expiration when
     # the market chain lacks usable OTM put/call quotes (e.g. LEAPS or weekly
     # expirations with strikes only on one side of spot, or no 25Δ quote).
     if analytics.get("iv_skew") is None and expiration:
-        _exp_rows = [e for e in _skew_src if e.get("expiration") == expiration]
+        _exp_rows = [e for e in _full if e.get("expiration") == expiration]
         _tte = None
         for e in _exp_rows:
             dte = e.get("days_to_exp") or e.get("dte")
@@ -191,7 +217,7 @@ def compute_analytics(
     # SSVI is unavailable, use the front expiration's market skew so the metric
     # never shows N/A when any expiration in the chain carries a valid skew.
     if analytics.get("iv_skew") is None:
-        _front = _calculate_iv_skew(_skew_src, spot)
+        _front = _calculate_iv_skew(_full, spot)
         if isinstance(_front, dict) and _front.get("iv_skew") is not None:
             analytics["iv_skew"] = _front["iv_skew"]
 
