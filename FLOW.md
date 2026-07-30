@@ -100,29 +100,25 @@ and reversal into arrow glyphs:
 ## Data pipeline
 
 ```
-Schwab WebSocket (LEVELONE_OPTIONS + LEVEL2)
-        │
-        ├──────────────────────────────────────────┐
-        ▼                                          ▼
-  LEVEL1 trades                            LEVEL2 order book
-  (_process_trade_ticker)                 (_calculate_book_imbalance)
-  price vs bid/ask mid                    (bid_size - ask_size)
-  → buy/sell                              ────────────────────
-  → bullish/bearish totals                 (bid_size + ask_size)
-        │                                          │
-        ▼                                          │
-  Cumulative per-ticker totals                     │
-  { bullish, bearish }                             │
-        │                                          │
-        ▼  Snapshot every ~10 trades               │
-  flow_history = [(t0, net0), ...]                 │
-  flow_diff    = newer_first - older_first          │
-  flow_speed   = flow_diff                         │
-  flow_speed_ratio = flow_diff / older_first       │
-        │                                          │
-        ▼  Combined in _snapshot_flow              │
-  book_imbalance + flow_momentum → trend + reversal│
-        ◄──────────────────────────────────────────┘
+Schwab WebSocket (LEVEL1 + LEVEL2)              Research feed (REST)
+        │                                               │
+        ├──────────────────────────┐                    │
+        ▼                          ▼                    │
+  LEVEL1 trades              LEVEL2 order book          │
+  (_process_trade_ticker)   (_calculate_book_imbalance) │
+  price vs bid/ask mid      (bid_size - ask_size)       │
+  → buy/sell                ────────────────────        │
+  → bullish/bearish totals   (bid_size + ask_size)      │
+        │                          │                    │
+        ▼                          │                    ▼
+  Cumulative per-ticker totals     │        flow_history = [(t0, net0), ...]
+  { bullish, bearish }             │        flow_speed   = newer_first - older_first
+        │                          │        flow_speed_ratio = flow_diff / older_first
+        ▼                          │                    │
+  _snapshot_flow                   │                    │
+  book_imbalance + flow_momentum   ◄────────────────────┘
+  → trend + reversal               │
+        ◄──────────────────────────┘
         │
         ▼
 flow_cache (st.session_state)  — updated by update_flow_cache()
