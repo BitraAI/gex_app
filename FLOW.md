@@ -100,21 +100,29 @@ and reversal into arrow glyphs:
 ## Data pipeline
 
 ```
-Schwab WebSocket (LEVELONE_OPTIONS)
+Schwab WebSocket (LEVELONE_OPTIONS + LEVEL2)
         │
-        ▼
-AtmOptionVolumeService (option_streaming_service.py)
-  • subscribes to front-expiration ATM call/put for EVERY ticker in
-    ticker_history.json, in a single Level-One Options subscription
-  • maintains per-ticker flow in _ticker_flows[display_symbol]
-        │
-        ▼  Direction inference (_infer_dir: price vs bid/ask mid)
-   CALL buy  -> Bullish     CALL sell -> Bearish
-   PUT  sell -> Bullish     PUT  buy  -> Bearish
-   (unknown spread -> split evenly)
-        │
-        ▼  cumulative per-ticker totals (thread-safe, self._lock)
-   flow[symbol] = { bullish, bearish }
+        ├──────────────────────────────────────────┐
+        ▼                                          ▼
+  LEVEL1 trades                            LEVEL2 order book
+  (_process_trade_ticker)                 (_calculate_book_imbalance)
+  price vs bid/ask mid                    (bid_size - ask_size)
+  → buy/sell                              ────────────────────
+  → bullish/bearish totals                 (bid_size + ask_size)
+        │                                          │
+        ▼                                          │
+  Cumulative per-ticker totals                     │
+  { bullish, bearish }                             │
+        │                                          │
+        ▼  Snapshot every ~10 trades               │
+  flow_history = [(t0, net0), ...]                 │
+  flow_diff    = newer_first - older_first          │
+  flow_speed   = flow_diff                         │
+  flow_speed_ratio = flow_diff / older_first       │
+        │                                          │
+        ▼  Combined in _snapshot_flow              │
+  book_imbalance + flow_momentum → trend + reversal│
+        ◄──────────────────────────────────────────┘
         │
         ▼
 flow_cache (st.session_state)  — updated by update_flow_cache()
