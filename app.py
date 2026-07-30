@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -14,6 +15,8 @@ from option_streaming_service import AtmOptionVolumeService
 from chart_component import render_chart
 from flow import (
     _ensure_async_loop,
+    _ticker_analytics_cache,
+    _WALL_ZONE_ALERT_COOLDOWN,
     ensure_atm_streaming,
     render_flow_frag,
     run_async,
@@ -213,8 +216,6 @@ def fetch_data(symbol: str) -> bool:
     _sym = symbol.upper().lstrip("$")
     is_index_symbol = _sym in STREAM_SYMBOL_MAP
 
-    is_index_symbol = _sym in STREAM_SYMBOL_MAP
-
     raw = None
     try:
         raw = run_async(
@@ -304,9 +305,15 @@ def fetch_data(symbol: str) -> bool:
     if etf_analytics and st.session_state.analytics.get("ssvi_surface") is None:
         st.session_state.analytics["ssvi_surface"] = etf_analytics.get("ssvi_surface")
         st.session_state.analytics["ssvi_skew"] = etf_analytics.get("ssvi_skew")
-        if st.session_state.analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
-            st.session_state.analytics["atm_iv"] = etf_analytics["atm_iv"]
+    if etf_analytics and st.session_state.analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
+        st.session_state.analytics["atm_iv"] = etf_analytics["atm_iv"]
     st.session_state.iv_rank = compute_iv_rank(symbol)
+    _ticker_analytics_cache[_sym] = {
+        "net_gex": st.session_state.analytics.get("net_gex"),
+        "atm_iv": st.session_state.analytics.get("atm_iv"),
+        "rv": st.session_state.get("underlying_20d_rv", 0.0),
+        "iv_rank": st.session_state.iv_rank,
+    }
     check_alerts(st.session_state.analytics, spot)
     return True
 
@@ -595,7 +602,10 @@ def check_alerts(analytics: dict, spot: float):
 
     all_alerts = new_alerts + strat_alerts + flow_alerts
 
-    if all_alerts:
+    _last_alert_ts = st.session_state.get("_last_check_alert_ts", 0.0)
+    _now = time.time()
+    if all_alerts and _now - _last_alert_ts >= _WALL_ZONE_ALERT_COOLDOWN:
+        st.session_state._last_check_alert_ts = _now
         st.session_state.alerts = all_alerts + st.session_state.alerts[:20]
         tg_alerts = [a for a in all_alerts if "Wall changed" not in a]
         if tg_alerts:
@@ -607,6 +617,7 @@ def check_alerts(analytics: dict, spot: float):
                 spot=spot,
                 gex=analytics.get("net_gex"),
                 vrp=vrp,
+                iv_rank=st.session_state.get("iv_rank"),
             )
 
 
@@ -923,15 +934,6 @@ def render_candlesticks_frag():
                 _stream_symbols = [STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$")) for t in _all_tickers]
                 try:
                     from client import fetch_quotes
-                    _idx_fetch = []
-                    _idx_disp_map = {}
-                    for _t in _all_tickers:
-                        _t_upper = _t.upper().lstrip("$")
-                        if _t_upper in INDEX_QUOTE_MAP:
-                            _iq = INDEX_QUOTE_MAP[_t_upper]
-                            _idx_fetch.append(_iq)
-                            _idx_disp_map[_iq] = _t_upper
-
                     quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                     for disp_sym, stream_sym in zip(_all_tickers, _stream_symbols):
                         _disp_upper = disp_sym.upper().lstrip("$")
@@ -947,6 +949,14 @@ def render_candlesticks_frag():
                             atm_svc.update_ticker_spot(_disp_upper, spot)
 
                     # Fetch actual index quotes for SPX, RUT, NDX
+                    _idx_fetch = []
+                    _idx_disp_map = {}
+                    for _t in _all_tickers:
+                        _t_upper = _t.upper().lstrip("$")
+                        if _t_upper in INDEX_QUOTE_MAP:
+                            _iq = INDEX_QUOTE_MAP[_t_upper]
+                            _idx_fetch.append(_iq)
+                            _idx_disp_map[_iq] = _t_upper
                     if _idx_fetch:
                         try:
                             idx_resp = run_async(fetch_quotes(s.client, _idx_fetch))
@@ -1167,7 +1177,6 @@ def render_candlesticks_frag():
         # candlesticks update like equities.  Index symbols cannot be streamed
         # via the equity WebSocket (Schwab only supports LEVELONE_EQUITIES for
         # real equities, not indices), so we fall back to REST polling ---- #
-        INDEX_SYMBOLS = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP", "VIX", "VIXW"}
         _sym_norm_idx = symbol.upper().lstrip("$")
         if _sym_norm_idx in INDEX_SYMBOLS and not chart_df.empty:
             try:
@@ -1383,7 +1392,6 @@ def render_metrics_frag():
     # For index symbols (SPX, RUT, NDX) the stream subscribes to the
     # ETF proxy (SPY, IWM, QQQ) which has a completely different price
     # scale — never use the ETF's live price as the index spot.
-    INDEX_SYMBOLS = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP"}
     _sym = s.get("symbol", "").upper().lstrip("$")
     live = None
     if _sym not in INDEX_SYMBOLS:
