@@ -1210,6 +1210,7 @@ class AtmOptionVolumeService:
 
         # Store flow speed for UI display
         ticker["flow_speed"] = flow_diff
+        ticker["flow_speed_ratio"] = flow_diff / older_first if older_first != 0 else 0.0
 
         # Determine base trend from flow momentum
         if flow_diff > 0:
