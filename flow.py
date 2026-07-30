@@ -888,7 +888,8 @@ def render_atm_order_flow_grid():
                     trend = ticker_data["trend"]
                     book_imbalance = ticker_data["book_imbalance"]
                     trend_reversal = ticker_data["trend_reversal"]
-                    flow_speed = ticker_data["flow_speed"]
+                    flow_speed = ticker_data.get("flow_speed", 0)
+                    flow_speed_ratio = ticker_data.get("flow_speed_ratio", 0.0)
             
             # Enhanced trend display with enhanced indicators based on book imbalance, trend reversal, trend and flow speed
             # Keep visual indicators without emojis
@@ -965,7 +966,7 @@ def render_atm_order_flow_grid():
                 "Put Price": opt_prices.get("put_price"),
                 "Trend": trend_display,
                 "Book Imbalance": book_imbalance,
-                "Flow Speed": flow_speed,
+                "Flow Speed Ratio": flow_speed_ratio,
             })
 
     if not rows:
@@ -983,7 +984,7 @@ def render_atm_order_flow_grid():
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
-         r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"])
+          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed Ratio"])
         for r in rows
     )
     data_hash = hash((data_key, _atm_epoch, _wall_epoch))
@@ -1025,13 +1026,12 @@ def render_atm_order_flow_grid():
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
-    def _flow_speed_color(val):
-        """Color the flow speed value based on magnitude."""
+    def _flow_speed_ratio_color(val):
         if val is None:
             return ""
-        if val > 1.0:
+        if val > 20:
             return "color: #00cc96; font-weight: bold;"
-        if val < -1.0:
+        if val < -20:
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
@@ -1058,11 +1058,11 @@ def render_atm_order_flow_grid():
     if hasattr(_styler, "map"):
         _styler = _styler.map(_trend_color, subset=["Trend"])
         _styler = _styler.map(_book_imbalance_color, subset=["Book Imbalance"])
-        _styler = _styler.map(_flow_speed_color, subset=["Flow Speed"])
+        _styler = _styler.map(_flow_speed_ratio_color, subset=["Flow Speed Ratio"])
     else:
         _styler = _styler.apply(_trend_color, subset=["Trend"])
         _styler = _styler.apply(_book_imbalance_color, subset=["Book Imbalance"])
-        _styler = _styler.apply(_flow_speed_color, subset=["Flow Speed"])
+        _styler = _styler.apply(_flow_speed_ratio_color, subset=["Flow Speed Ratio"])
 
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
@@ -1074,7 +1074,7 @@ def render_atm_order_flow_grid():
         "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Book Imbalance": lambda v: f"{v:+.2f}" if v is not None else "",
-        "Flow Speed": lambda v: f"{v:+.2f}" if v is not None else "",
+        "Flow Speed Ratio": lambda v: f"{v:+.2f}" if v is not None else "",
     })
 
     s._flow_styled_hash = data_hash

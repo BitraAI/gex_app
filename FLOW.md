@@ -19,7 +19,7 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Support** | Put wall value (resistance level from Options data). |
 | **Resistance** | Call wall value (support level from Options data). |
 | **Book Imbalance** | Order book pressure: Positive → bullish, Negative → bearish. Range [-1, 1], updated every 10 trades with history for last 60 seconds. |
-| **Flow Speed** | Net momentum change (bullish - bearish volume) over last 30 seconds. Range [-2, 2], positive → accelerating bullish, negative → accelerating bearish. |
+| **Flow Speed Ratio** | Relative flow momentum change `(newer_first − older_first) / older_first`. Green > 20, red < -20, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -65,7 +65,7 @@ How it works:
    - `flow_diff > 0` → base trend **up**
    - `flow_diff < 0` → base trend **down**
    - `flow_diff == 0` → base trend **flat**
-   - `flow_diff` is also stored as `ticker["flow_speed"]`.
+    - `flow_diff` is stored as `ticker["flow_speed"]`; the ratio `flow_diff / older_first` is stored as `ticker["flow_speed_ratio"]`.
 4. **Book-imbalance override** — `_calculate_book_imbalance()` is recorded on
    every snapshot. If `|imbalance| > 0.3` (strong order-book pressure) it
    overrides the flow-diff trend:

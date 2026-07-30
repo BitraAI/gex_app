@@ -44,13 +44,13 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Buy Premium includes Calendar Spread, Long LEAPS
   - **Multi-ticker scan** — Tick the "Scan all tickers in ticker_history.json" box to run the same signal pipeline (Buy/Sell Premium with the selected strategy) across every ticker listed in `~/.local/share/gex_app/ticker_history.json`; results are shown grouped per ticker.
     - **Per-strategy filters** (applied before scoring):
-      - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 60–90
+      - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 30–45
         - **Long Calls:** gate `iv_skew > 0` & selected-expiration VRP `< 0`; strike CALL `> spot`, lowest SSVI richness (pp) `< 0`
-        - **Long Puts:** gate `iv_skew < 0` & selected-expiration VRP `> 0`; strike PUT `< spot`, highest SSVI richness (pp) `> 0`
+        - **Long Puts:** gate `iv_skew < 0` & selected-expiration VRP `< 0`; strike PUT `< spot`, highest SSVI richness (pp) `< 0`
       - **Long LEAPS:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
       - **Sell Premium:** delta 0.15–0.20, VRP > 0.05, IV Richness > 0, DTE 30–45
-        - **Short Calls:** gate `iv_skew < 0` & selected-expiration VRP `> 0`; strike CALL `< spot`, highest SSVI richness (pp) `> 0`
-        - **Short Puts:** gate `iv_skew > 0` & selected-expiration VRP `< 0`; strike PUT `> spot`, lowest SSVI richness (pp) `< 0`
+        - **Short Calls:** gate `iv_skew < 0` & selected-expiration VRP `> 0`; strike CALL `> spot`, highest SSVI richness (pp) `> 0`
+        - **Short Puts:** gate `iv_skew > 0` & selected-expiration VRP `> 0`; strike PUT `< spot`, lowest SSVI richness (pp) `> 0`
       - Single-ticker view restricts scoring to the **selected expiration** so displayed VRP is the selected expiration's VRP and the strike is from that expiration.
 - **Automatic Data Filtering:**
   - **±20 strikes around ATM** applied across all heatmaps (OI, Volume, IV Richness, VRP), positioning charts (OI, Volume), dealer curve (GEX, VEX, CEX), and volatility charts (IV, IV Richness, VRP)
