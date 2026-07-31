@@ -9,10 +9,10 @@ import asyncio
 import time as _time_mod
 import pandas as pd
 import streamlit as st
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP
-from option_streaming_service import _find_flow_for_display, _normalize_display_symbol
+from option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol
 from client import fetch_quotes
 from calculations import calculate_atm_strike
 import json
@@ -38,10 +38,19 @@ from telegram_notifier import diff_alerts, notify_alerts
 # Per-ticker analytics cache + event-driven trigger tracking
 _ticker_analytics_cache: dict[str, dict] = {}
 _last_ref_price: dict[str, float] = {}   # last reference price for trigger
+_last_recompute_ts: dict[str, float] = {}  # last wall recompute time (monotonic)
+_last_full_recompute_ts: dict[str, float] = {}  # last full recompute time (monotonic)
 _strike_inc: dict[str, float] = {}       # known strike increment per ticker
 logger = logging.getLogger(__name__)
 
 _FETCH_RETRIES = 3
+
+# Wall recompute cadence (hybrid trigger):
+#   - recompute when spot moves >= half a strike, or when MAX interval elapses
+#   - but never more often than MIN interval per ticker (API throttle)
+_WALL_RECOMPUTE_MIN_INTERVAL = 30.0    # sec — hard floor between wall refreshes
+_WALL_RECOMPUTE_MAX_INTERVAL = 180.0   # sec — freshness floor in quiet markets
+_WALL_FULL_RECOMPUTE_INTERVAL = 300.0  # sec — full analytics + alerts refresh
 
 
 async def _fetch_quotes_with_retry(client, symbols, max_retries=None):
@@ -156,8 +165,8 @@ def ensure_atm_streaming(stream_symbol: str):
         s.selected_expiration = [_front_exp]
 
     _all_tickers = s.get("ticker_history", [])
-    _current_sym = s.get("symbol", "").upper().lstrip("$")
-    if _current_sym and _current_sym not in [t.upper().lstrip("$") for t in _all_tickers]:
+    _current_sym = _normalize_display_symbol(s.get("symbol", ""))
+    if _current_sym and _current_sym not in [_normalize_display_symbol(t) for t in _all_tickers]:
         _all_tickers = list(_all_tickers) + [_current_sym]
 
     import time as _time_mod
@@ -172,7 +181,7 @@ def ensure_atm_streaming(stream_symbol: str):
             _idx_to_fetch = []
             _idx_disp = {}
             for _t in _all_tickers:
-                _t_upper = _t.upper().lstrip("$")
+                _t_upper = _normalize_display_symbol(_t)
                 if _t_upper in INDEX_QUOTE_MAP:
                     _iq = INDEX_QUOTE_MAP[_t_upper]
                     _idx_to_fetch.append(_iq)
@@ -201,14 +210,14 @@ def ensure_atm_streaming(stream_symbol: str):
         if _time_mod.time() - _last_fetch_ts >= 10:
             s["_spot_fetch_ts"] = _time_mod.time()
             _stream_symbols = [
-                STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$"))
+                _get_stream_symbol(t)
                 for t in _all_tickers
-                if t.upper().lstrip("$") not in INDEX_QUOTE_MAP
+                if _normalize_display_symbol(t) not in INDEX_QUOTE_MAP
             ]
             try:
                 quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                 for disp_sym in _all_tickers:
-                    _disp_upper = disp_sym.upper().lstrip("$")
+                    _disp_upper = _normalize_display_symbol(disp_sym)
                     # Skip index symbols — their spot comes from the
                     # index quote, not the ETF proxy quote.
                     if _disp_upper in INDEX_QUOTE_MAP:
@@ -256,7 +265,7 @@ def ensure_atm_streaming(stream_symbol: str):
         # (e.g. "$SPX" vs "SPX"), remove any stale direct-key entry that
         # would shadow it in _find_flow_for_display's step-1 direct lookup.
         for _t in _all_tickers:
-            _t_upper = _t.upper().lstrip("$")
+            _t_upper = _normalize_display_symbol(_t)
             with atm_svc._lock:
                 # If a direct-key entry exists with spot<=0 but a variant
                 # (e.g. "$SPX") carries the real data, remove the stale one
@@ -302,7 +311,7 @@ def ensure_atm_streaming(stream_symbol: str):
 
         _spot_map = {}
         for _t in _all_tickers:
-            _t_upper = _t.upper().lstrip("$")
+            _t_upper = _normalize_display_symbol(_t)
             if _t_upper in INDEX_QUOTE_MAP:
                 continue
             if _t_upper in s.spot_cache:
@@ -311,7 +320,7 @@ def ensure_atm_streaming(stream_symbol: str):
             atm_svc.bulk_update_spots(_spot_map)
 
         # Update the walls for the current symbol from the latest analytics
-        current_sym = s.get("symbol", "").upper().lstrip("$")
+        current_sym = _normalize_display_symbol(s.get("symbol", ""))
         if current_sym and s.get("analytics"):
             atm_svc = s.get("atm_option_service")
             if atm_svc:
@@ -354,7 +363,7 @@ def update_flow_cache():
     atm_svc = s.get("atm_option_service")
     if atm_svc is None:
         return
-    current_sym = s.get("symbol", "").upper().lstrip("$")
+    current_sym = _normalize_display_symbol(s.get("symbol", ""))
 
     if getattr(atm_svc, "is_running", False) and current_sym:
         if current_sym in atm_svc.tracked_tickers():
@@ -370,7 +379,7 @@ def update_flow_cache():
     # Index symbols (SPX, RUT, NDX) are updated exclusively via
     # REST Quote polling (IndexSpotPoller every 2s) — no fallback.
     for t_sym in tracked:
-        t_upper = t_sym.upper().lstrip("$")
+        t_upper = _normalize_display_symbol(t_sym)
         if t_upper in INDEX_QUOTE_MAP:
             continue
         if t_upper in s.spot_cache:
@@ -387,10 +396,10 @@ def update_flow_cache():
     # hasn't created an entry yet, and that missing spots for any
     # tracked symbol (index or equity) are fetched on grid render.
     _all_syms = list(s.get("ticker_history", []))
-    if current_sym and current_sym not in [x.upper().lstrip("$") for x in _all_syms]:
+    if current_sym and current_sym not in [_normalize_display_symbol(x) for x in _all_syms]:
         _all_syms.append(current_sym)
     for _t in _all_syms:
-        _t_upper = _t.upper().lstrip("$")
+        _t_upper = _normalize_display_symbol(_t)
         svc_spot = atm_svc.get_ticker_spot(_t_upper)
         if svc_spot is None or svc_spot <= 0:
             if _t_upper not in _need_fetch:
@@ -445,7 +454,54 @@ def update_flow_cache():
 # ---------------------------------------------------------------------------
 
 _WALL_ZONE_BUFFER = 0.0002  # 0.02 % — must match grid coloring in flow.py
+_WALL_ZONE_MIN_BUFFER = 0.05  # absolute buffer floor ($) for low-priced tickers
 _WALL_ZONE_ALERT_COOLDOWN = 600.0  # min seconds between consecutive alerts per ticker
+
+
+def _wall_buffer(wall: float | None) -> float:
+    """Near-wall zone width: 0.02 % of the wall price, floored at 5 cents so
+    low-priced tickers still get a meaningful zone."""
+    if wall is None:
+        return 0.0
+    return max(abs(wall) * _WALL_ZONE_BUFFER, _WALL_ZONE_MIN_BUFFER)
+
+
+def classify_trend_signal(spot, put_wall, call_wall, book_imb, flow_speed, flow_acceleration) -> str:
+    """Classify a ticker into a buy/sell signal label.
+
+    Single source of truth shared by the Order Flow grid and the Telegram
+    trend alerts so the two can never drift.  Returns STRONG BUY / BUY /
+    WEAK BUY / STRONG SELL / SELL / WEAK SELL / BREAKOUT / BREAKDOWN / HOLD.
+    """
+    if spot is None or book_imb is None or flow_speed is None or flow_acceleration is None:
+        return "HOLD"
+    pw_buf = _wall_buffer(put_wall)
+    cw_buf = _wall_buffer(call_wall)
+    near_support = put_wall is not None and spot <= put_wall + pw_buf
+    near_resistance = call_wall is not None and spot >= call_wall - cw_buf
+    beyond_resistance = call_wall is not None and spot >= call_wall + cw_buf
+    beyond_support = put_wall is not None and spot <= put_wall - pw_buf
+
+    strong_bull = book_imb > 0.3 and flow_speed > 0 and flow_acceleration > 0
+    strong_bear = book_imb < -0.3 and flow_speed < 0 and flow_acceleration < 0
+
+    if near_support and strong_bull:
+        return "STRONG BUY"
+    if near_support and book_imb > 0.3 and flow_speed > 0:
+        return "BUY"
+    if near_support and book_imb > 0.3 and flow_acceleration > 0:
+        return "WEAK BUY"
+    if near_resistance and strong_bear:
+        return "STRONG SELL"
+    if near_resistance and book_imb < -0.3 and flow_speed < 0:
+        return "SELL"
+    if near_resistance and book_imb < -0.3 and flow_acceleration < 0:
+        return "WEAK SELL"
+    if beyond_resistance and strong_bull:
+        return "BREAKOUT"
+    if beyond_support and strong_bear:
+        return "BREAKDOWN"
+    return "HOLD"
 
 
 def maybe_fire_wall_zone_alerts() -> None:
@@ -461,22 +517,37 @@ def maybe_fire_wall_zone_alerts() -> None:
     now = _time_mod.monotonic()
     state = s.setdefault("atm_alert_state", {})
     for t in atm_svc.tracked_tickers():
-        t_upper = t.upper().lstrip("$")
+        t_upper = _normalize_display_symbol(t)
         spot = atm_svc.get_ticker_spot(t_upper)
         call_wall = atm_svc.get_ticker_call_wall(t_upper)
         put_wall = atm_svc.get_ticker_put_wall(t_upper)
         if spot is None:
             continue
 
-        # Event-driven trigger: full recompute when price moves by half a strike
+        # Hybrid trigger for wall refreshes:
+        #   - fast path: lightweight wall refresh when price moves >= half a
+        #     strike OR the freshness floor (MAX interval) elapses — throttled
+        #     to at most once per MIN interval per ticker.
+        #   - slow path: full recompute (analytics + IV rank + alerts) at a
+        #     fixed slower cadence so alert headers stay fresh too.
         _raw_t = t_upper  # retains :X suffix for index symbols
         _ref = _last_ref_price.get(_raw_t)
         _inc = _strike_inc.get(_raw_t, 1.0)
-        if _ref is None or abs(spot - _ref) >= _inc / 2:
+        _last_re = _last_recompute_ts.get(_raw_t, 0.0)
+        _moved = _ref is None or abs(spot - _ref) >= _inc / 2
+        _stale = (now - _last_re) >= _WALL_RECOMPUTE_MAX_INTERVAL
+        _client = s.get("client")
+        _loop = _ensure_async_loop()
+        if (_moved or _stale) and (_last_re == 0.0 or (now - _last_re) >= _WALL_RECOMPUTE_MIN_INTERVAL):
             _last_ref_price[_raw_t] = spot
-            _client = s.get("client")
+            _last_recompute_ts[_raw_t] = now
             if _client:
-                _loop = _ensure_async_loop()
+                asyncio.run_coroutine_threadsafe(
+                    _refresh_walls_for_symbol(_raw_t, _client, atm_svc), _loop,
+                )
+        if (now - _last_full_recompute_ts.get(_raw_t, 0.0)) >= _WALL_FULL_RECOMPUTE_INTERVAL:
+            _last_full_recompute_ts[_raw_t] = now
+            if _client:
                 asyncio.run_coroutine_threadsafe(
                     _recompute_symbol(_raw_t, _client, _loop, atm_svc), _loop,
                 )
@@ -509,13 +580,32 @@ def maybe_fire_wall_zone_alerts() -> None:
             analytics["put_wall_mark"] = _cp  # BUY CALL signal shows the call price
         if _pp is not None:
             analytics["call_wall_mark"] = _pp  # BUY PUT signal shows the put price
+        ticker_data = atm_svc.get_ticker_trend_data(t_upper) or {}
         new_alerts, next_state = diff_alerts(prev, analytics, spot)
+        wall_zone = None
+        if call_wall is not None and spot >= call_wall - _wall_buffer(call_wall):
+            wall_zone = "Resistance"
+        elif put_wall is not None and spot <= put_wall + _wall_buffer(put_wall):
+            wall_zone = "Support"
+        # Flow-context alert: pass the strong trend signal (STRONG BUY /
+        # STRONG SELL / BREAKOUT / BREAKDOWN) to Telegram when present.
+        _trend_label = classify_trend_signal(
+            spot, put_wall, call_wall,
+            ticker_data.get("book_imbalance"),
+            ticker_data.get("flow_speed"),
+            ticker_data.get("flow_acceleration"),
+        )
+        _trend_signal = (
+            _trend_label
+            if _trend_label in ("STRONG BUY", "STRONG SELL", "BREAKOUT", "BREAKDOWN")
+            else None
+        )
         last_ts = (prev or {}).get("last_alert_ts", 0.0)
         next_state["last_alert_ts"] = last_ts
         next_state["_prev_call_wall"] = call_wall
         next_state["_prev_put_wall"] = put_wall
         next_state["_wall_stable_count"] = _wall_stable
-        if new_alerts and _wall_stable >= 2 and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
+        if (new_alerts or _trend_signal) and _wall_stable >= 2 and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
             next_state["last_alert_ts"] = now
             next_state["_last_alert_texts"] = new_alerts
             state[t_upper] = next_state
@@ -524,12 +614,24 @@ def maybe_fire_wall_zone_alerts() -> None:
                 _atm_iv = _cache.get("atm_iv")
                 _rv = _cache.get("rv", 0.0)
                 _vrp = (_atm_iv - _rv) * 100 if _atm_iv is not None and _rv > 0 else None
-                notify_alerts(new_alerts, symbol=t_upper, spot=spot,
+                notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
                               gex=_cache.get("net_gex"), vrp=_vrp,
                               iv_rank=_cache.get("iv_rank"),
+                              wall_zone=wall_zone, pw=put_wall, cw=call_wall,
+                              wall_mark=analytics.get("call_wall_mark") if wall_zone == "Resistance" else analytics.get("put_wall_mark"),
+                              trend_alert=_trend_signal,
+                              book_imbalance=ticker_data.get("book_imbalance"),
+                              flow_speed=ticker_data.get("flow_speed"),
+                              flow_acceleration=ticker_data.get("flow_acceleration"),
                               disable_notification=False)
             else:
-                notify_alerts(new_alerts, symbol=t_upper, spot=spot,
+                notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
+                              wall_zone=wall_zone, pw=put_wall, cw=call_wall,
+                              wall_mark=analytics.get("call_wall_mark") if wall_zone == "Resistance" else analytics.get("put_wall_mark"),
+                              trend_alert=_trend_signal,
+                              book_imbalance=ticker_data.get("book_imbalance"),
+                              flow_speed=ticker_data.get("flow_speed"),
+                              flow_acceleration=ticker_data.get("flow_acceleration"),
                               disable_notification=False)
         else:
             state[t_upper] = next_state
@@ -569,17 +671,21 @@ def _build_strategy_alerts(
     dtes = [e.get("dte", 0) for e in _build_by_exp_all(data, spot)]
     ir_tte = _tte_from_dtes(dtes) if ssvi_surf else None
 
+    def _iv_dec(opt: dict) -> float:
+        raw = opt.get("iv", 0) or 0
+        return raw / 100.0 if raw > 3.0 else raw
+
     buy_sd = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55]
-    buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - rv < 0]
+    buy_sd = [e for e in buy_sd if _iv_dec(e) - rv < 0]
     buy_sd = [e for e in buy_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
     if ssvi_surf and ir_tte:
-        buy_sd = [e for e in buy_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
+        buy_sd = [e for e in buy_sd if _iv_dec(e) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
 
     sell_sd = [e for e in sd2 if 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20]
-    sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - rv > 0.05]
+    sell_sd = [e for e in sell_sd if _iv_dec(e) - rv > 0.05]
     sell_sd = [e for e in sell_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
     if ssvi_surf and ir_tte:
-        sell_sd = [e for e in sell_sd if (e.get("iv", 0) or 0) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) > 0]
+        sell_sd = [e for e in sell_sd if _iv_dec(e) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) > 0]
 
     bias, _ = assess_market_bias(analytics, spot, iv_rank=analytics.get("iv_rank"))
 
@@ -598,6 +704,47 @@ def _build_strategy_alerts(
                 alerts.append(f"  \u2022 {r}")
 
     return alerts
+
+
+async def _compute_walls_for_symbol(client, symbol: str) -> dict | None:
+    """Lightweight recompute: fetch chain + parse + compute analytics only.
+
+    Used for frequent wall refreshes — skips rate/yield/RV/IV-rank so the
+    latest walls can be fetched much more often without hammering the API.
+    Returns ``None`` when the chain cannot be loaded.
+    """
+    raw = None
+    for attempt in range(3):
+        try:
+            raw = await fetch_option_chain(
+                client, symbol, strike_count=75, include_quotes=True,
+            )
+            break
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(1.0)
+    if raw is None:
+        logger.warning("fetch_option_chain failed for %s after 3 retries", symbol)
+        return None
+
+    try:
+        fallback_greeks = None
+        fallback_sym = STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"))
+        if fallback_sym:
+            fb_raw = await fetch_option_chain(
+                client, fallback_sym, strike_count=75, include_quotes=True,
+            )
+            fallback_greeks = build_greeks_lookup(fb_raw)
+        data, spot = parse_option_chain(raw, fallback_greeks=fallback_greeks)
+    except Exception as exc:
+        logger.warning("wall parse failed for %s: %s", symbol, exc)
+        return None
+    if not data or spot <= 0:
+        logger.warning("no option data for %s", symbol)
+        return None
+
+    analytics = compute_analytics(data, spot)
+    return {"analytics": analytics, "spot": spot, "data": data}
 
 
 async def _compute_for_symbol(client, symbol: str) -> dict | None:
@@ -789,6 +936,57 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         logger.warning("[%s] recompute failed: %s", display_key, exc)
 
 
+async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> None:
+    """Lightweight wall refresh: fetch chain + recompute walls, then push
+    the latest walls / expiration / ATM marks to the ATM service.
+
+    Runs frequently (movement- and time-triggered) so the Order Flow grid
+    always shows the freshest support/resistance without a full recompute.
+    """
+    try:
+        _cache_key = display_key.split(":")[0]
+        if _cache_key in STREAM_SYMBOL_MAP:
+            api_symbol = f"${_cache_key}:X"
+        else:
+            api_symbol = display_key
+
+        result = await _compute_walls_for_symbol(client, api_symbol)
+        if result is None:
+            return
+        analytics, data = result["analytics"], result["data"]
+
+        if atm_svc:
+            _pw = analytics.get("put_wall")
+            _cw = analytics.get("call_wall")
+            if _pw is not None or _cw is not None:
+                atm_svc.set_ticker_walls(display_key, _pw, _cw)
+                _exps = sorted(set(e["expiration"] for e in data))
+                if _exps:
+                    atm_svc.set_ticker_expiration(display_key, _exps[0])
+            # Call/put marks at the ATM strike (populates Call/Put Price columns)
+            _atm_k = analytics.get("atm_strike")
+            if _atm_k:
+                _atm_exps = sorted({e["expiration"] for e in data if e["strike"] == _atm_k})
+                _call_mark = _put_mark = None
+                if _atm_exps:
+                    _front = _atm_exps[0]
+                    for e in data:
+                        if e["strike"] == _atm_k and e["expiration"] == _front:
+                            if e["type"] == "CALL" and _call_mark is None:
+                                _call_mark = e.get("mark")
+                            elif e["type"] == "PUT" and _put_mark is None:
+                                _put_mark = e.get("mark")
+                atm_svc.set_ticker_option_prices(display_key, _call_mark, _put_mark)
+
+        strikes = sorted(set(e["strike"] for e in data))
+        if len(strikes) >= 2:
+            _strike_inc[display_key] = min(
+                strikes[i+1] - strikes[i] for i in range(len(strikes)-1)
+            )
+    except Exception as exc:
+        logger.warning("[%s] wall refresh failed: %s", display_key, exc)
+
+
 def render_market_status():
     """Display the market status indicator on the same header row as ATM Order Flow.
     
@@ -859,7 +1057,7 @@ def render_atm_order_flow_grid():
     is identical.
     """
     s = st.session_state
-    current_sym = s.get("symbol", "").upper().lstrip("$")
+    current_sym = _normalize_display_symbol(s.get("symbol", ""))
     atm_svc = s.get("atm_option_service")
 
     update_flow_cache()
@@ -868,82 +1066,21 @@ def render_atm_order_flow_grid():
     rows = []
     if tickers:
         for t in tickers:
-            t_upper = t.upper().lstrip("$")
-            cached = s.flow_cache.get(t_upper)
-            bullish = cached.get("bullish") if cached is not None else None
-            bearish = cached.get("bearish") if cached is not None else None
-            has_data = bullish is not None and bearish is not None
-            net = (bullish - bearish) / (bullish + bearish) if has_data and (bullish + bearish) != 0 else 0 if has_data else None
+            t_upper = _normalize_display_symbol(t)
             opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
             atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
             spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
-            # Get book imbalance and trend reversal from ticker data
+            # Get book imbalance and trend from ticker data
             book_imbalance = None
-            trend_reversal = None
-            trend = "flat"
             flow_speed = 0
+            flow_acceleration = 0
             if atm_svc:
                 ticker_data = atm_svc.get_ticker_trend_data(t_upper)
                 if ticker_data:
-                    trend = ticker_data["trend"]
                     book_imbalance = ticker_data["book_imbalance"]
-                    trend_reversal = ticker_data["trend_reversal"]
                     flow_speed = ticker_data.get("flow_speed", 0)
-                    flow_speed_ratio = ticker_data.get("flow_speed_ratio", 0.0)
+                    flow_acceleration = ticker_data.get("flow_acceleration", 0)
             
-            # Enhanced trend display with enhanced indicators based on book imbalance, trend reversal, trend and flow speed
-            # Keep visual indicators without emojis
-            if book_imbalance is not None:
-                if book_imbalance > 0.3:
-                    # Strong bullish pressure
-                    if trend_reversal == "bullish":
-                        trend_display = "↑↑"  # Double bullish
-                    elif trend == "up":
-                        # Enhanced bullish indicators
-                        if flow_speed > 0:
-                            trend_display = "↑↑↑"  # Strong bullish momentum with flow speed
-                        else:
-                            trend_display = "↑"   # Normal bullish
-                    else:
-                        # Building bullish momentum
-                        if flow_speed > 0:
-                            trend_display = "→→→"  # Building bullish momentum with flow
-                        else:
-                            trend_display = "→→"  # Building bullish momentum
-                elif book_imbalance < -0.3:
-                    # Strong bearish pressure
-                    if trend_reversal == "bearish":
-                        trend_display = "↓↓"  # Double bearish
-                    elif trend == "down":
-                        # Enhanced bearish indicators
-                        if flow_speed < 0:
-                            trend_display = "↓↓↓"  # Strong bearish momentum with flow speed
-                        else:
-                            trend_display = "↓"   # Normal bearish
-                    else:
-                        # Building bearish momentum
-                        if flow_speed < 0:
-                            trend_display = "←←←"  # Building bearish momentum with flow
-                        else:
-                            trend_display = "←←"  # Building bearish momentum
-                else:
-                    # Normal pressure
-                    # Enhanced flat indicators based on flow speed
-                    if flow_speed > 0:
-                        trend_display = "→→→"  # Positive momentum building
-                    elif flow_speed < 0:
-                        trend_display = "←←←"  # Negative momentum building
-                    else:
-                        trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
-            else:
-                # Standard trend display
-                if trend_reversal == "bullish":
-                    trend_display = "↑↑"  # Show double bullish for strong reversal
-                elif trend_reversal == "bearish":
-                    trend_display = "↓↓"  # Show double bearish for strong reversal
-                else:
-                    trend_display = {"up": "↑", "down": "↓", "flat": "→"}.get(trend, "→")
-
             # Support (Put Wall) / Resistance (Call Wall): prefer per-ticker value
             # set by fetch_data, fall back to session-state analytics for the
             # current chart symbol so the columns are never empty without a manual
@@ -954,6 +1091,21 @@ def render_atm_order_flow_grid():
                 put_wall_val = (s.get("analytics") or {}).get("put_wall")
             if call_wall_val is None and t_upper == current_sym:
                 call_wall_val = (s.get("analytics") or {}).get("call_wall")
+
+            # Trend label from the shared buy/sell signal classifier:
+            #   STRONG BUY   near support + book_imbalance > 0.3 + flow_speed > 0 + flow_acceleration > 0
+            #   BUY          near support + book_imbalance > 0.3 + flow_speed > 0
+            #   WEAK BUY     near support + book_imbalance > 0.3 + flow_acceleration > 0
+            #   STRONG SELL  near resistance + book_imbalance < -0.3 + flow_speed < 0 + flow_acceleration < 0
+            #   SELL         near resistance + book_imbalance < -0.3 + flow_speed < 0
+            #   WEAK SELL    near resistance + book_imbalance < -0.3 + flow_acceleration < 0
+            #   BREAKOUT     beyond resistance + book_imbalance > 0.3 + flow_speed > 0 + flow_acceleration > 0
+            #   BREAKDOWN    beyond support + book_imbalance < -0.3 + flow_speed < 0 + flow_acceleration < 0
+            #   HOLD         otherwise
+            trend_display = classify_trend_signal(
+                spot, put_wall_val, call_wall_val,
+                book_imbalance, flow_speed, flow_acceleration,
+            )
 
             rows.append({
                 "Ticker": t_upper,
@@ -966,7 +1118,8 @@ def render_atm_order_flow_grid():
                 "Put Price": opt_prices.get("put_price"),
                 "Trend": trend_display,
                 "Book Imbalance": book_imbalance,
-                "Flow Speed Ratio": flow_speed_ratio,
+                "Flow Speed": flow_speed,
+                "Flow Acceleration": flow_acceleration,
             })
 
     if not rows:
@@ -984,7 +1137,7 @@ def render_atm_order_flow_grid():
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
-          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed Ratio"])
+          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"])
         for r in rows
     )
     data_hash = hash((data_key, _atm_epoch, _wall_epoch))
@@ -997,24 +1150,16 @@ def render_atm_order_flow_grid():
 
     df = pd.DataFrame(rows)
 
-    def _net_flow_color(val):
-        if val > 0.20:
-            return "color: #00cc96; font-weight: bold;"
-        if val < -0.20:
-            return "color: #ef5350; font-weight: bold;"
-        return "color: #ff9800; font-weight: bold;"
-
     def _trend_color(val):
-        """Color the trend text (up/down/flat) based on trend direction."""
+        """Color the trend label (STRONG BUY/BUY/WEAK BUY/.../BREAKOUT/BREAKDOWN) based on direction."""
         if val is None:
             return ""
-        if "↑" in val:
-            return "color: #00cc96; font-weight: bold;"
-        if "↓" in val:
+        val_l = val.lower()
+        if val_l in ("breakdown", "down") or "sell" in val_l:
             return "color: #ef5350; font-weight: bold;"
-        if "→" in val or "←" in val:
-            return "color: #ff9800; font-weight: bold;"
-        return "color: #808080;"
+        if val_l in ("breakout", "up") or "buy" in val_l:
+            return "color: #00cc96; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
 
     def _book_imbalance_color(val):
         """Color the book imbalance value based on magnitude."""
@@ -1026,43 +1171,85 @@ def render_atm_order_flow_grid():
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
-    def _flow_speed_ratio_color(val):
+    def _flow_speed_color(val):
         if val is None:
             return ""
-        if val > 20:
+        if val > 0:
             return "color: #00cc96; font-weight: bold;"
-        if val < -20:
+        if val < 0:
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
-    def _spot_wall_bg(row):
+    def _flow_acceleration_color(val):
+        if val is None:
+            return ""
+        if val > 0:
+            return "color: #00cc96; font-weight: bold;"
+        if val < 0:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+
+    def _spot_bg(row):
         spot = row["Spot"]
         support = row["Support"]
         resistance = row["Resistance"]
+        score = 0
+        _near_wall = False
+        if spot is not None and support is not None:
+            pw_buf = _wall_buffer(support)
+            if spot <= support + pw_buf:
+                score += 1
+                _near_wall = True
+        if spot is not None and resistance is not None:
+            cw_buf = _wall_buffer(resistance)
+            if spot >= resistance - cw_buf:
+                score -= 1
+                _near_wall = True
+        if _near_wall:
+            bi = row.get("Book Imbalance")
+            if bi is not None:
+                if bi > 0.3:
+                    score += 1
+                elif bi < -0.3:
+                    score -= 1
+            fs = row.get("Flow Speed")
+            if fs is not None:
+                if fs > 0:
+                    score += 1
+                elif fs < 0:
+                    score -= 1
+            fa = row.get("Flow Acceleration")
+            if fa is not None:
+                if fa > 0:
+                    score += 1
+                elif fa < 0:
+                    score -= 1
         styles = [""] * len(row)
         col_idx = list(row.index)
         spot_i = col_idx.index("Spot")
-        if spot is not None and support is not None:
-            pw_buf = abs(support) * _WALL_ZONE_BUFFER
-            if spot <= support + pw_buf:
-                styles[spot_i] = "background-color: #ccffcc"
-        if spot is not None and resistance is not None:
-            cw_buf = abs(resistance) * _WALL_ZONE_BUFFER
-            if spot >= resistance - cw_buf:
-                styles[spot_i] = "background-color: #ffcccc"
+        if score >= 2:
+            styles[spot_i] = "background-color: #a5d6a7"
+        elif score == 1:
+            styles[spot_i] = "background-color: #ccffcc"
+        elif score <= -2:
+            styles[spot_i] = "background-color: #ef9a9a"
+        elif score == -1:
+            styles[spot_i] = "background-color: #ffcccc"
         return styles
 
     _styler = df.style.set_uuid("flow_grid")
-    _styler = _styler.apply(_spot_wall_bg, axis=1)
+    _styler = _styler.apply(_spot_bg, axis=1)
 
     if hasattr(_styler, "map"):
         _styler = _styler.map(_trend_color, subset=["Trend"])
         _styler = _styler.map(_book_imbalance_color, subset=["Book Imbalance"])
-        _styler = _styler.map(_flow_speed_ratio_color, subset=["Flow Speed Ratio"])
+        _styler = _styler.map(_flow_speed_color, subset=["Flow Speed"])
+        _styler = _styler.map(_flow_acceleration_color, subset=["Flow Acceleration"])
     else:
         _styler = _styler.apply(_trend_color, subset=["Trend"])
         _styler = _styler.apply(_book_imbalance_color, subset=["Book Imbalance"])
-        _styler = _styler.apply(_flow_speed_ratio_color, subset=["Flow Speed Ratio"])
+        _styler = _styler.apply(_flow_speed_color, subset=["Flow Speed"])
+        _styler = _styler.apply(_flow_acceleration_color, subset=["Flow Acceleration"])
 
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
@@ -1074,7 +1261,8 @@ def render_atm_order_flow_grid():
         "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
         "Book Imbalance": lambda v: f"{v:+.2f}" if v is not None else "",
-        "Flow Speed Ratio": lambda v: f"{v:+.2f}" if v is not None else "",
+        "Flow Speed": lambda v: f"{v:+,.0f}" if v is not None else "",
+        "Flow Acceleration": lambda v: f"{v:+,.2f}" if v is not None else "",
     })
 
     s._flow_styled_hash = data_hash
@@ -1105,7 +1293,7 @@ def render_flow_frag():
             atm_svc._needs_reconnect = True
 
     ensure_atm_streaming(mapped)
-    st.subheader("ATM Order Flow")
+    st.subheader("Order Flow")
     # Market status indicator at the header row
     render_market_status()
     # CSS styles for the dataframe (only need to inject once)

@@ -5,7 +5,6 @@ from pathlib import Path
 
 _CONFIG_PATH = Path(__file__).parent / "config.toml"
 
-APP_NAME = "gex_app"
 CLIENT_ID = ""
 CLIENT_SECRET = ""
 CALLBACK_URL = "https://127.0.0.1:8182/"

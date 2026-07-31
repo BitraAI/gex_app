@@ -4,10 +4,9 @@ import os
 import threading
 import time as _time_mod
 import pandas as pd
-from _constants import STREAM_SYMBOL_MAP
+from _constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS
 from calculations import calculate_atm_strike, get_strike_spacing
 
-MAX_ROWS = 200
 
 # Minimum seconds between REST option-chain re-fetches for a single ticker
 # after an ATM strike crossing.  Prevents a fast-moving tape from spamming
@@ -24,6 +23,12 @@ def _load_ticker_history() -> list[str]:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
+
+
+def _save_ticker_history(history: list[str]) -> None:
+    os.makedirs(os.path.dirname(TICKER_HISTORY_FILE), exist_ok=True)
+    with open(TICKER_HISTORY_FILE, "w") as f:
+        json.dump(history, f)
 
 
 def _make_option_symbol(root: str, yymmdd: str, call_put: str, strike: float) -> str:
@@ -190,11 +195,6 @@ class AtmOptionVolumeService:
         return self._symbol
 
     @property
-    def atm_strike(self) -> float:
-        with self._lock:
-            return self._atm_strike
-
-    @property
     def ticks_received(self) -> int:
         with self._lock:
             return self._ticks_received
@@ -358,15 +358,12 @@ class AtmOptionVolumeService:
                     "bearish": 0,
                     "flow_history": [],
                     "flow_speed": 0,
+                    "flow_acceleration": 0,
                     "book_imbalance": None,
                     "book_imbalance_history": [],
                     "trend": "flat",
                     "trend_reversal": None,
                 }
-
-    def _get_stream_client(self):
-        with self._lock:
-            return self._stream_client
 
     def stop(self):
         self._stop_locked()
@@ -573,24 +570,24 @@ class AtmOptionVolumeService:
                 ticker["put_bid"] = float(put_price)
                 ticker["put_ask"] = float(put_price)
 
-    def _find_ticker_entry(self, display_symbol: str) -> dict | None:
-        """Find a ticker entry by direct or normalized key lookup.
-        Unlike _find_flow_for_display, this does NOT fall back to the
-        ETF proxy lookup, so index symbols (SPX) won't accidentally
-        match their ETF proxy entry (SPY)."""
-        if display_symbol is None:
-            return None
-        tk = self._ticker_flows.get(display_symbol)
-        if tk is not None:
-            return tk
-        norm = _normalize_display_symbol(display_symbol)
-        tk = self._ticker_flows.get(norm)
-        if tk is not None:
-            return tk
-        for key in self._ticker_flows:
-            if _normalize_display_symbol(key) == norm:
-                return self._ticker_flows[key]
-        return None
+    def _recalc_atm_if_moved(self, display_symbol: str, ticker: dict,
+                             prev_spot: float, spot: float) -> bool:
+        """Recompute a ticker's ATM strike when its spot has moved by at least
+        half a strike increment since the last reference price.  On a crossing,
+        invalidates the put/call wall cache so it is lazily re-fetched.
+
+        Must be called with ``self._lock`` held.  Returns True only when the
+        ATM strike was actually recomputed."""
+        _last_ref = ticker.get("last_atm_reference", prev_spot)
+        _spacing = get_strike_spacing(spot)
+        if abs(spot - _last_ref) < _spacing / 2:
+            return False
+        old_atm = ticker.get("atm_strike")
+        new_atm = calculate_atm_strike(spot)
+        ticker["atm_strike"] = new_atm
+        ticker["last_atm_reference"] = spot
+        self._maybe_invalidate_walls_on_strike_change(display_symbol, old_atm, new_atm)
+        return True
 
     def set_ticker_spot(self, display_symbol: str, spot: float):
         """Set the spot price for a tracked ticker and recalculate its ATM
@@ -610,7 +607,7 @@ class AtmOptionVolumeService:
             return
         sc = None
         with self._lock:
-            ticker = self._find_ticker_entry(display_symbol)
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is None:
                 norm = _normalize_display_symbol(display_symbol)
                 stream_sym = _get_stream_symbol(norm)
@@ -641,16 +638,7 @@ class AtmOptionVolumeService:
                 ticker["spot"] = spot
                 # Only recalc ATM strike when the spot has moved by at least
                 # half a strike increment from the last reference price.
-                _last_ref = ticker.get("last_atm_reference", old)
-                _spacing = get_strike_spacing(spot)
-                if abs(spot - _last_ref) >= _spacing / 2:
-                    old_atm = ticker.get("atm_strike")
-                    new_atm = calculate_atm_strike(spot)
-                    ticker["atm_strike"] = new_atm
-                    ticker["last_atm_reference"] = spot
-                    self._maybe_invalidate_walls_on_strike_change(
-                        display_symbol, old_atm, new_atm,
-                    )
+                self._recalc_atm_if_moved(display_symbol, ticker, old, spot)
                 if abs(spot - old) / max(old, 1) > 0.001:
                     self._spot_changed = True
                 if (ticker["call_sym"] is None or ticker["put_sym"] is None) and \
@@ -687,16 +675,7 @@ class AtmOptionVolumeService:
             ticker["spot"] = spot
             # Only recalc ATM strike when the spot has moved by at least
             # half a strike increment from the last reference price.
-            _last_ref = ticker.get("last_atm_reference", old_spot)
-            _spacing = get_strike_spacing(spot)
-            if abs(spot - _last_ref) >= _spacing / 2:
-                old_atm = ticker.get("atm_strike")
-                new_atm = calculate_atm_strike(spot)
-                ticker["atm_strike"] = new_atm
-                ticker["last_atm_reference"] = spot
-                self._maybe_invalidate_walls_on_strike_change(
-                    display_symbol, old_atm, new_atm,
-                )
+            self._recalc_atm_if_moved(display_symbol, ticker, old_spot, spot)
             if ticker["call_sym"] is None or ticker["put_sym"] is None or \
                abs(spot - old_spot) / max(old_spot, 1) > 0.001:
                 if self._running and self._expiration:
@@ -726,16 +705,7 @@ class AtmOptionVolumeService:
                     ticker["spot"] = spot
                     # Only recalc ATM strike when the spot has moved by at
                     # least half a strike increment from the last reference.
-                    _last_ref = ticker.get("last_atm_reference", old)
-                    _spacing = get_strike_spacing(spot)
-                    if abs(spot - _last_ref) >= _spacing / 2:
-                        old_atm = ticker.get("atm_strike")
-                        new_atm = calculate_atm_strike(spot)
-                        ticker["atm_strike"] = new_atm
-                        ticker["last_atm_reference"] = spot
-                        self._maybe_invalidate_walls_on_strike_change(
-                            display_symbol, old_atm, new_atm,
-                        )
+                    self._recalc_atm_if_moved(display_symbol, ticker, old, spot)
                     # Only trigger re-subscribe for non-index tickers
                     # (index symbols share the ETF proxy subscription).
                     _disp_norm = _normalize_display_symbol(display_symbol)
@@ -1102,8 +1072,8 @@ class AtmOptionVolumeService:
                     index=pd.Index([self._current_bucket], name="datetime"),
                 )
                 self._df = pd.concat([self._df, row])
-                if len(self._df) > MAX_ROWS:
-                    self._df = self._df.iloc[-MAX_ROWS:]
+                if len(self._df) > MAX_BAR_ROWS:
+                    self._df = self._df.iloc[-MAX_BAR_ROWS:]
 
             # Start new bucket
             cbv = size if (opt_type == "CALL" and direction == "buy") else 0
@@ -1160,6 +1130,7 @@ class AtmOptionVolumeService:
                 "book_imbalance": ticker.get("book_imbalance"),
                 "trend_reversal": ticker.get("trend_reversal"),
                 "flow_speed": ticker.get("flow_speed"),
+                "flow_acceleration": ticker.get("flow_acceleration"),
                 "book_imbalance_history": ticker.get("book_imbalance_history"),
                 "flow_history": ticker.get("flow_history"),
             }
@@ -1200,6 +1171,7 @@ class AtmOptionVolumeService:
         if len(history) < 2:
             ticker["trend"] = "flat"
             ticker["flow_speed"] = 0
+            ticker["flow_acceleration"] = 0
             return
 
         # Calculate flow momentum (net change in bullish/bearish volume)
@@ -1207,15 +1179,18 @@ class AtmOptionVolumeService:
         older_first = history[0][1]
         newer_first = history[-segment_size][1]
         flow_diff = newer_first - older_first
+        previous_flow = (history[segment_size-1][1] - history[0][1])
+        recent_flow = (history[-1][1] - history[-segment_size][1])
+        flow_acceleration = recent_flow - previous_flow
 
         # Store flow speed for UI display
         ticker["flow_speed"] = flow_diff
-        ticker["flow_speed_ratio"] = flow_diff / older_first if older_first != 0 else 0.0
+        ticker["flow_acceleration"] = flow_acceleration
 
         # Determine base trend from flow momentum
-        if flow_diff > 0:
+        if flow_diff > 0 and flow_acceleration > 0:
             current_trend = "up"
-        elif flow_diff < 0:
+        elif flow_diff < 0 and flow_acceleration < 0:
             current_trend = "down"
         else:
             current_trend = "flat"
@@ -1225,7 +1200,7 @@ class AtmOptionVolumeService:
         previous_trend = ticker.get("trend", None)
         book_imbalance = ticker.get("book_imbalance", 0.0)
         
-        if abs(book_imbalance) > 0.3:  # Strong book imbalance threshold
+        if abs(book_imbalance) > 0.3:  # Strong book imbalance threshold, -1.0 ... +1.0
             # Book imbalance bullish and trend is flat/down - upgrade to bullish
             if book_imbalance > 0.3 and current_trend != "up":
                 current_trend = "up"
