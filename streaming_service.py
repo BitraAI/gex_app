@@ -4,7 +4,7 @@ import threading
 import pandas as pd
 from schwab.streaming import StreamClient
 
-MAX_ROWS = 200
+from _constants import MAX_BAR_ROWS
 
 
 class StreamingService:
@@ -100,16 +100,6 @@ class StreamingService:
                 out = pd.concat([out, row])
             return out
 
-    def get_level2_snapshot(self) -> dict:
-        """Return latest Level 2 order book data."""
-        with self._lock:
-            return {
-                "nasdaq": self._nasdaq_book,
-                "nyse": self._nyse_book,
-                "bid": self._bid_price,
-                "ask": self._ask_price,
-            }
-
     def start(self, symbol: str):
         if symbol == self._symbol and self._running:
             return
@@ -183,8 +173,8 @@ class StreamingService:
                     index=pd.Index([self._current_bucket], name="datetime"),
                 )
                 self._df = pd.concat([self._df, row])
-                if len(self._df) > MAX_ROWS:
-                    self._df = self._df.iloc[-MAX_ROWS:]
+                if len(self._df) > MAX_BAR_ROWS:
+                    self._df = self._df.iloc[-MAX_BAR_ROWS:]
 
             # Start new bucket
             self._current_bucket = bucket
@@ -364,17 +354,3 @@ class StreamingService:
         re-login and re-subscription.  Used by AtmOptionVolumeService to
         re-subscribe its LEVELONE_OPTIONS after the equity feed reconnects."""
         self._on_reconnect_cbs.append(callback)
-
-    def get_stats(self) -> dict:
-        """Return current streaming stats for monitoring."""
-        return {
-            "ticks_received": self._ticks_received,
-            "handler_errors": self._handler_errors,
-            "connected": self._connected,
-            "running": self._running,
-            "symbol": self._symbol,
-            "df_rows": len(self._df) if not self._df.empty else 0,
-            "has_current_bar": self._current_bar is not None,
-            "has_nasdaq_book": self._nasdaq_book is not None,
-            "has_nyse_book": self._nyse_book is not None,
-        }

@@ -106,7 +106,6 @@ def compute_analytics(
     r: float = 0.0,
     q: float = 0.0,
     expiration: str | None = None,
-    filter_strikes_to_chart_range: bool = False,
 ) -> dict[str, Any]:
     # Preserve full chain for SSVI/IV skew before filtering
     _full = data_full if data_full is not None else data
@@ -269,9 +268,7 @@ def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: li
     cum_put_oi = np.cumsum(put_oi)
     cum_call_k = np.cumsum(call_oi * full_strikes)
     cum_put_k = np.cumsum(put_oi * full_strikes)
-    total_call_oi = cum_call_oi[-1] if n_full else 0.0
     total_put_oi = cum_put_oi[-1] if n_full else 0.0
-    total_call_k = cum_call_k[-1] if n_full else 0.0
     total_put_k = cum_put_k[-1] if n_full else 0.0
 
     best_strike = None

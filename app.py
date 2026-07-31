@@ -1,6 +1,4 @@
 import asyncio
-import json
-import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -11,7 +9,7 @@ import client as client_mod
 from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
 from client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from streaming_service import StreamingService
-from option_streaming_service import AtmOptionVolumeService
+from option_streaming_service import (AtmOptionVolumeService, _load_ticker_history, _save_ticker_history, _normalize_display_symbol, _get_stream_symbol)
 from chart_component import render_chart
 from flow import (
     _ensure_async_loop,
@@ -108,22 +106,6 @@ _SESSION_DEFAULTS = {
     "index_spot_poller": None,
 }
 
-TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
-
-
-def _load_ticker_history() -> list[str]:
-    try:
-        with open(TICKER_HISTORY_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-
-def _save_ticker_history(history: list[str]):
-    os.makedirs(os.path.dirname(TICKER_HISTORY_FILE), exist_ok=True)
-    with open(TICKER_HISTORY_FILE, "w") as f:
-        json.dump(history, f)
-
 
 for k, v in _SESSION_DEFAULTS.items():
     if k not in st.session_state:
@@ -187,13 +169,33 @@ def init_client():
     return True
 
 
-def fetch_data(symbol: str) -> bool:
+def _fetch_option_chain_core(
+    symbol: str,
+    *,
+    selected_expirations: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Fetch, parse and ETF-fallback the option chain for *symbol*.
+
+    Shared by ``fetch_data`` (main chart refresh) and ``_run_ticker_signals``
+    (Trade Signals scan) so the Schwab REST + ETF-fallback pipeline is not
+    duplicated.
+
+    Returns ``None`` when the client could not be initialized.  A non-index
+    fetch failure is reported via ``fetch_error`` (with empty ``data``) so each
+    caller can choose its own error UX — ``fetch_data`` raises ``st.error``;
+    ``_run_ticker_signals`` stays silent.  Index symbols never short-circuit
+    and fall through to the ETF proxy fallback exactly like the original code.
+
+    When *selected_expirations* is given it filters the raw chain to those
+    expirations before parsing (Trade Signals scan only).
+    """
     if not init_client():
-        return False
-    _sym = symbol.upper().lstrip("$")
+        return None
+    _sym = _normalize_display_symbol(symbol)
     is_index_symbol = _sym in STREAM_SYMBOL_MAP
 
     raw = None
+    fetch_error: Exception | None = None
     try:
         raw = run_async(
             fetch_option_chain(
@@ -201,9 +203,23 @@ def fetch_data(symbol: str) -> bool:
             )
         )
     except Exception as e:
+        fetch_error = e
         if not is_index_symbol:
-            st.error(f"API Error: {e}")
-            return False
+            # Non-index fetch failure: nothing more to try.  Caller decides
+            # whether to surface the error to the user.
+            return {
+                "sym": _sym,
+                "is_index_symbol": False,
+                "fetch_error": fetch_error,
+                "data": [],
+                "spot": 0.0,
+                "r": 0.0,
+                "q": 0.0,
+                "etf_data": None,
+                "etf_spot": 0.0,
+                "etf_analytics": None,
+                "fallback_greeks": None,
+            }
 
     r = run_async(get_interest_rate(st.session_state.client))
     q = run_async(get_yield(st.session_state.client, symbol))
@@ -212,6 +228,22 @@ def fetch_data(symbol: str) -> bool:
     etf_analytics = None
     etf_data = None
     etf_spot = 0.0
+
+    # Optionally narrow the raw chain to selected expirations before parsing
+    # (Trade Signals scan).  Index symbols whose fetch failed have raw=None
+    # here, so the filter is a no-op for them.
+    if selected_expirations and raw is not None:
+        if isinstance(raw, dict) and "optionChain" in raw:
+            raw_filtered = [
+                e for e in raw["optionChain"]
+                if e.get("expiration") in selected_expirations
+            ]
+            raw = raw_filtered if raw_filtered else None
+        elif isinstance(raw, list):
+            raw_filtered = [
+                e for e in raw if e.get("expiration") in selected_expirations
+            ]
+            raw = raw_filtered if raw_filtered else None
 
     if is_index_symbol:
         try:
@@ -235,6 +267,35 @@ def fetch_data(symbol: str) -> bool:
     if (not data or spot <= 0) and etf_data and etf_spot > 0:
         data, spot = etf_data, etf_spot
 
+    return {
+        "sym": _sym,
+        "is_index_symbol": is_index_symbol,
+        "fetch_error": None,
+        "data": data,
+        "spot": spot,
+        "r": r,
+        "q": q,
+        "etf_data": etf_data,
+        "etf_spot": etf_spot,
+        "etf_analytics": etf_analytics,
+        "fallback_greeks": fallback_greeks,
+    }
+
+
+def fetch_data(symbol: str) -> bool:
+    core = _fetch_option_chain_core(symbol)
+    if core is None:
+        return False
+    if core["fetch_error"] is not None:
+        # Non-index fetch failure (index failures fall through to ETF fallback)
+        st.error(f"API Error: {core['fetch_error']}")
+        return False
+
+    _sym = core["sym"]
+    data, spot = core["data"], core["spot"]
+    r, q = core["r"], core["q"]
+    etf_analytics = core["etf_analytics"]
+
     st.session_state.r = r
     st.session_state.q = q
     if not data:
@@ -248,7 +309,7 @@ def fetch_data(symbol: str) -> bool:
     st.session_state.data = data
     st.session_state.spot = spot
     st.session_state.symbol = symbol
-    st.session_state.spot_cache[symbol.upper().lstrip("$")] = spot
+    st.session_state.spot_cache[_normalize_display_symbol(symbol)] = spot
     if symbol not in st.session_state.ticker_history:
         st.session_state.ticker_history.insert(0, symbol)
         st.session_state.ticker_history = st.session_state.ticker_history[:20]
@@ -543,17 +604,19 @@ def check_alerts(analytics: dict, spot: float):
     options_book_check_data = None
     if atm_svc is not None:
         try:
-            current_sym = s.get("symbol", "").upper().lstrip("$")
+            current_sym = _normalize_display_symbol(s.get("symbol", ""))
             trend_data = atm_svc.get_ticker_trend_data(current_sym)
             if trend_data:
                 options_book_check_data = {
                     "book_imbalance": trend_data.get("book_imbalance"),
                     "trend": trend_data.get("trend"),
+                    "flow_speed": trend_data.get("flow_speed"),
+                    "flow_acceleration": trend_data.get("flow_acceleration"),
                 }
-        except Exception as e:
+        except Exception:
             pass  # Use existing alerts if options_book data unavailable
     
-    new_alerts, next_state = diff_alerts(prev, analytics, spot, options_book_check_data)
+    new_alerts, next_state = diff_alerts(prev, analytics, spot)
     s.prev_alerts_state = next_state
 
     rv = s.get("underlying_20d_rv", 0.0)
@@ -570,6 +633,13 @@ def check_alerts(analytics: dict, spot: float):
         if tg_alerts:
             atm_iv = analytics.get("atm_iv")
             vrp = (atm_iv - rv) * 100 if atm_iv is not None and rv > 0 else None
+            _cw = analytics.get("call_wall")
+            _pw = analytics.get("put_wall")
+            _wall_zone = None
+            if _cw is not None and spot >= _cw - abs(_cw) * 0.0002:
+                _wall_zone = "Resistance"
+            elif _pw is not None and spot <= _pw + abs(_pw) * 0.0002:
+                _wall_zone = "Support"
             notify_alerts(
                 tg_alerts,
                 symbol=st.session_state.get("symbol"),
@@ -577,6 +647,11 @@ def check_alerts(analytics: dict, spot: float):
                 gex=analytics.get("net_gex"),
                 vrp=vrp,
                 iv_rank=st.session_state.get("iv_rank"),
+                wall_zone=_wall_zone, pw=_pw, cw=_cw,
+                wall_mark=analytics.get("call_wall_mark") if _wall_zone == "Resistance" else analytics.get("put_wall_mark"),
+                book_imbalance=(options_book_check_data or {}).get("book_imbalance"),
+                flow_speed=(options_book_check_data or {}).get("flow_speed"),
+                flow_acceleration=(options_book_check_data or {}).get("flow_acceleration"),
             )
 
 
@@ -765,19 +840,6 @@ TIMEFRAMES = {
 }
 
 
-def _build_candlestick_df(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Resample OHLCV DataFrame (ms index) to a target rule and return
-    a DataFrame with 'datetime', 'open', 'high', 'low', 'close' columns."""
-    idx = pd.to_datetime(df.index, unit="ms", errors="coerce")
-    resampled = df.copy()
-    resampled.index = idx
-    resampled = resampled.resample(rule).agg({
-        "open": "first", "high": "max", "low": "min",
-        "close": "last", "volume": "sum",
-    }).dropna()
-    return resampled.reset_index().rename(columns={"index": "datetime"})
-
-
 @st.fragment(run_every=2)
 def render_candlesticks_frag():
     s = st.session_state
@@ -890,12 +952,12 @@ def render_candlesticks_frag():
             if _now - _last_spot_refresh >= 2:
                 s._last_spot_refresh = _now
                 _all_tickers = s.get("ticker_history", [])
-                _stream_symbols = [STREAM_SYMBOL_MAP.get(t.upper().lstrip("$"), t.upper().lstrip("$")) for t in _all_tickers]
+                _stream_symbols = [_get_stream_symbol(t) for t in _all_tickers]
                 try:
                     from client import fetch_quotes
                     quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                     for disp_sym, stream_sym in zip(_all_tickers, _stream_symbols):
-                        _disp_upper = disp_sym.upper().lstrip("$")
+                        _disp_upper = _normalize_display_symbol(disp_sym)
                         if _disp_upper in INDEX_QUOTE_MAP:
                             continue
                         qd = quote_resp.get(stream_sym, {}) or {}
@@ -911,7 +973,7 @@ def render_candlesticks_frag():
                     _idx_fetch = []
                     _idx_disp_map = {}
                     for _t in _all_tickers:
-                        _t_upper = _t.upper().lstrip("$")
+                        _t_upper = _normalize_display_symbol(_t)
                         if _t_upper in INDEX_QUOTE_MAP:
                             _iq = INDEX_QUOTE_MAP[_t_upper]
                             _idx_fetch.append(_iq)
@@ -950,7 +1012,7 @@ def render_candlesticks_frag():
         # are streamed via their ETF equivalents (SPY, IWM, QQQ), but those
         # have completely different price scales — merging them would produce
         # nonsensical candlesticks, so skip the merge for proxy streams.
-        _sym_norm_chart = symbol.upper().lstrip("$")
+        _sym_norm_chart = _normalize_display_symbol(symbol)
         _merge_streaming = svc and svc.is_running and svc.symbol == stream_symbol and _sym_norm_chart == stream_symbol
         if _merge_streaming:
             try:
@@ -1136,7 +1198,7 @@ def render_candlesticks_frag():
         # candlesticks update like equities.  Index symbols cannot be streamed
         # via the equity WebSocket (Schwab only supports LEVELONE_EQUITIES for
         # real equities, not indices), so we fall back to REST polling ---- #
-        _sym_norm_idx = symbol.upper().lstrip("$")
+        _sym_norm_idx = _normalize_display_symbol(symbol)
         if _sym_norm_idx in INDEX_SYMBOLS and not chart_df.empty:
             try:
                 _atm_svc = s.get("atm_option_service")
@@ -1351,7 +1413,7 @@ def render_metrics_frag():
     # For index symbols (SPX, RUT, NDX) the stream subscribes to the
     # ETF proxy (SPY, IWM, QQQ) which has a completely different price
     # scale — never use the ETF's live price as the index spot.
-    _sym = s.get("symbol", "").upper().lstrip("$")
+    _sym = _normalize_display_symbol(s.get("symbol", ""))
     live = None
     if _sym not in INDEX_SYMBOLS:
         svc = s.get("streaming_service")
@@ -1623,61 +1685,25 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     ``ticker_history.json`` without disturbing the main session state.
     Returns ``None`` if data cannot be loaded.
     """
-    if not init_client():
+    # Pre-filter the raw chain to selected expirations (Trade Signals scan).
+    sel_exp = (
+        st.session_state.selected_expirations
+        if hasattr(st.session_state, "selected_expirations")
+        and st.session_state.selected_expirations
+        else None
+    )
+    core = _fetch_option_chain_core(symbol, selected_expirations=sel_exp)
+    if core is None:
         return None
-    _sym = symbol.upper().lstrip("$")
-    is_index_symbol = _sym in STREAM_SYMBOL_MAP
+    if core["fetch_error"] is not None:
+        # Silent failure (no st.error) — matches the original scan behavior.
+        return None
 
-    raw = None
-    try:
-        raw = run_async(
-            fetch_option_chain(st.session_state.client, symbol, strike_count=75, include_quotes=True)
-        )
-    except Exception:
-        if not is_index_symbol:
-            return None
-
-    r = run_async(get_interest_rate(st.session_state.client))
-    q = run_async(get_yield(st.session_state.client, symbol))
-
-    fallback_greeks = None
-    etf_analytics = None
-    etf_data = None
-    etf_spot = 0.0
-
-    # Filter expirations for charts if selected
-    if hasattr(st.session_state, 'selected_expirations') and st.session_state.selected_expirations:
-        # Filter raw data to selected expirations before parsing
-        if isinstance(raw, dict) and 'optionChain' in raw:
-            raw_filtered = [
-                e for e in raw['optionChain'] if e.get('expiration') in st.session_state.selected_expirations
-            ]
-            raw = raw_filtered if raw_filtered else None
-        elif isinstance(raw, list):
-            raw_filtered = [
-                e for e in raw if e.get('expiration') in st.session_state.selected_expirations
-            ]
-            raw = raw_filtered if raw_filtered else None
-
-    if is_index_symbol:
-        try:
-            fb_raw = run_async(
-                fetch_option_chain(st.session_state.client, STREAM_SYMBOL_MAP[_sym], strike_count=75, include_quotes=True)
-            )
-            fallback_greeks = build_greeks_lookup(fb_raw)
-            etf_data, etf_spot = parse_option_chain(fb_raw, r=r, q=q)
-            if etf_data and etf_spot > 0:
-                etf_analytics = compute_analytics(etf_data, etf_spot, data_full=etf_data, r=r, q=q)
-        except Exception:
-            pass
-
-    if raw is not None and not (isinstance(raw, dict) and raw.get("errors")):
-        data, spot = parse_option_chain(raw, r=r, q=q, fallback_greeks=fallback_greeks)
-    else:
-        data, spot = [], 0.0
-
-    if (not data or spot <= 0) and etf_data and etf_spot > 0:
-        data, spot = etf_data, etf_spot
+    _sym = core["sym"]
+    is_index_symbol = core["is_index_symbol"]
+    data, spot = core["data"], core["spot"]
+    r, q = core["r"], core["q"]
+    etf_analytics = core["etf_analytics"]
 
     if not data or spot <= 0:
         return None
@@ -1689,18 +1715,18 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
         selected_expirations = []
     filtered_data = _get_filtered_data_for_walls(data, selected_expirations)
     analytics = compute_analytics(filtered_data, spot, r=r, q=q, data_full=data)
-    
+
     # Set filtered data for order flow display with exact 20 strikes below, ATM, 20 above
     # This enables accurate wall calculations and displays correct support/resistance in the ATM order flow grid
     from analytics import get_filtered_strikes_for_analysis
     filtered_flow_data = get_filtered_strikes_for_analysis(filtered_data, spot, n=20)
     analytics["filtered_flow_data"] = filtered_flow_data
-    
+
     # Update ATM service with walls so the Order Flow grid displays them
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
         atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
-        
+
     if etf_analytics:
         if analytics.get("net_gex", 0) == 0:
             for key in ("net_gex", "total_call_gex", "total_put_gex",
@@ -1859,7 +1885,7 @@ def render_trade_signals():
                 e = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}
                 st.markdown(f"**Market Bias:** {e.get(b, '')} {b} - {br}")
                 # Lazily fetch earnings date if not already in session state
-                _sym_earn = s.get("symbol", "").upper().lstrip("$")
+                _sym_earn = _normalize_display_symbol(s.get("symbol", ""))
                 _ed = s.get("next_earnings_date")
                 if _ed is None and _sym_earn and s.get("client"):
                     try:
@@ -2129,7 +2155,6 @@ def render_news_frag():
         return
 
     # Force a poll on first render so there is something to show
-    import time as _tm
     if s.get("_news_first_poll", True):
         s["_news_first_poll"] = False
         loop = _ensure_async_loop()

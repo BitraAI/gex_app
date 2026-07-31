@@ -939,137 +939,6 @@ _HTML_TEMPLATE = """
 })();
 """
 
-_UPDATE_TEMPLATE = """
-<script>
-(function() {
-    const ROOT_ID = '%(root_id)s';
-    const DATA = %(json_data)s;
-    const RENDER_KEY = '__lwc_render_' + ROOT_ID;
-    const curVer = (window[RENDER_KEY] || 0) + 1;
-    window[RENDER_KEY] = curVer;
-
-    // Check if chart exists from initial render
-    const CHART_KEY = '__lwc_chart_' + ROOT_ID;
-    const chartRef = window[CHART_KEY];
-    if (!chartRef) return;
-
-    // Update candlestick if new bar provided
-    if (DATA.update && DATA.update.bar) {
-        try { chartRef.candleSeries.update(DATA.update.bar); } catch (_) {}
-    }
-
-    // Update indicators
-    if (DATA.update && DATA.update.indicators) {
-        const ind = DATA.update.indicators;
-        for (const key of Object.keys(ind)) {
-            const sKey = CHART_KEY + '_' + key;
-            const series = window[sKey];
-            if (series) {
-                try { series.update(ind[key]); } catch (_) {}
-            }
-        }
-    }
-
-    // Update IV skew
-    if (DATA.update && DATA.update.iv_skew) {
-        const ivData = DATA.update.iv_skew;
-        if (ivData.iv_skew != null) {
-            const mainKey = CHART_KEY + '_iv_skew_main';
-            const sMain = window[mainKey];
-            if (sMain) {
-                try { sMain.update({time: ivData.time, value: ivData.iv_skew}); } catch (_) {}
-            }
-            const histKey = CHART_KEY + '_iv_skew_hist_series';
-            const sHist = window[histKey];
-            if (sHist) {
-                try { sHist.update({time: ivData.time, value: ivData.iv_skew}); } catch (_) {}
-            }
-            if (ivData.put_iv_25d != null) {
-                const s = window[CHART_KEY + '_iv_skew_put'];
-                if (s) try { s.update({time: ivData.time, value: ivData.put_iv_25d}); } catch (_) {}
-            }
-            if (ivData.call_iv_25d != null) {
-                const s = window[CHART_KEY + '_iv_skew_call'];
-                if (s) try { s.update({time: ivData.time, value: ivData.call_iv_25d}); } catch (_) {}
-            }
-            if (ivData.atm_iv != null) {
-                const s = window[CHART_KEY + '_iv_skew_atm'];
-                if (s) try { s.update({time: ivData.time, value: ivData.atm_iv}); } catch (_) {}
-            }
-        }
-    }
-
-    // Save visible range after update
-    try {
-        const SAVED_KEY = '__lwc_saved_' + ROOT_ID;
-        const ts = chartRef.chart.timeScale();
-        const tr = ts.getVisibleRange();
-        if (tr) {
-            const subPriceRanges = {};
-            // Sample each indicator pane's Y range losslessly
-            for (const pid of Object.keys(chartRef.paneSeries)) {
-                if (pid === 'right') continue;
-                const series = chartRef.paneSeries[pid];
-                if (!series) continue;
-                try {
-                    const topP = series.coordinateToPrice(chartRef.paneEdges[pid].top);
-                    const botP = series.coordinateToPrice(chartRef.paneEdges[pid].bottom);
-                    if (topP != null && botP != null) {
-                        subPriceRanges[pid] = {from: Math.min(topP, botP), to: Math.max(topP, botP)};
-                    }
-                } catch (_) {}
-            }
-            window[SAVED_KEY] = {
-                mainRange: { from: tr.from, to: tr.to },
-                subPriceRanges: subPriceRanges,
-                hasManual: true,
-            };
-        }
-    } catch (_) {}
-
-    // ---- Register live-update function for incremental bar updates ---------- //
-    // Called from the fragment's update script to avoid rebuilding the entire
-    // chart on every tick.  Only the last bar is updated in-place.
-    const UPDATE_KEY = '__lwc_update_' + ROOT_ID;
-    window[UPDATE_KEY] = function(data) {
-        if (!candleSeries) return;
-        try {
-            // Update the last bar via series.update()
-            if (data.bar) candleSeries.update(data.bar);
-            // Update indicator latest values (stored series by key)
-            if (data.indicators) {
-                for (const key of Object.keys(data.indicators)) {
-                    const s = _allSeriesByKey[key];
-                    if (!s) continue;
-                    s.update(data.indicators[key]);
-                }
-            }
-            // Update streaming status badge
-            if (data.status && data.status.text) {
-                var existing = container.querySelector('[data-status-badge]');
-                if (existing) {
-                    existing.textContent = data.status.text;
-                } else {
-                    var lvl = data.status.level || 'info';
-                    var colors = {
-                        'info':    {bg: 'rgba(33,150,243,0.92)', fg: '#ffffff'},
-                        'success': {bg: 'rgba(0,204,150,0.92)', fg: '#0e1117'},
-                        'warning': {bg: 'rgba(255,193,7,0.95)',  fg: '#31333f'},
-                    };
-                    var c = colors[lvl] || colors['info'];
-                    var badge = document.createElement('div');
-                    badge.setAttribute('data-status-badge', '');
-                    badge.textContent = data.status.text;
-                    badge.style.cssText = 'position:absolute;top:4px;left:4px;padding:4px 10px;border-radius:6px;background:' + c.bg + ';color:' + c.fg + ';font-size:12px;font-weight:600;pointer-events:none;z-index:10;box-shadow:0 1px 3px rgba(0,0,0,0.35);white-space:nowrap;';
-                    container.appendChild(badge);
-                }
-            }
-        } catch (_) {}
-    };
-})();
-</script>
-"""
-
 
 def build_series_key(name: str) -> str:
     return name
@@ -1120,7 +989,6 @@ def build_init_data(
     series_list = []
     andean_series = None
     volume_series = None
-    atm_series = None
     vp_vols = None
 
     candlestick_options = {
@@ -1325,8 +1193,6 @@ def build_init_data(
     result = {"isDark": False, "series": series_list}
     if volume_series is not None:
         result["volume_series"] = volume_series
-    if atm_series is not None:
-        result["atm_series"] = atm_series
     if andean_series is not None:
         result["andean_series"] = andean_series
     if vp_vols is not None:
@@ -1334,77 +1200,7 @@ def build_init_data(
     return result
 
 
-def build_update_data(
-    latest_candle: dict,
-    indicator_values: dict | None = None,
-) -> dict:
-    from charts import _get_est_offset
-    try:
-        et = _get_est_offset()
-    except Exception:
-        et = 0
-    t = _convert_time(latest_candle["datetime"], et)
-    bar = {"time": t, "open": float(latest_candle["open"]), "high": float(latest_candle["high"]), "low": float(latest_candle["low"]), "close": float(latest_candle["close"])}
-    r = {"bar": bar}
-    if indicator_values:
-        r["indicators"] = indicator_values
-    return r
-
-
-def compute_latest_indicators(
-    candle: dict,
-    history: list[dict],
-    indicators: list[str] | None,
-) -> dict:
-    from charts import _sma, _ema, _trend, _andean_oscillator, INDICATORS
-
-    if not indicators:
-        return {}
-
-    all_candles = list(history)
-    if all_candles and all_candles[-1].get("datetime") != candle.get("datetime"):
-        all_candles.append(candle)
-    elif not all_candles:
-        all_candles = [candle]
-    else:
-        all_candles[-1] = candle
-
-    cd = []
-    for c in all_candles:
-        t = _convert_time(c["datetime"], 0)
-        cd.append({"time": t, "open": float(c["open"]), "high": float(c["high"]), "low": float(c["low"]), "close": float(c["close"])})
-    cd.sort(key=lambda x: x["time"])
-
-    closes = [c["close"] for c in cd]
-    opens = [c["open"] for c in cd]
-    times = [c["time"] for c in cd]
-    last_t = times[-1]
-
-    result = {}
-    for name in indicators or []:
-        cfg = INDICATORS.get(name)
-        if not cfg: continue
-        if name == "Volume": continue
-        if name == "Volume Profile": continue
-        if name == "Anchored VWAP": continue
-        if name == "Andean Osc":
-            bull, bear, signal = _andean_oscillator(opens, closes, cfg["length"], cfg["sigLength"])
-            result["andean"] = {"time": last_t, "bull": round(bull[-1], 2), "bear": round(bear[-1], 2), "signal": round(signal[-1], 2)}
-            continue
-        if name == "EMA 50 Squeeze": continue
-        if name == "Trend":
-            mv = _trend(opens, closes, cfg["alphaLength"])
-            result["trend"] = {"time": last_t, "value": round(mv[-1], 2)}
-            continue
-        period = cfg["period"]
-        if len(closes) < period: continue
-        vals = _ema(closes, period) if name.startswith("EMA") else _sma(closes, period)
-        result[f"ma_{name}"] = {"time": times[period - 1 + len(vals) - period], "value": round(vals[-1], 2)}
-
-    return result
-
-
-def render_chart(candles, indicators=None, call_wall=None, put_wall=None, force_reinit=False, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
+def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
     osc_height = 100 if (indicators and "Andean Osc" in indicators) else 0

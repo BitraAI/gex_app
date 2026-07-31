@@ -1,4 +1,3 @@
-import re as _re
 from typing import Any
 
 
@@ -648,58 +647,3 @@ def generate_recommendations(
 
     return recs
 
-
-# ── Daily scan helpers ──────────────────────────────────────────────
-
-_TRADE_PATTERN = _re.compile(r"\*\*(Buy|Sell)\s+(Call|Put)\s+@\s+\S+\s+\(\d{2}-\d{2}")
-
-def is_trade_signal(msg: str) -> bool:
-    """True if *msg* is an actual trade recommendation (has strike + expiration)."""
-    return bool(_TRADE_PATTERN.search(msg))
-
-
-def filter_trade_signals(recs: list[str]) -> list[str]:
-    """Return only trade-signal entries from a recommendations list."""
-    return [r for r in recs if is_trade_signal(r)]
-
-
-def daily_ticker_scan(
-    ticker_data: list[dict[str, Any]],
-    spot: float,
-    *,
-    all_data: list[dict[str, Any]] | None = None,
-    rv: float = 0.0,
-    call_wall: float | None = None,
-    put_wall: float | None = None,
-    iv_skew: float | None = None,
-    ssvi_surface: Any = None,
-    ssvi_tte: float | None = None,
-    bias: str | None = None,
-    dte_min: int = 30,
-    dte_max: int = 45,
-) -> list[str]:
-    """Run all directional strategies for one symbol and return only trade signals.
-
-    Intended use — once per day per ticker, send results via Telegram::
-
-        from signals import daily_ticker_scan, filter_trade_signals
-
-        for sym in all_tickers:
-            recs = daily_ticker_scan(data, spot, ...)
-            trade_recs = filter_trade_signals(recs)
-            if trade_recs:
-                notify_alerts(trade_recs, symbol=sym, ...)
-    """
-    recs: list[str] = []
-    for strategy in ("Long Calls", "Long Puts", "Short Calls", "Short Puts"):
-        recs.extend(
-            generate_recommendations(
-                ticker_data, spot, strategy=strategy,
-                all_data=all_data, rv=rv,
-                call_wall=call_wall, put_wall=put_wall,
-                iv_skew=iv_skew, ssvi_surface=ssvi_surface,
-                ssvi_tte=ssvi_tte, bias=bias,
-                dte_min=dte_min, dte_max=dte_max,
-            )
-        )
-    return filter_trade_signals(recs)
