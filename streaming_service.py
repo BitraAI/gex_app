@@ -259,14 +259,12 @@ class StreamingService:
         # ---- NASDAQ book handler (Level 2) ---------------------------- #
         def _nasdaq_handler(msg):
             with self._lock:
-                for c in msg.get("content", []):
-                    self._nasdaq_book = c
+                self._nasdaq_book = msg
 
         # ---- NYSE book handler (Level 2) ------------------------------ #
         def _nyse_handler(msg):
             with self._lock:
-                for c in msg.get("content", []):
-                    self._nyse_book = c
+                self._nyse_book = msg
 
         # Add handlers before subscribing
         sc.add_level_one_equity_handler(_l1_handler)
