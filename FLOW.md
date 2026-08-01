@@ -48,7 +48,7 @@ Trend reflects the **rate of change of L2 book-imbalance pressure** over the
 last 60 seconds, not the absolute level. It is computed on demand by
 `StreamingService.trend_data()` from the NASDAQ + NYSE LEVEL2 books and read
 by the grid and the Telegram trend alerts via
-`AtmOptionVolumeService.get_ticker_trend_data(streaming_service=...)`.
+`StreamingService.get_ticker_trend_data(display_symbol)`.
 
 How it works:
 
@@ -116,8 +116,8 @@ outside the buffer those scores contribute nothing.
 
 ```
 Schwab WebSocket (LEVEL1_EQUITIES + NASDAQ_BOOK / NYSE_BOOK)
-        |
-        |----------------------------------+
+                         |
+        |----------------------------------|
         v                                  v
   LEVEL1 trades                      LEVEL2 order books
   bid, ask, last,                     per-symbol book messages

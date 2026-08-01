@@ -6,6 +6,7 @@ import pandas as pd
 from schwab.streaming import StreamClient
 
 from _constants import MAX_BAR_ROWS
+from option_streaming_service import _get_stream_symbol
 
 
 class StreamingService:
@@ -508,7 +509,7 @@ class StreamingService:
     def trend_data(self, stream_symbol: str) -> dict:
         """L2-sourced trend snapshot for a stream symbol, matching the dict
         shape previously produced by
-        ``AtmOptionVolumeService.get_ticker_trend_data``:
+        ``StreamingService.get_ticker_trend_data``:
 
             {trend, book_imbalance, flow_speed, flow_acceleration,
              trend_reversal, book_imbalance_history, flow_history}
@@ -560,3 +561,15 @@ class StreamingService:
             "book_imbalance_history": book_imbalance_history,
             "flow_history": [],
         }
+
+
+    def get_ticker_trend_data(self, display_symbol: str) -> dict:
+        """L2-sourced trend dict for a display symbol.
+
+        Convenience wrapper: maps the display symbol to its stream symbol
+        (NASDAQ/NYSE LEVEL2 book key) via ``_get_stream_symbol`` and delegates
+        to ``trend_data``.  Returns neutral defaults (trend flat, book_imbalance
+        None, flow_speed and flow_acceleration 0) when no book has been
+        subscribed, since ``trend_data`` guards the empty-history case.
+        """
+        return self.trend_data(_get_stream_symbol(display_symbol))

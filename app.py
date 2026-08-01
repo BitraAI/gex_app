@@ -605,9 +605,8 @@ def check_alerts(analytics: dict, spot: float):
     if atm_svc is not None:
         try:
             current_sym = _normalize_display_symbol(s.get("symbol", ""))
-            trend_data = atm_svc.get_ticker_trend_data(
-                current_sym, streaming_service=s.get("streaming_service")
-            )
+            _ssvc = s.get("streaming_service")
+            trend_data = _ssvc.get_ticker_trend_data(current_sym) if _ssvc else None
             if trend_data:
                 options_book_check_data = {
                     "book_imbalance": trend_data.get("book_imbalance"),

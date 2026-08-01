@@ -1113,38 +1113,6 @@ class AtmOptionVolumeService:
                     bar["put_buy_vol"] += half
                     bar["put_sell_vol"] += rem
 
-    def get_ticker_trend_data(self, display_symbol: str, streaming_service=None) -> dict:
-        """Return the Level-2 order-book trend dict for a ticker.
-
-        ``book_imbalance`` / ``flow_speed`` / ``flow_acceleration`` / ``trend``
-        are sourced from the shared ``StreamingService`` Level 2 book (NASDAQ
-        + NYSE volume), NOT from option-quote sizes or option-trade deltas, so
-        live book pressure drives trend.  Pass ``st.session_state.streaming_service``
-        and ensure the ticker's book is subscribed via
-        ``StreamingService.subscribe_book_symbols``.  When no L2 stream is
-        available, neutral defaults are returned.
-        """
-        stream_symbol = _get_stream_symbol(display_symbol)
-        if streaming_service is not None:
-            return streaming_service.trend_data(stream_symbol)
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-        if ticker is None:
-            return {
-                "trend": "flat", "book_imbalance": None, "flow_speed": 0,
-                "flow_acceleration": 0, "trend_reversal": None,
-                "book_imbalance_history": [], "flow_history": [],
-            }
-        return {
-            "trend": ticker.get("trend", "flat"),
-            "book_imbalance": None,
-            "flow_speed": 0,
-            "flow_acceleration": 0,
-            "trend_reversal": ticker.get("trend_reversal"),
-            "book_imbalance_history": [],
-            "flow_history": ticker.get("flow_history", []),
-        }
-
     def _process_trade_ticker(self, ticker: dict | None, price: float, size: int, opt_type: str):
         """Accumulate a trade into a per-ticker flow total (cumulative,
         not a rolling window).  Called with self._lock held."""
