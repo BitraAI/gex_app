@@ -24,6 +24,7 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Absorption** | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot displacement over the same window. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
 | **Buy/Sell** | Session-cumulative executed ATM flow split by aggressor side: `buy_vol | sell_vol` (buyer- vs seller-initiated prints, from `AtmOptionVolumeService.get_ticker_executed_flow`). |
 | **Net Flow** | Net executed flow over the trailing 60 s: `buy_vol − sell_vol` (rolling window). Green > 0, red < 0, orange otherwise. |
+| **Liquidity Flow** | Net change in L2 OPTIONS-book resting depth at the best levels over the trailing 60 s: `liquidity_flow = depth_now − depth_60s_ago` (from `StreamingService.trend_data`). Positive = liquidity being posted (book refilling); negative = liquidity being drained (break risk). Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -299,6 +300,22 @@ contracts were absorbed while spot stayed inside (Telegram
 absorbing ≥ 100 contracts, the wall is treated as **broken** and a dedicated
 💥 `Resistance/Support wall BROKE after absorbing <n> contracts` alert fires —
 heavy absorption followed by a break is a high-conviction move.
+
+### Liquidity flow (L2 book)
+
+**Liquidity flow** (`StreamingService._liquidity_flow`, exposed via
+`trend_data` as the grid **Liquidity Flow** column and the Telegram
+`Liquidity Flow: <n>` header line) measures whether resting liquidity at the
+best L2 OPTIONS-book levels is being added or drained over the trailing 60 s:
+
+    depth = Σ bid TOTAL_VOLUME + Σ ask TOTAL_VOLUME (best levels)
+    liquidity_flow = depth_now − depth_60s_ago   (contracts)
+
+Positive = liquidity is being posted (the book is refilling — strong
+support/resistance); negative = liquidity is being consumed (the book is
+draining — elevated break risk).  Unlike `flow_speed` (which is the
+dimensionless rate of change of the book-imbalance *ratio*), liquidity flow
+is measured in actual contracts of resting volume.
 
 ### Registration & subscription order
 
