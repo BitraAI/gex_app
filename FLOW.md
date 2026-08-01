@@ -19,8 +19,8 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Support** | Put wall value (support level from Options data). |
 | **Resistance** | Call wall value (resistance level from Options data). |
 | **Book Imbalance** | Live Level-2 order-book pressure (OPTIONS): Positive → bullish, Negative → bearish. Ratio `(sum bid TOTAL_VOLUME − sum ask TOTAL_VOLUME) / sum` over the best book levels, range [-1, 1], refreshed on every book update. |
-| **Flow Speed** | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = newer_first − older_first` (where `newer_first = history[-segment_size][1]`, `older_first = history[0][1]`). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. |
-| **Flow Acceleration** | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[-segment_size][1]`, `previous_flow = history[segment_size-1][1] − history[0][1]`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. |
+| **Flow Speed** | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. |
+| **Flow Acceleration** | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, `mid = max(1, len(history) // 2)`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -58,14 +58,12 @@ How it works:
    `(timestamp, ratio)` to a per-symbol 60s history.
 2. **Cold-start guard** - if fewer than 2 samples exist the trend is
    **flat** and `flow_speed` / `flow_acceleration` are 0.
-3. **Book-pressure momentum** - the history is split in half (`segment_size =
-   max(1, len(history) // 2)`) and the first point of the newer half is
-   compared with the first point of the whole history:
-   - `older_first = history[0][1]`
-   - `newer_first = history[-segment_size][1]`
-   - `flow_speed = newer_first - older_first`
-   - `previous_flow = history[segment_size-1][1] - history[0][1]`
-   - `recent_flow = history[-1][1] - history[-segment_size][1]`
+3. **Book-pressure momentum** - the window is split at the exact midpoint
+   (`mid = max(1, len(history) // 2)`) so every sample is used:
+   - `flow_speed = history[-1][1] - history[0][1]` (first difference over the
+     whole 60 s window)
+   - `previous_flow = history[mid-1][1] - history[0][1]` (change in older half)
+   - `recent_flow = history[-1][1] - history[mid][1]` (change in recent half)
    - `flow_acceleration = recent_flow - previous_flow`
 4. **Trend cascade** - the label is set by a single prioritized ladder
    (no separate "override" step): strong `UP` / `DOWN` require
@@ -99,12 +97,12 @@ and its first / second differences:
 Where:
 - `book_imbalance = (Σ bid TOTAL_VOLUME − Σ ask TOTAL_VOLUME) / Σ` over the best
   L2 options-book price levels, range `[−1, 1]`.
-- `flow_speed = newer_first − older_first` over the trailing 60 s history
-  (history split in half; `newer_first = history[-segment][1]`,
-  `older_first = history[0][1]`).
+- `flow_speed = history[-1][1] − history[0][1]` over the trailing 60 s history
+  (first difference over the whole window).
 - `flow_acceleration = recent_flow − previous_flow`, where
-  `previous_flow = history[segment-1][1] − history[0][1]` and
-  `recent_flow = history[-1][1] − history[-segment][1]`.
+  `previous_flow = history[mid-1][1] − history[0][1]` and
+  `recent_flow = history[-1][1] − history[mid][1]`, with
+  `mid = max(1, len(history) // 2)`.
 
 A **reversal** is derived by comparing the current trend to the previous tick's
 stored trend (`_prev_trend`):
@@ -141,8 +139,8 @@ Schwab WebSocket (LEVEL1_EQUITIES + LEVEL1_OPTIONS + OPTIONS_BOOK)
    (_process_trade_ticker)             (StreamingService book handlers)
    -> buy/sell                         -> book_imbalance ratio [-1, 1]
    -> GEX totals                       -> appended to per-symbol 60s rolling history
-        |                              -> flow_speed / flow_acceleration
-        |                                  (newer_first - older_first, etc.)
+         |                              -> flow_speed / flow_acceleration
+         |                                  (first / second difference)
         |                                  -> trend (up/down/UP/DOWN/flat)
         |                                  -> reversal (bullish/bearish)
         v                                  (StreamingService.trend_data)

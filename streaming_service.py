@@ -471,8 +471,15 @@ class StreamingService:
 
     def _flow_speed_and_accel(self, symbol: str) -> tuple[float, float]:
         """Derive flow_speed / flow_acceleration from the L2 book-imbalance
-        series, mirroring the legacy option-flow momentum math so the same
-        sign / >0.3 thresholds still apply downstream.
+        series.
+
+        ``flow_speed`` is the first difference of the ratio over the trailing
+        60 s window (``history[-1] - history[0]``).  ``flow_acceleration`` is
+        the second difference: the change over the recent half of the window
+        minus the change over the older half, split at the exact midpoint so
+        every sample contributes.  Sign semantics match the legacy
+        option-flow momentum math so the same >0.3 thresholds apply
+        downstream.
 
         Assumes *self._lock* is held.
         """
@@ -484,12 +491,13 @@ class StreamingService:
             history.pop(0)
         if len(history) < 2:
             return 0.0, 0.0
-        segment_size = max(1, len(history) // 2)
-        older_first = history[0][1]
-        newer_first = history[-segment_size][1]
-        flow_speed = newer_first - older_first
-        previous_flow = history[segment_size - 1][1] - history[0][1]
-        recent_flow = history[-1][1] - history[-segment_size][1]
+        # first difference of the ratio over the trailing 60 s window
+        flow_speed = history[-1][1] - history[0][1]
+        # second difference: (change over recent half) - (change over older
+        # half), split at the exact midpoint so every sample is used.
+        mid = max(1, len(history) // 2)
+        previous_flow = history[mid - 1][1] - history[0][1]
+        recent_flow = history[-1][1] - history[mid][1]
         flow_acceleration = recent_flow - previous_flow
         return flow_speed, flow_acceleration
 
