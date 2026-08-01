@@ -65,10 +65,6 @@ class StreamingService:
         # pruned to the last 60s, used to derive flow_speed / flow_acceleration.
         self._book_imb_history: dict[str, list] = {}
         self._prev_trend: dict[str, str] = {}        # stream_symbol -> last trend label (reversal)
-        
-        # Level 1 options subscription for continuous ATM flow
-        self._options_subscribed_symbols: set[str] = set()
-        self._options_level_one_data: dict[str, dict] = {}  # store latest L1 options data
 
     @property
     def symbol(self) -> str | None:
@@ -272,28 +268,6 @@ class StreamingService:
                     except Exception:
                         pass
 
-        # ---- Level 1 options handler (trades + quotes) ------------------ #
-        def _l1_options_handler(msg):
-            with self._lock:
-                for c in msg.get("content", []):
-                    sym = c.get("key", "") or c.get("SYMBOL", "")
-                    if not sym:
-                        continue
-                    
-                    # Normalize symbol for consistency
-                    sym_norm = sym.replace(" ", "")
-                    
-                    # Store latest L1 options data
-                    self._options_level_one_data[sym_norm] = {
-                        "bid": float(c.get("BID_PRICE", 0)) if c.get("BID_PRICE") else None,
-                        "ask": float(c.get("ASK_PRICE", 0)) if c.get("ASK_PRICE") else None,
-                        "last": float(c.get("LAST_PRICE", 0)) if c.get("LAST_PRICE") else None,
-                        "bid_size": float(c.get("BID_SIZE", 0)) if c.get("BID_SIZE") else None,
-                        "ask_size": float(c.get("ASK_SIZE", 0)) if c.get("ASK_SIZE") else None,
-                        "time": c.get("TRADE_TIME_MILLIS", 0),
-                        "trade_price": float(c.get("LAST_PRICE", 0)) if c.get("LAST_PRICE") else None,
-                    }
-
         # ---- Level 2 book handlers (one message may carry many symbols) - #
         def _options_book_handler(msg):
             with self._lock:
@@ -306,7 +280,6 @@ class StreamingService:
 
         # Add handlers before subscribing
         sc.add_level_one_equity_handler(_l1_handler)
-        sc.add_level_one_option_handler(_l1_options_handler)
         sc.add_options_book_handler(_options_book_handler)
 
         try:
@@ -317,12 +290,10 @@ class StreamingService:
             return
 
         # Subscribe to all services: Level 1 for the chart symbol + Level 2
-        # books for the chart symbol and every tracked ticker + Level 1 options
-        # for ATM option flow.
+        # books for the chart symbol and every tracked ticker.
         while self._running and self._symbol:
             try:
                 await sc.level_one_equity_subs([self._symbol])
-                await self._subscribe_options(sc)
                 await self._subscribe_books(sc)
             except Exception as e:
                 with self._lock:
@@ -349,7 +320,6 @@ class StreamingService:
                         while self._running and self._symbol:
                             try:
                                 await sc.level_one_equity_subs([self._symbol])
-                                await self._subscribe_options(sc)
                                 await self._subscribe_books(sc)
                             except Exception:
                                 await asyncio.sleep(2)
@@ -394,12 +364,6 @@ class StreamingService:
     # ------------------------------------------------------------------ #
     # Level 2 book trend (subscribed per tracked ticker)
     # ------------------------------------------------------------------ #
-
-    @property
-    def book_symbols(self) -> set[str]:
-        """Stream symbols currently subscribed for Level 2 books."""
-        with self._lock:
-            return set(self._book_symbols)
 
     def subscribe_book_symbols(self, stream_symbols: list[str]) -> None:
         """Ensure Level 2 books are subscribed for exactly *stream_symbols*.
@@ -461,17 +425,6 @@ class StreamingService:
             await sc.nasdaq_book_subs(book_syms)
             await sc.nyse_book_subs(book_syms)
             await sc.options_book_subs(book_syms)
-    
-    async def _subscribe_options(self, sc: StreamClient):
-        """Subscribe to Level 1 options for the chart symbol and every
-        tracked ticker to provide continuous ATM flow.
-        Called from ``_stream`` right after login and
-        after each re-login so options survive reconnects."""
-        option_syms = [self._symbol] if self._symbol else []
-        with self._lock:
-            option_syms += [s for s in self._book_symbols if s and s != self._symbol]
-        if option_syms:
-            await sc.level_one_option_subs(option_syms)
 
     def _book_imbalance_for_symbol(self, symbol: str) -> float | None:
         """Aggregate Level-2 bid/ask volume imbalance for one stream symbol,
@@ -548,12 +501,15 @@ class StreamingService:
             {trend, book_imbalance, flow_speed, flow_acceleration,
              trend_reversal, book_imbalance_history, flow_history}
 
-        ``book_imbalance`` is the current NASDAQ+NYSE volume ratio;
-        ``flow_speed`` / ``flow_acceleration`` are the first and second
-        differences of that ratio over the trailing 60s window.  All trend
-        thresholds (>±0.3) match the option-flow derivation, so downstream
-        consumers (``flow.classify_trend_signal``, the Telegram formatter,
-        and the grid styler) need no changes.
+        ``book_imbalance`` is the current L2 OPTIONS-book bid/ask volume
+        ratio (aggregated from ``_books_options`` — see
+        ``_book_imbalance_for_symbol``); ``flow_speed`` /
+        ``flow_acceleration`` are the first and second differences of that
+        ratio over the trailing 60s window.  All trend thresholds (>±0.3)
+        match the option-flow derivation, so downstream consumers
+        (``flow.maybe_fire_wall_zone_alerts`` and the grid Trend column,
+        plus the Telegram formatter) consume the trend and trend_reversal
+        fields directly.
         """
         with self._lock:
             ratio = self._book_imbalance_for_symbol(stream_symbol)
@@ -564,9 +520,9 @@ class StreamingService:
             if ratio is None or len(history) < 2:
                 trend = "flat"
             elif ratio > 0.3 and flow_speed > 0 and flow_acceleration > 0:
-                trend = "up"
+                trend = "UP"
             elif ratio < -0.3 and flow_speed < 0 and flow_acceleration < 0:
-                trend = "down"
+                trend = "DOWN"
             elif ratio > 0.3 and flow_speed > 0:
                 trend = "up"
             elif ratio < -0.3 and flow_speed < 0:
@@ -601,7 +557,7 @@ class StreamingService:
         """L2-sourced trend dict for a display symbol.
 
         Convenience wrapper: maps the display symbol to its stream symbol
-        (NASDAQ/NYSE LEVEL2 book key) via ``_get_stream_symbol`` and delegates
+        (the L2 OPTIONS-book key) via ``_get_stream_symbol`` and delegates
         to ``trend_data``.  Returns neutral defaults (trend flat, book_imbalance
         None, flow_speed and flow_acceleration 0) when no book has been
         subscribed, since ``trend_data`` guards the empty-history case.

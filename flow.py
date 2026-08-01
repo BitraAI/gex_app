@@ -466,44 +466,6 @@ def _wall_buffer(wall: float | None) -> float:
     return max(abs(wall) * _WALL_ZONE_BUFFER, _WALL_ZONE_MIN_BUFFER)
 
 
-def classify_trend_signal(spot, put_wall, call_wall, book_imb, flow_speed, flow_acceleration) -> str:
-    """Classify a ticker into a buy/sell signal label.
-
-    Single source of truth shared by the Order Flow grid and the Telegram
-    trend alerts so the two can never drift.  Returns STRONG BUY / BUY /
-    WEAK BUY / STRONG SELL / SELL / WEAK SELL / BREAKOUT / BREAKDOWN / HOLD.
-    """
-    if spot is None or book_imb is None or flow_speed is None or flow_acceleration is None:
-        return "HOLD"
-    pw_buf = _wall_buffer(put_wall)
-    cw_buf = _wall_buffer(call_wall)
-    near_support = put_wall is not None and spot <= put_wall + pw_buf
-    near_resistance = call_wall is not None and spot >= call_wall - cw_buf
-    beyond_resistance = call_wall is not None and spot >= call_wall + cw_buf
-    beyond_support = put_wall is not None and spot <= put_wall - pw_buf
-
-    strong_bull = book_imb > 0.3 and flow_speed > 0 and flow_acceleration > 0
-    strong_bear = book_imb < -0.3 and flow_speed < 0 and flow_acceleration < 0
-
-    if near_support and strong_bull:
-        return "STRONG BUY"
-    if near_support and book_imb > 0.3 and flow_speed > 0:
-        return "BUY"
-    if near_support and book_imb > 0.3 and flow_acceleration > 0:
-        return "WEAK BUY"
-    if near_resistance and strong_bear:
-        return "STRONG SELL"
-    if near_resistance and book_imb < -0.3 and flow_speed < 0:
-        return "SELL"
-    if near_resistance and book_imb < -0.3 and flow_acceleration < 0:
-        return "WEAK SELL"
-    if beyond_resistance and strong_bull:
-        return "BREAKOUT"
-    if beyond_support and strong_bear:
-        return "BREAKDOWN"
-    return "HOLD"
-
-
 def maybe_fire_wall_zone_alerts() -> None:
     """Inspect every tracked ticker's streaming spot vs its walls and push
     diff_alerts (wall zone, gamma flip, wall changes) to Telegram.
@@ -597,19 +559,17 @@ def maybe_fire_wall_zone_alerts() -> None:
             wall_zone = "Resistance"
         elif put_wall is not None and spot <= put_wall + _wall_buffer(put_wall):
             wall_zone = "Support"
-        # Flow-context alert: pass the strong trend signal (STRONG BUY /
-        # STRONG SELL / BREAKOUT / BREAKDOWN) to Telegram when present.
-        _trend_label = classify_trend_signal(
-            spot, put_wall, call_wall,
-            ticker_data.get("book_imbalance"),
-            ticker_data.get("flow_speed"),
-            ticker_data.get("flow_acceleration"),
-        )
-        _trend_signal = (
-            _trend_label
-            if _trend_label in ("STRONG BUY", "STRONG SELL", "BREAKOUT", "BREAKDOWN")
-            else None
-        )
+        # Trend signal sourced directly from StreamingService.trend_data: a
+        # reversal (bullish/bearish) takes precedence, otherwise a clean
+        # direction (up/down). flat is not surfaced as an alert. This replaces
+        # the previous wall-zone buy/sell classifier.
+        _trend_reversal = ticker_data.get("trend_reversal")
+        _trend_dir = ticker_data.get("trend")
+        _trend_signal: str | None = None
+        if _trend_reversal in ("bullish", "bearish"):
+            _trend_signal = _trend_reversal
+        elif _trend_dir in ("up", "down"):
+            _trend_signal = _trend_dir
         last_ts = (prev or {}).get("last_alert_ts", 0.0)
         next_state["last_alert_ts"] = last_ts
         next_state["_prev_call_wall"] = call_wall
@@ -1083,15 +1043,22 @@ def render_atm_order_flow_grid():
             opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
             atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
             spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
-            # Get book imbalance and trend from ticker data
+            # Get book imbalance and trend from ticker data (L2-sourced via
+            # StreamingService.trend_data: trend is up/down/flat, reversal is
+            # bullish/bearish when the direction flips down->up / up->down).
             book_imbalance = None
             flow_speed = 0
             flow_acceleration = 0
+            trend_display = "flat"
             if _svc is not None:
                 ticker_data = _svc.get_ticker_trend_data(t_upper)
                 book_imbalance = ticker_data.get("book_imbalance")
                 flow_speed = ticker_data.get("flow_speed", 0)
                 flow_acceleration = ticker_data.get("flow_acceleration", 0)
+                # Reversal (bullish/bearish) takes precedence over the bare
+                # direction so the Trend column surfaces the flip the moment
+                # it is detected; otherwise show the current direction.
+                trend_display = ticker_data.get("trend_reversal") or ticker_data.get("trend") or "flat"
             
             # Support (Put Wall) / Resistance (Call Wall): prefer per-ticker value
             # set by fetch_data, fall back to session-state analytics for the
@@ -1103,21 +1070,6 @@ def render_atm_order_flow_grid():
                 put_wall_val = (s.get("analytics") or {}).get("put_wall")
             if call_wall_val is None and t_upper == current_sym:
                 call_wall_val = (s.get("analytics") or {}).get("call_wall")
-
-            # Trend label from the shared buy/sell signal classifier:
-            #   STRONG BUY   near support + book_imbalance > 0.3 + flow_speed > 0 + flow_acceleration > 0
-            #   BUY          near support + book_imbalance > 0.3 + flow_speed > 0
-            #   WEAK BUY     near support + book_imbalance > 0.3 + flow_acceleration > 0
-            #   STRONG SELL  near resistance + book_imbalance < -0.3 + flow_speed < 0 + flow_acceleration < 0
-            #   SELL         near resistance + book_imbalance < -0.3 + flow_speed < 0
-            #   WEAK SELL    near resistance + book_imbalance < -0.3 + flow_acceleration < 0
-            #   BREAKOUT     beyond resistance + book_imbalance > 0.3 + flow_speed > 0 + flow_acceleration > 0
-            #   BREAKDOWN    beyond support + book_imbalance < -0.3 + flow_speed < 0 + flow_acceleration < 0
-            #   HOLD         otherwise
-            trend_display = classify_trend_signal(
-                spot, put_wall_val, call_wall_val,
-                book_imbalance, flow_speed, flow_acceleration,
-            )
 
             rows.append({
                 "Ticker": t_upper,
@@ -1163,13 +1115,17 @@ def render_atm_order_flow_grid():
     df = pd.DataFrame(rows)
 
     def _trend_color(val):
-        """Color the trend label (STRONG BUY/BUY/WEAK BUY/.../BREAKOUT/BREAKDOWN) based on direction."""
+        """Color the Trend label (up/down/flat/bullish/bearish) by direction.
+
+        Reversal labels (bullish/bearish) are bolded to surface the flip;
+        up/down are green/red; flat is amber.
+        """
         if val is None:
             return ""
         val_l = val.lower()
-        if val_l in ("breakdown", "down") or "sell" in val_l:
+        if val_l in ("bearish", "down"):
             return "color: #ef5350; font-weight: bold;"
-        if val_l in ("breakout", "up") or "buy" in val_l:
+        if val_l in ("bullish", "up"):
             return "color: #00cc96; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 

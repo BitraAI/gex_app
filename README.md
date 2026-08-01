@@ -33,7 +33,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Dealer Position (Long/Short Gamma)
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
    - IV Rank — Where the latest daily return sits in the trailing 52-week range of daily returns. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
-    - **Order Flow** — Real-time ATM option flow for every tracked ticker, shown in the **Order Flow** tab. Subscribes to front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming (with L2 options book support). Each ticker uses its own per-ticker expiration (fetched lazily), so non-primary tickers subscribe to the correct option contracts. Streaming starts when you Refresh a ticker on the main page.
+    - **Order Flow** — Real-time ATM option flow for every tracked ticker, shown in the **Order Flow** tab. Subscribes to front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming (with L2 options book support). Each ticker uses its own per-ticker expiration (fetched lazily), so non-primary tickers subscribe to the correct option contracts. The grid shows per-ticker Spot, ATM Strike, Support (Put Wall) / Resistance (Call Wall), ATM Call/Put prices, a **Trend** label (`up` / `down` / `UP` / `DOWN` / `bullish` / `bearish` / `flat`), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed**, and **Flow Acceleration** (first / second differences of the L2 book-imbalance series), all sourced from `StreamingService.trend_data()`. Streaming starts when you Refresh a ticker on the main page.
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
@@ -67,7 +67,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 - **Light Theme** — Clean light-themed UI
 - **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
   - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
-  - **Trend alerts:** STRONG BUY / STRONG SELL / BREAKOUT / BREAKDOWN signals (near-wall spot + strong order-flow momentum) sent with a trade suggestion
+  - **Trend alerts:** `bullish` / `bearish` (reversals) and `up` / `down` directional signals (sourced from `StreamingService.trend_data()` L2 book-imbalance momentum near a wall) sent with a trade suggestion (`BUY CALL` / `BUY PUT`)
   - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
   Two delivery paths:
   - **In-app:** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
@@ -237,7 +237,7 @@ You can then open the app in your local browser.
    - **Drag the price-scale labels** (right edge) to zoom the Y-axis, or the **time-scale labels** (bottom) to zoom the X-axis.
    - **Scroll the mouse wheel** to zoom the X-axis (bar spacing).
    - The Y zoom persists across the live 1-second streaming updates — drag it to where you want and the chart stays there.
- 8. **Bullish/Bearish Flow** — open the **Order Flow** tab to see real-time ATM option flow for every ticker in `ticker_history.json`. The table shows Bullish Flow, Bearish Flow, Flow Momentum (green/red), and a market status indicator (green `●` when market is open, amber `●` when closed). Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
+ 8. **Order Flow** — open the **Order Flow** tab to see the real-time ATM order-flow grid for every ticker in `ticker_history.json`. Columns: Ticker, Spot, ATM Strike, Expiration, Support (Put Wall), Resistance (Call Wall), Call Price, Put Price, **Trend** (`up` / `down` / `UP` / `DOWN` / `bullish` / `bearish` / `flat` — see `StreamingService.trend_data()`), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed**, and **Flow Acceleration** (first / second differences of the L2 book-imbalance series), plus a market status indicator (green `●` when market is open, amber `●` when closed). Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
 
 ## Architecture
 

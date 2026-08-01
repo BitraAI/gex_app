@@ -1,5 +1,4 @@
 import asyncio
-import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -11,7 +10,7 @@ from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
 from client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from streaming_service import StreamingService
 from option_streaming_service import (AtmOptionVolumeService, _load_ticker_history, _save_ticker_history, _normalize_display_symbol, _get_stream_symbol)
-from chart_component import render_chart, build_init_data
+from chart_component import render_chart
 from flow import (
     _ensure_async_loop,
     _ticker_analytics_cache,
@@ -969,7 +968,7 @@ def render_candlesticks_frag():
                             spot = float(last)
                             s.spot_cache[_disp_upper] = spot
                             # Also update ATM service
-                            atm_svc.update_ticker_spot(_disp_upper, spot)
+                            atm_svc.set_ticker_spot(_disp_upper, spot)
 
                     # Fetch actual index quotes for SPX, RUT, NDX
                     _idx_fetch = []
@@ -1002,16 +1001,6 @@ def render_candlesticks_frag():
 
         svc = s.get("streaming_service")
 
-        # DEBUG: trace streaming merge state
-        import sys as _dbg_sys
-        _dbg_merge = svc is not None
-        _dbg_running = svc.is_running if svc else False
-        _dbg_sym = svc.symbol if svc else None
-        print(f"[DEBUG chart] symbol={symbol!r} stream_symbol={stream_symbol!r} "
-              f"_sym_norm_chart={_normalize_display_symbol(symbol)!r} "
-              f"svc={svc is not None} running={_dbg_running} svc.symbol={_dbg_sym}",
-              file=_dbg_sys.stderr, flush=True)
-
         # Merge streaming OHLC + buy_vol/sell_vol into chart df when available.
         # Streaming aggregates ticks into 1-second buckets keyed on ms timestamps.
         # We floor each streaming bucket to the selected timeframe's boundary, so
@@ -1032,10 +1021,6 @@ def render_candlesticks_frag():
             s["_trigger_candlestick_refresh"] = True
             try:
                 stream_df = svc.get_candles()
-                print(f"[DEBUG chart] stream_df.empty={stream_df.empty} "
-                      f"shape={getattr(stream_df, 'shape', None)} "
-                      f"current_bar={svc._current_bar if hasattr(svc, '_current_bar') else 'N/A'}",
-                      file=_dbg_sys.stderr, flush=True)
                 if not stream_df.empty and not chart_df.empty:
                     stream_df = stream_df.reset_index()
                     stream_df["datetime"] = stream_df["datetime"].astype("int64")
@@ -1208,10 +1193,7 @@ def render_candlesticks_frag():
                     max_bars = 1500 if tf_minutes else 500
                     if len(chart_df) > max_bars:
                         chart_df = chart_df.tail(max_bars).reset_index(drop=True)
-            except Exception as _dbg_e:
-                import traceback as _dbg_tb
-                print(f"[DEBUG chart] MERGE EXCEPTION: {_dbg_e}")
-                print(_dbg_tb.format_exc(), file=_dbg_sys.stderr, flush=True)
+            except Exception:
                 pass
 
         # ---- Index symbols (SPX, RUT, NDX): build a live bar from the real
@@ -1319,14 +1301,6 @@ def render_candlesticks_frag():
         # --- Render lightweight-charts streaming candlestick ---
         df = s.candlestick_data
 
-        # DEBUG: log the last bar close on each render
-        _prev_last_close = s.get("_dbg_last_close")
-        _curr_last_close = float(df["close"].iloc[-1]) if not df.empty else None
-        print(f"[DEBUG chart] df_len={len(df)} last_close={_curr_last_close} "
-              f"prev_last_close={_prev_last_close} changed={_curr_last_close != _prev_last_close}",
-              file=_dbg_sys.stderr, flush=True)
-        s._dbg_last_close = _curr_last_close
-
         # Build the candle list for chart_component.render_chart. Keep datetime as
         # int64 ms so the streaming 1-second bars are uniquely keyed on time.
         _extra_cols = [c for c in ["buy_vol", "sell_vol",
@@ -1417,24 +1391,6 @@ def render_candlesticks_frag():
                 f'<div id="{_chart_key}" style="position:relative;width:100%;"></div>',
                 unsafe_allow_html=True,
             )
-            # DEBUG: log the JSON payload change
-            _init_data = build_init_data(
-                candles_payload,
-                indicators=selected_indicators,
-                call_wall=_cw,
-                put_wall=_pw,
-                last_close=last_close,
-            )
-            _payload = {"init": _init_data}
-            if _status:
-                _payload["init"]["status"] = _status
-            _json_str = json.dumps(_payload)
-            _prev_json = s.get("_dbg_last_json")
-            print(f"[DEBUG chart] json_changed={_json_str != _prev_json} "
-                  f"json_len={len(_json_str)} "
-                  f"status={_status.get('text', 'None')[:60] if _status else 'None'}",
-                  file=_dbg_sys.stderr, flush=True)
-            s._dbg_last_json = _json_str
             render_chart(
                 candles_payload,
                 indicators=selected_indicators,
