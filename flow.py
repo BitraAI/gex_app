@@ -613,6 +613,7 @@ def maybe_fire_wall_zone_alerts() -> None:
             next_state["_last_alert_texts"] = new_alerts
             state[t_upper] = next_state
             _cache = _ticker_analytics_cache.get(t_upper.split(":")[0])
+            _buy_vol, _sell_vol, _net_60 = atm_svc.get_ticker_executed_flow(t_upper)
             if _cache:
                 _atm_iv = _cache.get("atm_iv")
                 _rv = _cache.get("rv", 0.0)
@@ -628,6 +629,7 @@ def maybe_fire_wall_zone_alerts() -> None:
                               flow_acceleration=ticker_data.get("flow_acceleration"),
                               absorption=atm_svc.get_ticker_absorption(t_upper),
                               absorbed_at_wall=_absorbed_at_wall,
+                              net_flow=_net_60,
                               disable_notification=False)
             else:
                 notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
@@ -639,6 +641,7 @@ def maybe_fire_wall_zone_alerts() -> None:
                               flow_acceleration=ticker_data.get("flow_acceleration"),
                               absorption=atm_svc.get_ticker_absorption(t_upper),
                               absorbed_at_wall=_absorbed_at_wall,
+                              net_flow=_net_60,
                               disable_notification=False)
         else:
             state[t_upper] = next_state
@@ -1108,6 +1111,9 @@ def render_atm_order_flow_grid():
             if call_wall_val is None and t_upper == current_sym:
                 call_wall_val = (s.get("analytics") or {}).get("call_wall")
 
+            _buy_vol, _sell_vol, _net_60 = (
+                atm_svc.get_ticker_executed_flow(t_upper) if atm_svc else (None, None, None)
+            )
             rows.append({
                 "Ticker": t_upper,
                 "Spot": spot,
@@ -1122,6 +1128,9 @@ def render_atm_order_flow_grid():
                 "Flow Speed": flow_speed,
                 "Flow Acceleration": flow_acceleration,
                 "Absorption": atm_svc.get_ticker_absorption(t_upper) if atm_svc else None,
+                "Buy/Sell": (f"{_buy_vol:,.0f} | {_sell_vol:,.0f}"
+                             if _buy_vol is not None and _sell_vol is not None else None),
+                "Net Flow": _net_60,
             })
 
     if not rows:
@@ -1139,7 +1148,7 @@ def render_atm_order_flow_grid():
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
-          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"], r["Absorption"])
+          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"], r["Absorption"], r["Buy/Sell"], r["Net Flow"])
         for r in rows
     )
     data_hash = hash((data_key, _atm_epoch, _wall_epoch))
@@ -1206,6 +1215,16 @@ def render_atm_order_flow_grid():
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
+    def _net_flow_color(val):
+        """Color the 60 s net executed flow (buy - sell) by sign."""
+        if val is None:
+            return ""
+        if val > 0:
+            return "color: #00cc96; font-weight: bold;"
+        if val < 0:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+
     def _spot_bg(row):
         spot = row["Spot"]
         support = row["Support"]
@@ -1263,12 +1282,14 @@ def render_atm_order_flow_grid():
         _styler = _styler.map(_flow_speed_color, subset=["Flow Speed"])
         _styler = _styler.map(_flow_acceleration_color, subset=["Flow Acceleration"])
         _styler = _styler.map(_absorption_color, subset=["Absorption"])
+        _styler = _styler.map(_net_flow_color, subset=["Net Flow"])
     else:
         _styler = _styler.apply(_trend_color, subset=["Trend"])
         _styler = _styler.apply(_book_imbalance_color, subset=["Book Imbalance"])
         _styler = _styler.apply(_flow_speed_color, subset=["Flow Speed"])
         _styler = _styler.apply(_flow_acceleration_color, subset=["Flow Acceleration"])
         _styler = _styler.apply(_absorption_color, subset=["Absorption"])
+        _styler = _styler.apply(_net_flow_color, subset=["Net Flow"])
 
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
@@ -1283,6 +1304,8 @@ def render_atm_order_flow_grid():
         "Flow Speed": lambda v: f"{v:+,.0f}" if v is not None else "",
         "Flow Acceleration": lambda v: f"{v:+,.2f}" if v is not None else "",
         "Absorption": lambda v: f"{v:,.0f}" if v is not None else "",
+        "Buy/Sell": lambda v: v if v is not None else "",
+        "Net Flow": lambda v: f"{v:+,.0f}" if v is not None else "",
     })
 
     s._flow_styled_hash = data_hash

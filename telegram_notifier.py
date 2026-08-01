@@ -115,6 +115,7 @@ def notify_alerts(
     flow_acceleration: Optional[float] = None,
     absorption: Optional[float] = None,
     absorbed_at_wall: Optional[float] = None,
+    net_flow: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
     """Push a batch of alert strings to Telegram as one message.
@@ -130,7 +131,8 @@ def notify_alerts(
                    wall_zone=wall_zone, pw=pw, cw=cw, wall_mark=wall_mark, trend_alert=trend_alert,
                    book_imbalance=book_imbalance,
                    flow_speed=flow_speed, flow_acceleration=flow_acceleration,
-                   absorption=absorption, absorbed_at_wall=absorbed_at_wall)
+                   absorption=absorption, absorbed_at_wall=absorbed_at_wall,
+                   net_flow=net_flow)
     return send_telegram(text, disable_notification=disable_notification)
 
 
@@ -172,7 +174,7 @@ def diff_alerts(
     return new_alerts, cur
 
 
-def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, book_imbalance: Optional[float] = None, flow_speed: Optional[float] = None, flow_acceleration: Optional[float] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None) -> str:
+def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, book_imbalance: Optional[float] = None, flow_speed: Optional[float] = None, flow_acceleration: Optional[float] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None) -> str:
     """Build an HTML-formatted message from a list of alert strings."""
     header_lines = []
     if symbol:
@@ -207,6 +209,9 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         header_lines.append(f"{emoji} Absorption: <code>{absorption:,.0f}</code> vol/$1")
     if absorbed_at_wall is not None:
         header_lines.append(f"🟡 Wall absorbed: <code>{absorbed_at_wall:,.0f}</code> contracts")
+    if net_flow is not None:
+        emoji = "🟢" if net_flow > 0 else "🔴" if net_flow < 0 else "🟡"
+        header_lines.append(f"{emoji} Net Flow (60s): <code>{net_flow:+,.0f}</code>")
     body_lines = []
     if trend_alert:
         _buy = trend_alert in ("bullish", "up")

@@ -22,6 +22,8 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Flow Speed** | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. |
 | **Flow Acceleration** | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, `mid = max(1, len(history) // 2)`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. |
 | **Absorption** | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot displacement over the same window. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
+| **Buy/Sell** | Session-cumulative executed ATM flow split by aggressor side: `buy_vol | sell_vol` (buyer- vs seller-initiated prints, from `AtmOptionVolumeService.get_ticker_executed_flow`). |
+| **Net Flow** | Net executed flow over the trailing 60 s: `buy_vol − sell_vol` (rolling window). Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -280,6 +282,15 @@ flow the book consumed without moving the price:
 High absorption (≥ 1000 vol/$1) means heavy flow is being soaked up at a level
 (price pinned — support/resistance holding); low absorption (< 300) means the
 price is drifting on thin flow.
+
+**Executed flow** (`AtmOptionVolumeService.get_ticker_executed_flow`, the grid
+**Buy/Sell** and **Net Flow** columns and the Telegram
+`Net Flow (60s): <n>` header line) is the raw aggressor split: every trade
+print is classified buyer- vs seller-initiated (`_infer_dir` against the
+bid/ask mid) and accumulated into cumulative `buy_vol` / `sell_vol`, with a
+rolling 60 s net (`buy_vol − sell_vol`) for current pressure.  This is the raw
+executed flow (complementary to the delta-adjusted `bullish` / `bearish`
+totals and to absorption, which collapses both sides into one vol/$1 number).
 
 **Wall absorption** in `flow.maybe_fire_wall_zone_alerts` snapshots the
 cumulative ATM volume when spot enters a wall zone and reports how many

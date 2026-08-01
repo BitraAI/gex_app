@@ -359,9 +359,12 @@ class AtmOptionVolumeService:
                     "put_ask": None,
                     "bullish": 0,
                     "bearish": 0,
+                    "buy_vol": 0,
+                    "sell_vol": 0,
                     "flow_history": [],
                     "vol_history": [],
                     "spot_history": [],
+                    "exec_history": [],
                     "flow_speed": 0,
                     "flow_acceleration": 0,
                     "book_imbalance": None,
@@ -442,6 +445,26 @@ class AtmOptionVolumeService:
                 return None
             spot_move = abs(sh[-1][1] - sh[0][1])
             return vol_60 / max(spot_move, _ABSORPTION_MIN_SPOT_MOVE)
+
+    def get_ticker_executed_flow(self, display_symbol: str) -> tuple:
+        """Return (buy_vol, sell_vol, net_60) for a tracked ticker:
+        session-cumulative executed buy/sell ATM volume, plus the net
+        (buy - sell) over the trailing 60 s window.  Any element is None
+        when the ticker is untracked or no data exists yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None, None, None
+            buy = ticker.get("buy_vol", 0)
+            sell = ticker.get("sell_vol", 0)
+            now = _time_mod.time()
+            eh = ticker.setdefault("exec_history", [])
+            while eh and eh[0][0] < now - 60:
+                eh.pop(0)
+            net_60 = None
+            if len(eh) >= 2:
+                net_60 = eh[-1][1] - eh[0][1]
+            return buy, sell, net_60
 
     def get_ticker_option_prices(self, display_symbol: str) -> dict:
         """Return {call_price, put_price} mid-market for a tracked ticker,
@@ -1158,24 +1181,33 @@ class AtmOptionVolumeService:
                 ticker["bullish"] += size
             else:
                 ticker["bearish"] += size
+            ticker["buy_vol"] = ticker.get("buy_vol", 0) + size
         elif direction == "sell":
             if opt_type == "CALL":
                 ticker["bearish"] += size
             else:
                 ticker["bullish"] += size
+            ticker["sell_vol"] = ticker.get("sell_vol", 0) + size
         else:
             # Unknown direction — split evenly between bullish and bearish
             half = size // 2
             ticker["bullish"] += half
             ticker["bearish"] += size - half
+            ticker["buy_vol"] = ticker.get("buy_vol", 0) + half
+            ticker["sell_vol"] = ticker.get("sell_vol", 0) + size - half
 
         # Rolling 60 s window of cumulative ATM volume for order absorption
-        # (delta over the window is the recent aggressive flow).
+        # (delta over the window is the recent aggressive flow) and of the
+        # cumulative net executed flow (buy - sell) for the 60 s net line.
         now = _time_mod.time()
         vh = ticker.setdefault("vol_history", [])
         vh.append((now, ticker["bullish"] + ticker["bearish"]))
         while vh and vh[0][0] < now - 60:
             vh.pop(0)
+        eh = ticker.setdefault("exec_history", [])
+        eh.append((now, ticker.get("buy_vol", 0) - ticker.get("sell_vol", 0)))
+        while eh and eh[0][0] < now - 60:
+            eh.pop(0)
 
     def _infer_dir(self, price: float, bid: float | None, ask: float | None) -> str:
         if bid is not None and ask is not None:
