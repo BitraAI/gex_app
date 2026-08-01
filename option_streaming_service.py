@@ -502,8 +502,8 @@ class AtmOptionVolumeService:
         changes, throttled to _WALL_REFRESH_MIN_INTERVAL seconds per ticker
         so a fast-moving tape does not spam the Schwab REST endpoint.
 
-        Called from the streaming spot-update paths (update_ticker_spot,
-        bulk_update_spots, set_ticker_spot) with the OLD and NEW ATM strike.
+        Called from the streaming spot-update paths (set_ticker_spot,
+        bulk_update_spots) with the OLD and NEW ATM strike.
         On a true crossing (and after the throttle elapses), the ticker is
         removed from _walls_verified so the lazy fetcher in
         ensure_atm_streaming re-fetches the option chain and recomputes
@@ -593,7 +593,11 @@ class AtmOptionVolumeService:
         Triggers a re-subscribe when the ticker has no option subscriptions
         yet (call_sym/put_sym are None) and the service is running, so that
         index tickers gain their option symbols after register() wipes
-        _ticker_flows or when the IndexSpotPoller delivers a fresh spot.
+        _ticker_flows or when the IndexSpotPoller delivers a fresh spot.  Also
+        re-subscribes when the spot has moved by more than 0.1 % so non-index
+        tickers keep streaming the correct ATM contracts.  _do_subscribe
+        deduplicates against the last successful symbol set, so re-subscribe
+        requests with unchanged ATM strikes are no-ops.
 
         If the ticker has no entry in _ticker_flows yet (e.g. the
         IndexSpotPoller runs before ensure_atm_streaming has initialised
@@ -637,7 +641,8 @@ class AtmOptionVolumeService:
                 self._recalc_atm_if_moved(display_symbol, ticker, old, spot)
                 if abs(spot - old) / max(old, 1) > 0.001:
                     self._spot_changed = True
-                if (ticker["call_sym"] is None or ticker["put_sym"] is None) and \
+                if (ticker["call_sym"] is None or ticker["put_sym"] is None or
+                        abs(spot - old) / max(old, 1) > 0.001) and \
                    self._running and self._expiration:
                     sc = self._stream_client
         if sc is not None:
@@ -659,31 +664,9 @@ class AtmOptionVolumeService:
                 return None
             return ticker.get("call_wall")
 
-    def update_ticker_spot(self, display_symbol: str, spot: float):
-        """Update the spot price for a tracked ticker and trigger re-subscription
-        if the ATM strike changes."""
-        sc = None
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return
-            old_spot = ticker["spot"]
-            ticker["spot"] = spot
-            # Only recalc ATM strike when the spot has moved by at least
-            # half a strike increment from the last reference price.
-            self._recalc_atm_if_moved(display_symbol, ticker, old_spot, spot)
-            if ticker["call_sym"] is None or ticker["put_sym"] is None or \
-               abs(spot - old_spot) / max(old_spot, 1) > 0.001:
-                if self._running and self._expiration:
-                    sc = self._stream_client
-        if sc is not None:
-            asyncio.run_coroutine_threadsafe(
-                self._do_subscribe(sc), self._loop,
-            )
-
     def bulk_update_spots(self, spot_map: dict[str, float]):
         """Set spot prices for multiple tickers at once and trigger a single
-        re-subscription.  Avoids the race where per-ticker update_ticker_spot
+        re-subscription.  Avoids the race where per-ticker set_ticker_spot
         calls each schedule separate _do_subscribe coroutines that run before
         all spots are set.
 
@@ -913,7 +896,7 @@ class AtmOptionVolumeService:
         than subscribed at a placeholder strike of 100, because subscribing
         to non-existent option symbols both wastes the message budget and
         causes grief on the next re-subscribe (root prefix match mistakes).
-        They will be subscribed when `update_ticker_spot` arrives."""
+        They will be subscribed when `set_ticker_spot` delivers a fresh spot."""
         with self._lock:
             tickers = dict(self._ticker_flows)
         if not tickers:
@@ -928,7 +911,7 @@ class AtmOptionVolumeService:
                 stream_sym = info["stream_symbol"]
                 if spot <= 0:
                     # Skip placeholders - subscribing to wrong strikes
-                    # pollutes the feed. Re-subscribe triggered by update_ticker_spot.
+                    # pollutes the feed. Re-subscribe triggered by set_ticker_spot.
                     info["call_sym"] = None
                     info["put_sym"] = None
                     skipped_no_spot.append(display_sym)

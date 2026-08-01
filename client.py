@@ -79,8 +79,8 @@ async def fetch_option_chain(
         if hasattr(resp, "json"):
             return resp.json()
         return resp
-    except Exception:
-        logger.exception(f"Failed to fetch option chain for {symbol}")
+    except Exception as e:
+        logger.warning("fetch_option_chain failed for %s: %s", symbol, e)
         raise
 
 
@@ -100,8 +100,8 @@ async def fetch_quotes(
         if not isinstance(result, dict):
             return {}
         return result
-    except Exception:
-        logger.exception(f"Failed to fetch quotes for {symbols}")
+    except Exception as e:
+        logger.warning("fetch_quotes failed for %s: %s", symbols, e)
         raise
 
 

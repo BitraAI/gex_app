@@ -201,7 +201,7 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         header_lines.append(f"{emoji} Flow Acceleration: <code>{flow_acceleration:+.2f}</code>")
     body_lines = []
     if trend_alert:
-        _buy = trend_alert in ("STRONG BUY", "BREAKOUT")
+        _buy = trend_alert in ("bullish", "up")
         emoji = "🟢" if _buy else "🔴"
         suggestion = "BUY CALL" if _buy else "BUY PUT"
         if wall_mark is not None:
