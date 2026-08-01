@@ -12,7 +12,7 @@ import streamlit as st
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP
-from option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol
+from option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol, _ABSORPTION_MIN_VOL
 from client import fetch_quotes
 from calculations import calculate_atm_strike
 import json
@@ -464,6 +464,13 @@ _ABSORPTION_LOW = 300.0    # price drifting on thin flow
 # Min contracts absorbed at a wall before a "wall broke" alert fires.
 _WALL_BREAK_MIN_ABSORBED = 100.0
 
+# Conviction gate for Telegram trend alerts: the plain up/down signal must
+# reach _ALERT_MIN_CONVICTION_PLAIN metric agreements (0-5) before it fires;
+# reversals (bullish/bearish) are a stronger event and need only
+# _ALERT_MIN_CONVICTION_REVERSAL.
+_ALERT_MIN_CONVICTION_PLAIN = 3
+_ALERT_MIN_CONVICTION_REVERSAL = 2
+
 
 def _wall_buffer(wall: float | None) -> float:
     """Near-wall zone width: 0.02 % of the wall price, floored at 5 cents so
@@ -471,6 +478,43 @@ def _wall_buffer(wall: float | None) -> float:
     if wall is None:
         return 0.0
     return max(abs(wall) * _WALL_ZONE_BUFFER, _WALL_ZONE_MIN_BUFFER)
+
+
+def _conviction_score(
+    direction: str | None,
+    book_imbalance: float | None,
+    flow_speed: float | None,
+    flow_acceleration: float | None,
+    liquidity_flow: float | None,
+    net_flow_60: float | None,
+    absorption: float | None,
+) -> int:
+    """0-5 confidence that a trend signal is real, from metric agreement.
+
+    Each agreeing metric adds one point against the expected direction:
+    |book_imbalance| > 0.3, flow_speed and flow_acceleration sharing a sign,
+    liquidity_flow refilling the book (up) or draining it (down), a 60s net
+    flow matching the direction, and heavy absorption.  Weak/absent metrics
+    simply contribute nothing, so the score is a lower bound on agreement.
+    """
+    _up = direction in ("up", "bullish")
+    if direction is None:
+        return 0
+    score = 0
+    if book_imbalance is not None and abs(book_imbalance) > 0.3:
+        score += 1
+    if flow_speed is not None and flow_acceleration is not None:
+        if (flow_speed > 0) == (flow_acceleration > 0) and flow_speed != 0:
+            score += 1
+    if liquidity_flow is not None:
+        if (_up and liquidity_flow > 0) or (not _up and liquidity_flow < 0):
+            score += 1
+    if net_flow_60 is not None:
+        if (_up and net_flow_60 > 0) or (not _up and net_flow_60 < 0):
+            score += 1
+    if absorption is not None and absorption >= _ABSORPTION_MIN_VOL:
+        score += 1
+    return score
 
 
 def maybe_fire_wall_zone_alerts() -> None:
@@ -578,6 +622,32 @@ def maybe_fire_wall_zone_alerts() -> None:
         elif _trend_dir in ("up", "down"):
             _trend_signal = _trend_dir
 
+        # Conviction gate: a plain up/down signal must be corroborated by
+        # enough metrics before it becomes an alert, so weak/flat-ish trends
+        # stay quiet. Reversals (bullish/bearish) are a stronger event and
+        # clear with a lower bar. Wall-broke alerts bypass the gate entirely.
+        if _trend_signal is not None:
+            _net_60 = atm_svc.get_ticker_executed_flow(t_upper)[2]
+            _absorption_now = atm_svc.get_ticker_absorption(t_upper)
+            _conviction = _conviction_score(
+                _trend_signal,
+                ticker_data.get("book_imbalance"),
+                ticker_data.get("flow_speed"),
+                ticker_data.get("flow_acceleration"),
+                ticker_data.get("liquidity_flow"),
+                _net_60,
+                _absorption_now,
+            )
+            _min_conv = (_ALERT_MIN_CONVICTION_REVERSAL
+                         if _trend_signal in ("bullish", "bearish")
+                         else _ALERT_MIN_CONVICTION_PLAIN)
+            _fire_trend = _conviction >= _min_conv
+        else:
+            _net_60 = None
+            _absorption_now = None
+            _conviction = 0
+            _fire_trend = False
+
         # ---- Wall absorption (order absorption at the wall) ------------- #
         # Snapshot cumulative ATM volume when spot enters a wall zone; while
         # inside, "absorbed" is the flow consumed since entry.  When spot
@@ -608,12 +678,11 @@ def maybe_fire_wall_zone_alerts() -> None:
         next_state["_prev_call_wall"] = call_wall
         next_state["_prev_put_wall"] = put_wall
         next_state["_wall_stable_count"] = _wall_stable
-        if (new_alerts or _trend_signal) and _wall_stable >= 2 and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
+        if (new_alerts or _fire_trend) and _wall_stable >= 2 and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
             next_state["last_alert_ts"] = now
             next_state["_last_alert_texts"] = new_alerts
             state[t_upper] = next_state
             _cache = _ticker_analytics_cache.get(t_upper.split(":")[0])
-            _buy_vol, _sell_vol, _net_60 = atm_svc.get_ticker_executed_flow(t_upper)
             if _cache:
                 _atm_iv = _cache.get("atm_iv")
                 _rv = _cache.get("rv", 0.0)
@@ -628,7 +697,7 @@ def maybe_fire_wall_zone_alerts() -> None:
                               flow_speed=ticker_data.get("flow_speed"),
                               flow_acceleration=ticker_data.get("flow_acceleration"),
                               liquidity_flow=ticker_data.get("liquidity_flow"),
-                              absorption=atm_svc.get_ticker_absorption(t_upper),
+                              absorption=_absorption_now,
                               absorbed_at_wall=_absorbed_at_wall,
                               net_flow=_net_60,
                               disable_notification=False)
@@ -641,7 +710,7 @@ def maybe_fire_wall_zone_alerts() -> None:
                               flow_speed=ticker_data.get("flow_speed"),
                               flow_acceleration=ticker_data.get("flow_acceleration"),
                               liquidity_flow=ticker_data.get("liquidity_flow"),
-                              absorption=atm_svc.get_ticker_absorption(t_upper),
+                              absorption=_absorption_now,
                               absorbed_at_wall=_absorbed_at_wall,
                               net_flow=_net_60,
                               disable_notification=False)

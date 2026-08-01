@@ -177,6 +177,9 @@ def diff_alerts(
 
 def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, book_imbalance: Optional[float] = None, flow_speed: Optional[float] = None, flow_acceleration: Optional[float] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None, liquidity_flow: Optional[float] = None) -> str:
     """Build an HTML-formatted message from a list of alert strings."""
+    # Trend alerts carry the flow-metric signal line, so those metrics are
+    # folded into it instead of duplicated as separate header rows.
+    _compact = trend_alert is not None
     header_lines = []
     if symbol:
         header_lines.append(f"<b>{_escape_html(symbol)}</b>")
@@ -196,24 +199,24 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         wall_val = pw if wall_zone == "Support" else cw
         wall_tag = f"${wall_val:,.2f}" if wall_val is not None else "pw" if wall_zone == "Support" else "cw"
         header_lines.append(f"{emoji} Near {wall_zone} {wall_tag}")
-    if book_imbalance is not None:
+    if book_imbalance is not None and not _compact:
         emoji = "🟢" if book_imbalance > 0.3 else "🔴" if book_imbalance < -0.3 else "🟡"
         header_lines.append(f"{emoji} Book Imbalance: <code>{book_imbalance:+.2f}</code>")
-    if flow_speed is not None:
+    if flow_speed is not None and not _compact:
         emoji = "🟢" if flow_speed > 0 else "🔴" if flow_speed < 0 else "🟡"
         header_lines.append(f"{emoji} Flow Speed: <code>{flow_speed:+,.0f}</code>")
-    if flow_acceleration is not None:
+    if flow_acceleration is not None and not _compact:
         emoji = "🟢" if flow_acceleration > 0 else "🔴" if flow_acceleration < 0 else "🟡"
         header_lines.append(f"{emoji} Flow Acceleration: <code>{flow_acceleration:+.2f}</code>")
-    if absorption is not None:
+    if absorption is not None and not _compact:
         emoji = "🟢" if absorption >= 1000 else "🔴" if absorption < 300 else "🟡"
         header_lines.append(f"{emoji} Absorption: <code>{absorption:,.0f}</code> vol/$1")
     if absorbed_at_wall is not None:
         header_lines.append(f"🟡 Wall absorbed: <code>{absorbed_at_wall:,.0f}</code> contracts")
-    if net_flow is not None:
+    if net_flow is not None and not _compact:
         emoji = "🟢" if net_flow > 0 else "🔴" if net_flow < 0 else "🟡"
         header_lines.append(f"{emoji} Net Flow (60s): <code>{net_flow:+,.0f}</code>")
-    if liquidity_flow is not None:
+    if liquidity_flow is not None and not _compact:
         emoji = "🟢" if liquidity_flow > 0 else "🔴" if liquidity_flow < 0 else "🟡"
         header_lines.append(f"{emoji} Liquidity Flow: <code>{liquidity_flow:+,.0f}</code>")
     body_lines = []
@@ -221,10 +224,18 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         _buy = trend_alert in ("bullish", "up")
         emoji = "🟢" if _buy else "🔴"
         suggestion = "BUY CALL" if _buy else "BUY PUT"
+        _segs = [f"{emoji} <b>{trend_alert.upper()}</b> - {suggestion}"]
         if wall_mark is not None:
-            body_lines.append(f"{emoji} {trend_alert} - {suggestion} ${wall_mark:,.2f}")
-        else:
-            body_lines.append(f"{emoji} {trend_alert} - {suggestion}")
+            _segs[0] += f" ${wall_mark:,.2f}"
+        if book_imbalance is not None:
+            _segs.append(f"Imb {book_imbalance:+.2f}")
+        if net_flow is not None:
+            _segs.append(f"Net {net_flow:+,.0f}")
+        if liquidity_flow is not None:
+            _segs.append(f"Liq {liquidity_flow:+,.0f}")
+        if absorption is not None:
+            _segs.append(f"Abs {absorption:,.0f}")
+        body_lines.append(" · ".join(_segs))
     body_lines.extend(f"{_escape_html(a)}" for a in alerts if a)
     body = "\n".join(body_lines)
     if header_lines:
