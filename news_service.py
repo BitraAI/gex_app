@@ -29,9 +29,6 @@ class NewsService:
     def is_running(self) -> bool:
         return self._running
 
-    def update_tickers(self, tickers: list[str]):
-        self._tickers = list(tickers)
-
     def start(self):
         self._running = True
 
