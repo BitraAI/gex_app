@@ -1967,7 +1967,7 @@ def render_trade_signals():
 
 
 def render_options_data():
-    """Clears the skip flag and renders the Options Data table.
+    """Renders the Options Data table.
     
     This is a plain function (not a fragment) because it is called from
     inside ``render_tabs_frag`` which is already a fragment.  Nesting a
@@ -1975,7 +1975,6 @@ def render_options_data():
     the inner fragment to be destroyed / recreated on every parent
     re-run, preventing its content from appearing.
     """
-    st.session_state._options_table_skip_render = False
     
     if st.session_state.get("data"):
         try:
