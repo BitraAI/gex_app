@@ -589,9 +589,8 @@ def maybe_fire_wall_zone_alerts() -> None:
             analytics["put_wall_mark"] = _cp  # BUY CALL signal shows the call price
         if _pp is not None:
             analytics["call_wall_mark"] = _pp  # BUY PUT signal shows the put price
-        ticker_data = atm_svc.get_ticker_trend_data(
-            t_upper, streaming_service=s.get("streaming_service")
-        ) or {}
+        _ssvc = s.get("streaming_service")
+        ticker_data = _ssvc.get_ticker_trend_data(t_upper) if _ssvc else {}
         new_alerts, next_state = diff_alerts(prev, analytics, spot)
         wall_zone = None
         if call_wall is not None and spot >= call_wall - _wall_buffer(call_wall):
@@ -1088,14 +1087,11 @@ def render_atm_order_flow_grid():
             book_imbalance = None
             flow_speed = 0
             flow_acceleration = 0
-            if atm_svc:
-                ticker_data = atm_svc.get_ticker_trend_data(
-                    t_upper, streaming_service=s.get("streaming_service")
-                )
-                if ticker_data:
-                    book_imbalance = ticker_data["book_imbalance"]
-                    flow_speed = ticker_data.get("flow_speed", 0)
-                    flow_acceleration = ticker_data.get("flow_acceleration", 0)
+            if _svc is not None:
+                ticker_data = _svc.get_ticker_trend_data(t_upper)
+                book_imbalance = ticker_data.get("book_imbalance")
+                flow_speed = ticker_data.get("flow_speed", 0)
+                flow_acceleration = ticker_data.get("flow_acceleration", 0)
             
             # Support (Put Wall) / Resistance (Call Wall): prefer per-ticker value
             # set by fetch_data, fall back to session-state analytics for the
