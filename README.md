@@ -67,6 +67,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 - **Light Theme** — Clean light-themed UI
 - **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
   - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
+  - **Trend alerts:** STRONG BUY / STRONG SELL / BREAKOUT / BREAKDOWN signals (near-wall spot + strong order-flow momentum) sent with a trade suggestion
   - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
   Two delivery paths:
   - **In-app:** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
@@ -177,7 +178,7 @@ Example `crontab -e` entry — every 5 minutes during RTH (the script self-guard
 */5 9-15 * * * cd ~/gex_app && ~/gex_venv/bin/python telegram_alerts.py >> /tmp/gex_alerts.log 2>&1
 ```
 
-The alert types fired are identical to the in-app `check_alerts` flow — both paths share the same pure `diff_alerts(analytics, spot)` implementation in `telegram_notifier.py`.
+The alert types fired are identical to the in-app `check_alerts` flow — both paths share the same pure `diff_alerts(prev, analytics, spot)` implementation in `telegram_notifier.py`.
 
 ### Schwab Authentication
 
@@ -379,7 +380,7 @@ A downward-sloping curve means dealers are short gamma (rising spot reduces net 
 
 Uses the [Schwab API](https://developer.schwab.com/) via the `schwab-py` Python client library, which provides real-time options chain data including gamma, open interest, volume, IV, and Greeks. For index symbols (`$SPX`, `$RUT`, `$NDX`), the ETF chain is automatically fetched as a fallback source for gamma, open interest, and volume when the index chain returns zeros — matched by delta (not strike) so it works across different price scales.
 
-Streaming uses a single WebSocket connection per session. The equity `StreamingService` owns the connection; the `AtmOptionVolumeService` piggybacks on the same `StreamClient` to subscribe to ATM option L1 quotes without opening a second connection. Each ticker uses its own per-ticker expiration (fetched lazily via `fetch_front_expiration()`), so non-primary tickers subscribe to the correct option contracts rather than inheriting the primary's expiration.
+Streaming uses a single WebSocket connection per session. The equity `StreamingService` owns the connection; the `AtmOptionVolumeService` piggybacks on the same `StreamClient` to subscribe to ATM option L1 quotes without opening a second connection. Each ticker uses its own per-ticker expiration (derived from the earliest option-chain date, `expirations[0]`, via `set_ticker_expiration()`), so non-primary tickers subscribe to the correct option contracts rather than inheriting the primary's expiration.
 
 ## Disclaimer
 

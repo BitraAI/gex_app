@@ -1,4 +1,4 @@
-# ATM Order Flow
+# Order Flow
 
 Live bullish / bearish order-flow dashboard for the ATM (at-the-money) front
 expiration of every ticker in `~/.local/share/gex_app/ticker_history.json`.
@@ -13,13 +13,14 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Ticker** | Display symbol (index symbols like `SPX` kept as-is; streamed via ETF proxy `SPY`/`IWM`/`QQQ`). |
 | **Spot** | Latest spot price (REST pre-fetch or live equity stream). |
 | **ATM Strike** | Nearest strike to spot, computed by `calculate_atm_strike` (strike spacing by price band). |
-| **Trend** | Direction of net flow momentum over the last 60 seconds (see below). Enhanced indicators: **↑↑** (strong bullish with OPTIONS_BOOK), **↓↓** (strong bearish with OPTIONS_BOOK), **→→** (building bullish momentum), **←←** (building bearish momentum), **↑** (normal bullish), **↓** (normal bearish), **→** (balanced/flat). |
+| **Trend** | Buy/sell signal derived from the spot's position relative to the walls, book imbalance, and flow momentum (see below). Labels: **STRONG BUY**, **BUY**, **WEAK BUY**, **WEAK SELL**, **SELL**, **STRONG SELL**, **BREAKOUT**, **BREAKDOWN**, or **HOLD**. |
 | **Call Price** | Mid price of the ATM call option. |
 | **Put Price** | Mid price of the ATM put option. |
-| **Support** | Put wall value (resistance level from Options data). |
-| **Resistance** | Call wall value (support level from Options data). |
+| **Support** | Put wall value (support level from Options data). |
+| **Resistance** | Call wall value (resistance level from Options data). |
 | **Book Imbalance** | Order book pressure: Positive → bullish, Negative → bearish. Range [-1, 1], updated every 10 trades with history for last 60 seconds. |
-| **Flow Speed Ratio** | Relative flow momentum change `(newer_first − older_first) / older_first`. Green > 20, red < -20, orange otherwise. |
+| **Flow Speed** | Net flow momentum change `newer_first − older_first` over the last 60 s. Green > 0, red < 0, orange otherwise. |
+| **Flow Acceleration** | Rate of change of flow speed. Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -76,50 +77,70 @@ How it works:
    - **down → up** → `trend_reversal = "bullish"`
    - otherwise → `trend_reversal = None`
 
-The final `trend` and `trend_reversal` are stored on the ticker and read by
-the grid.
+The final `trend` is stored on the ticker and read by the grid. (`trend_reversal`
+is still computed by the streaming service but is **not** used by the grid
+anymore — the Trend column comes purely from the buy/sell signal formula
+below.)
 
-**Trend column display** — combines trend, book imbalance,
-and reversal into arrow glyphs:
+**Trend column display** — the grid classifies each ticker with a buy/sell
+signal formula that combines the spot's position relative to the walls
+(within `_WALL_ZONE_BUFFER`, 0.02 %), book imbalance, flow speed, and flow
+acceleration. Conditions are evaluated in priority order:
 
-| Condition | Display |
-|-----------|---------|
-| Bullish book imbalance (`> 0.3`) + bullish reversal | `↑↑` (strong bullish) |
-| Bullish book imbalance (`> 0.3`) + trend `up` | `↑` (normal bullish) |
-| Bullish book imbalance (`> 0.3`) + trend not yet `up` | `→→` (building bullish momentum) |
-| Bearish book imbalance (`< −0.3`) + bearish reversal | `↓↓` (strong bearish) |
-| Bearish book imbalance (`< −0.3`) + trend `down` | `↓` (normal bearish) |
-| Bearish book imbalance (`< −0.3`) + trend not yet `down` | `←←` (building bearish momentum) |
-| No strong book imbalance + bullish reversal | `↑` |
-| No strong book imbalance + bearish reversal | `↓` |
-| No strong book imbalance + trend `up` | `↑` |
-| No strong book imbalance + trend `down` | `↓` |
-| No strong book imbalance + trend `flat` | `→` |
+| Signal | Condition |
+|--------|-----------|
+| **STRONG BUY** | `spot ≤ support + pw_buf` and `book_imbalance > 0.3` and `flow_speed > 0` and `flow_acceleration > 0` |
+| **BUY** | `spot ≤ support + pw_buf` and `book_imbalance > 0.3` and `flow_speed > 0` |
+| **WEAK BUY** | `spot ≤ support + pw_buf` and `book_imbalance > 0.3` and `flow_acceleration > 0` |
+| **STRONG SELL** | `spot ≥ resistance − cw_buf` and `book_imbalance < −0.3` and `flow_speed < 0` and `flow_acceleration < 0` |
+| **SELL** | `spot ≥ resistance − cw_buf` and `book_imbalance < −0.3` and `flow_speed < 0` |
+| **WEAK SELL** | `spot ≥ resistance − cw_buf` and `book_imbalance < −0.3` and `flow_acceleration < 0` |
+| **BREAKOUT** | `spot ≥ resistance + cw_buf` (above the resistance wall) and `book_imbalance > 0.3` and `flow_speed > 0` and `flow_acceleration > 0` |
+| **BREAKDOWN** | `spot ≤ support − pw_buf` (below the support wall) and `book_imbalance < −0.3` and `flow_speed < 0` and `flow_acceleration < 0` |
+| **HOLD** | none of the above |
+
+where `pw_buf = _wall_buffer(put_wall)` and `cw_buf = _wall_buffer(call_wall)`:
+`max(0.02 % × wall price, 5 cents)` so low-priced tickers still get a
+meaningful zone. BREAKOUT/BREAKDOWN require the spot to have actually
+**pierced** the wall (beyond the buffer), while the BUY/SELL family fires
+while the spot is **within** the wall zone.
+
+This classification lives in one place — `flow.classify_trend_signal` — and
+is shared by the grid **and** the Telegram trend alerts, so the two can
+never drift. The Spot cell background
+shading uses the same components, but the book-imbalance / flow-speed /
+flow-acceleration scores are only counted when the spot is **near a wall** —
+outside the buffer those scores contribute nothing.
 
 
 ## Data pipeline
 
 ```
-Schwab WebSocket (LEVEL1 + LEVEL2)              Research feed (REST)
-        │                                               │
-        ├──────────────────────────┐                    │
-        ▼                          ▼                    │
-  LEVEL1 trades              LEVEL2 order book          │
-  bid, ask, last,           (_calculate_book_imbalance) │
-  volume, open interest,    (bid_size - ask_size)       │
-  greeks                    ────────────────────        │
-  (_process_trade_ticker)    (bid_size + ask_size)      │
-  → GEX totals                                          │
-        │                          │                    │
-        ▼                          │                    ▼
-  Cumulative per-ticker GEX totals │        flow_history = [(t0, net0), ...]
-  { Put Wall, Call Wall }          │        flow_speed   = newer_first - older_first
-        │                          │        flow_speed_ratio = flow_diff / older_first
-        ▼                          │                    │
-  _snapshot_flow                   │                    │
-  book_imbalance + flow_momentum   ◄────────────────────┘
-  → trend + reversal               │
-        ◄──────────────────────────┘
+Schwab WebSocket (LEVEL1 + LEVEL2)
+        │
+        ├──────────────────────────────────┐
+        ▼                                  ▼
+  LEVEL1 trades                      LEVEL2 order book
+  bid, ask, last,                    (_calculate_book_imbalance)
+  volume, open interest,             (bid_size - ask_size)
+  greeks                            ────────────────────
+  (_process_trade_ticker)            (bid_size + ask_size)
+  → buy/sell
+  → GEX totals
+        │                                        │
+        ▼                                        │
+  Cumulative per-ticker GEX totals               │
+  { Put Wall, Call Wall }                        │
+        │                                        │
+        ▼  Snapshot every ~10 trades             │
+  flow_history = [(t0, net0), ...]               │
+  flow_speed   = newer_first - older_first       │
+  flow_acceleration = recent_flow - previous_flow│
+        │                                        │
+        ▼  Combined in _snapshot_flow            │
+  book_imbalance + flow_momentum                 │
+  → trend + reversal                             │
+         ◄───────────────────────────────────────┘
         │
         ▼
 flow_cache (st.session_state)  — updated by update_flow_cache()
@@ -132,10 +153,10 @@ Key points:
 
 - **ATM strike** is computed per ticker from its live spot via
   `calculate_atm_strike` (strike spacing by price band).
-- **Front expiration** is managed per-ticker. Each ticker gets its own
-  expiration fetched lazily via `fetch_front_expiration()` (throttled to
-  once per minute). When the expiration is corrected, `set_ticker_expiration()`
-  triggers a re-subscription so the ticker subscribes to the correct option
+- **Front expiration** is managed per-ticker. The front (earliest) expiration
+  is read from the ticker's option-chain data (`expirations[0]`) and pushed
+  via `set_ticker_expiration()`, which triggers a re-subscription when it
+  changes so the ticker subscribes to the correct option
   contracts. This ensures non-primary tickers (AAPL, TSLA, etc.) don't
   inherit the primary's expiration and subscribe to non-existent contracts.
 - The service runs on the **same shared StreamClient** as the equity stream
@@ -156,7 +177,7 @@ automatically via `ensure_atm_streaming`.
 
 | File | Role |
 | --- | --- |
-| `flow.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. |
+| `flow.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. Wall refresh: `maybe_fire_wall_zone_alerts`, `_refresh_walls_for_symbol`, `_recompute_symbol`, `_compute_walls_for_symbol`. Trend classification: `classify_trend_signal`, `_wall_buffer`. |
 | `option_streaming_service.py` | `AtmOptionVolumeService` — WebSocket handling, classification, per-ticker flow. |
 | `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. |
 | `client.py` | `fetch_quotes` — REST spot pre-fetch for all tickers. |
@@ -198,6 +219,43 @@ are fed via a two-step process:
 2. **Bulk feed**: After pre-fetch, `bulk_update_spots(spot_map)` sets all
    spots in `_ticker_flows` in a single lock acquisition, then triggers one
    `_do_subscribe` to re-subscribe with correct ATM strikes.
+
+### Wall (support/resistance) refresh cadence
+
+The Support / Resistance columns come from the put/call walls computed by
+`compute_analytics` on a REST option chain. Walls are refreshed with a
+**hybrid trigger** in `flow.maybe_fire_wall_zone_alerts` (checked every 2 s
+fragment tick), with two tiers:
+
+| Tier | Trigger | Cost |
+| --- | --- | --- |
+| **Fast wall refresh** | spot moved ≥ half a strike **or** ≥ 180 s elapsed (`_WALL_RECOMPUTE_MAX_INTERVAL`) | Lightweight — `fetch_option_chain` + `parse_option_chain` + `compute_analytics` only (`_refresh_walls_for_symbol`), then pushes walls / expiration / ATM marks to the ATM service. Skips rate, yield, RV, and IV-rank. |
+| **Full recompute** | ≥ 300 s elapsed (`_WALL_FULL_RECOMPUTE_INTERVAL`) | Full pipeline (`_recompute_symbol`) — adds IV rank, RV, diff/strategy alerts, and the `_ticker_analytics_cache` used for Telegram alert headers. |
+
+Both are throttled so a single ticker never triggers a wall refresh more
+often than every 30 s (`_WALL_RECOMPUTE_MIN_INTERVAL`), which caps Schwab
+API load in fast markets while the 180 s freshness floor keeps walls current
+in quiet ones. Walls are also recomputed on a manual Refresh on the main
+page (`fetch_data`) and by the Trade Signals tab scan.
+
+### Trend alerts (Telegram)
+
+In addition to the diff-based wall-zone / gamma-flip / wall-change alerts,
+`maybe_fire_wall_zone_alerts` pushes a **trend alert** to Telegram whenever
+the streaming spot is near a wall **and** the flow produces a strong signal
+(computed by the shared `flow.classify_trend_signal`):
+
+| Trend alert | Condition |
+| --- | --- |
+| `🟢 STRONG BUY` | near support + `book_imbalance > 0.3` + `flow_speed > 0` + `flow_acceleration > 0` |
+| `🔴 STRONG SELL` | near resistance + `book_imbalance < −0.3` + `flow_speed < 0` + `flow_acceleration < 0` |
+| `🟢 BREAKOUT` | near resistance + `book_imbalance > 0.3` + `flow_speed > 0` + `flow_acceleration > 0` |
+| `🔴 BREAKDOWN` | near support + `book_imbalance < −0.3` + `flow_speed < 0` + `flow_acceleration < 0` |
+
+The alert is passed to `notify_alerts(..., trend_alert="STRONG BUY")` and
+rendered with a trade suggestion (e.g. `🟢 STRONG BUY - BUY CALL $8.25`).
+Like all wall-zone alerts, trend alerts require the walls to be stable for
+2 consecutive refreshes and respect the 600 s per-ticker cooldown.
 
 ### Registration & subscription order
 
@@ -281,9 +339,10 @@ sets are not re-sent — re-sending identical subscription requests every
 - Uses the option bid/ask mid as the trade-direction threshold. If
   bid/ask has not yet arrived for an option, the trade is split evenly between
   bullish and bearish.
-- Each ticker uses its own per-ticker expiration (fetched lazily via
-  `fetch_front_expiration()`), so non-primary tickers subscribe to the correct
-  option contracts rather than inheriting the primary's expiration.
+- Each ticker uses its own per-ticker expiration (the earliest date in its
+  option chain, `expirations[0]`, set via `set_ticker_expiration()`), so
+  non-primary tickers subscribe to the correct option contracts rather than
+  inheriting the primary's expiration.
 - `ensure_session_defaults` reuses `app._SESSION_DEFAULTS` so the page and main
   app never drift apart.
 - The REST pre-fetch (`fetch_quotes`) runs every ~10 s (gated by

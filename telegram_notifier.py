@@ -96,27 +96,6 @@ def send_telegram(text: str, *, disable_notification: bool = False) -> bool:
 def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None, iv_rank: Optional[float] = None) -> str:
-    """Build an HTML-formatted message from a list of alert strings."""
-    header_lines = []
-    if symbol:
-        header_lines.append(f"<b>{_escape_html(symbol)}</b>")
-    if spot is not None:
-        header_lines.append(f"Price: <code>{spot:,.2f}</code>")
-    if iv_rank is not None:
-        emoji = "🟢" if iv_rank < 40 else "🔴" if iv_rank > 50 else "🟡"
-        header_lines.append(f"{emoji} IV Rank: <code>{iv_rank:.1f}%</code>")
-    if vrp is not None:
-        emoji = "🟢" if vrp < -2 else "🔴" if vrp > 5 else "🟡"
-        header_lines.append(f"{emoji} VRP: <code>{vrp:.1f}%</code>")
-    if gex is not None:
-        emoji = "🟢" if gex > 0 else "🔴"
-        header_lines.append(f"{emoji} GEX: <code>{gex:,.0f}</code>")
-    body = "\n".join(f"{_escape_html(a)}" for a in alerts if a)
-    if header_lines:
-        return "\n".join(header_lines) + "\n" + body
-    return body or "No alerts."
-
 
 def notify_alerts(
     alerts: Iterable[str],
@@ -126,6 +105,14 @@ def notify_alerts(
     gex: Optional[float] = None,
     vrp: Optional[float] = None,
     iv_rank: Optional[float] = None,
+    wall_zone: Optional[str] = None,
+    pw: Optional[float] = None,
+    cw: Optional[float] = None,
+    wall_mark: Optional[float] = None,
+    trend_alert: Optional[str] = None,
+    book_imbalance: Optional[float] = None,
+    flow_speed: Optional[float] = None,
+    flow_acceleration: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
     """Push a batch of alert strings to Telegram as one message.
@@ -137,7 +124,10 @@ def notify_alerts(
     alerts = list(alerts)
     if not alerts:
         return False
-    text = _format(alerts, symbol=symbol, spot=spot, gex=gex, vrp=vrp, iv_rank=iv_rank)
+    text = _format(alerts, symbol=symbol, spot=spot, gex=gex, vrp=vrp, iv_rank=iv_rank,
+                   wall_zone=wall_zone, pw=pw, cw=cw, wall_mark=wall_mark, trend_alert=trend_alert,
+                   book_imbalance=book_imbalance,
+                   flow_speed=flow_speed, flow_acceleration=flow_acceleration)
     return send_telegram(text, disable_notification=disable_notification)
 
 
@@ -145,7 +135,6 @@ def diff_alerts(
     prev: Optional[dict[str, Any]],
     analytics: dict[str, Any],
     spot: float,
-    options_book_data: Optional[dict[str, Any]] = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Pure diff of the previous per-symbol state vs the current analytics.
 
@@ -172,28 +161,55 @@ def diff_alerts(
         "atm_strike": analytics.get("atm_strike"),
     }
 
-    _WALL_ZONE_BUFFER = 0.0002  # 0.02 %
-    pw = cur["put_wall"]
-    cw = cur["call_wall"]
-    wall_zone = pw if pw is not None else cw
-    cur["wall_zone"] = wall_zone
-
     if not prev:
         return [], cur
 
     new_alerts: list[str] = []
 
-    if options_book_data:
-        trend = options_book_data.get("trend")
-        if trend:
-            book_imbalance = options_book_data.get("book_imbalance")
-            
-            # Check if options_book trend matches wall zone
-            if book_imbalance > 0.3 and trend == "up" and pw is not None:
-                if pw is not None and spot <= pw + abs(pw) * _WALL_ZONE_BUFFER:
-                    new_alerts.append(f"🟢 Options Book bullish (imbalance: {book_imbalance:.2f}) near Support ${pw:.2f}")
-            elif book_imbalance < -0.3 and trend == "down" and cw is not None:
-                if cw is not None and spot >= cw - abs(cw) * _WALL_ZONE_BUFFER:
-                    new_alerts.append(f"🔴 Options Book bearish (imbalance: {book_imbalance:.2f}) near Resistance ${cw:.2f}")
-
     return new_alerts, cur
+
+
+def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, book_imbalance: Optional[float] = None, flow_speed: Optional[float] = None, flow_acceleration: Optional[float] = None) -> str:
+    """Build an HTML-formatted message from a list of alert strings."""
+    header_lines = []
+    if symbol:
+        header_lines.append(f"<b>{_escape_html(symbol)}</b>")
+    if spot is not None:
+        header_lines.append(f"Price: <code>{spot:,.2f}</code>")
+    if iv_rank is not None:
+        emoji = "🟢" if iv_rank < 40 else "🔴" if iv_rank > 50 else "🟡"
+        header_lines.append(f"{emoji} IV Rank: <code>{iv_rank:.1f}%</code>")
+    if vrp is not None:
+        emoji = "🟢" if vrp < -2 else "🔴" if vrp > 5 else "🟡"
+        header_lines.append(f"{emoji} VRP: <code>{vrp:.1f}%</code>")
+    if gex is not None:
+        emoji = "🟢" if gex > 0 else "🔴"
+        header_lines.append(f"{emoji} GEX: <code>{gex:,.0f}</code>")
+    if wall_zone:
+        emoji = "🟢" if wall_zone == "Support" else "🔴"
+        wall_val = pw if wall_zone == "Support" else cw
+        wall_tag = f"${wall_val:,.2f}" if wall_val is not None else "pw" if wall_zone == "Support" else "cw"
+        header_lines.append(f"{emoji} Near {wall_zone} {wall_tag}")
+    if book_imbalance is not None:
+        emoji = "🟢" if book_imbalance > 0.3 else "🔴" if book_imbalance < -0.3 else "🟡"
+        header_lines.append(f"{emoji} Book Imbalance: <code>{book_imbalance:+.2f}</code>")
+    if flow_speed is not None:
+        emoji = "🟢" if flow_speed > 0 else "🔴" if flow_speed < 0 else "🟡"
+        header_lines.append(f"{emoji} Flow Speed: <code>{flow_speed:+,.0f}</code>")
+    if flow_acceleration is not None:
+        emoji = "🟢" if flow_acceleration > 0 else "🔴" if flow_acceleration < 0 else "🟡"
+        header_lines.append(f"{emoji} Flow Acceleration: <code>{flow_acceleration:+.2f}</code>")
+    body_lines = []
+    if trend_alert:
+        _buy = trend_alert in ("STRONG BUY", "BREAKOUT")
+        emoji = "🟢" if _buy else "🔴"
+        suggestion = "BUY CALL" if _buy else "BUY PUT"
+        if wall_mark is not None:
+            body_lines.append(f"{emoji} {trend_alert} - {suggestion} ${wall_mark:,.2f}")
+        else:
+            body_lines.append(f"{emoji} {trend_alert} - {suggestion}")
+    body_lines.extend(f"{_escape_html(a)}" for a in alerts if a)
+    body = "\n".join(body_lines)
+    if header_lines:
+        return "\n".join(header_lines) + "\n" + body
+    return body or "No alerts."

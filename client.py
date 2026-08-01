@@ -47,34 +47,6 @@ def create_client() -> AsyncClient:
     return client
 
 
-async def fetch_front_expiration(client: AsyncClient, symbol: str) -> str | None:
-    """Fetch the nearest front expiration date for a symbol using the
-    lightweight option-expiration-chain endpoint.  Returns ``None`` if
-    the request fails or no expirations are returned."""
-    try:
-        resp = await client.get_option_expiration_chain(symbol)
-        if isinstance(resp, dict):
-            pass
-        elif hasattr(resp, "json"):
-            try:
-                resp = resp.json()
-            except (ValueError, TypeError) as json_err:
-                logger.warning("fetch_front_expiration(%s) json decode failed: %s", symbol, json_err)
-                return None
-        if isinstance(resp, dict):
-            for key in ("expirationList", "ExpirationList", "expiration_list"):
-                exps = resp.get(key, []) or []
-                if exps:
-                    for exp_key in ("expirationDate", "ExpirationDate", "expiration_date", "date"):
-                        val = exps[0].get(exp_key, "")
-                        if val:
-                            return val.split("T")[0] or None
-        return None
-    except Exception as exc:
-        logger.warning("fetch_front_expiration(%s) failed: %s", symbol, exc)
-        return None
-
-
 async def fetch_option_chain(
     client: AsyncClient,
     symbol: str,
@@ -294,40 +266,6 @@ def _api_freq(client: AsyncClient, tf: str):
     pt = pt_map.get(cfg["ptype"])
     per = (per_map_day if cfg["ptype"] == "DAY" else per_map_year).get(cfg["period"])
     return pt, per, ft_map.get(cfg["ftype"]), f_map.get(cfg["freq"])
-
-
-def aggregate_candles(candles: list[dict], target_minutes: int) -> list[dict]:
-    """Aggregate 1-min candles into target_minutes bars."""
-    if not candles or target_minutes <= 1:
-        return list(candles)
-    sorted_c = sorted(candles, key=lambda c: c["datetime"])
-    result: list[dict] = []
-    period_start: int | None = None
-    agg: dict | None = None
-    for c in sorted_c:
-        t = c["datetime"]
-        period = (t // (target_minutes * 60_000)) * (target_minutes * 60_000)
-        if period != period_start:
-            if agg is not None:
-                result.append(agg)
-            period_start = period
-            agg = {
-                "open": c["open"],
-                "high": c["high"],
-                "low": c["low"],
-                "close": c["close"],
-                "volume": c.get("volume", 0),
-                "datetime": period,
-                "symbol": c.get("symbol", ""),
-            }
-        else:
-            agg["high"] = max(agg["high"], c["high"])
-            agg["low"] = min(agg["low"], c["low"])
-            agg["close"] = c["close"]
-            agg["volume"] = (agg.get("volume", 0) or 0) + (c.get("volume", 0) or 0)
-    if agg is not None:
-        result.append(agg)
-    return result
 
 
 async def fetch_price_history_intraday(
