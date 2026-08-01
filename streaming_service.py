@@ -64,6 +64,10 @@ class StreamingService:
         # Per-symbol L2 book-imbalance history: stream_symbol -> list[(ts, ratio)],
         # pruned to the last 60s, used to derive flow_speed / flow_acceleration.
         self._book_imb_history: dict[str, list] = {}
+        # Per-symbol L2 resting-depth history: stream_symbol -> list[(ts, bid_vol
+        # + ask_vol at the best levels)], pruned to 60s, used to derive
+        # liquidity_flow (net liquidity added/drained over the window).
+        self._book_depth_history: dict[str, list] = {}
         self._prev_trend: dict[str, str] = {}        # stream_symbol -> last trend label (reversal)
 
     @property
@@ -387,6 +391,7 @@ class StreamingService:
                 self._books_nyse.pop(s, None)
                 self._books_options.pop(s, None)
                 self._book_imb_history.pop(s, None)
+                self._book_depth_history.pop(s, None)
                 self._prev_trend.pop(s, None)
             if not to_add and not to_remove:
                 return
@@ -426,6 +431,30 @@ class StreamingService:
             await sc.nyse_book_subs(book_syms)
             await sc.options_book_subs(book_syms)
 
+    def _book_volume_for_symbol(self, symbol: str) -> tuple[float, float] | None:
+        """Sum Level-2 OPTIONS-book resting volume for one stream symbol:
+        TOTAL_VOLUME across the best bid levels and best ask levels.
+        Returns ``(bid_vol, ask_vol)`` or None when no book yet.
+
+        Assumes *self._lock* is held (called from handlers and trend_data).
+        """
+        content = self._books_options.get(symbol)
+        if not content:
+            return None
+        bid_vol = 0.0
+        ask_vol = 0.0
+        for ask in (content.get("ASKS") or []):
+            try:
+                ask_vol += float(ask.get("TOTAL_VOLUME") or 0)
+            except (TypeError, ValueError):
+                pass
+        for bid in (content.get("BIDS") or []):
+            try:
+                bid_vol += float(bid.get("TOTAL_VOLUME") or 0)
+            except (TypeError, ValueError):
+                pass
+        return bid_vol, ask_vol
+
     def _book_imbalance_for_symbol(self, symbol: str) -> float | None:
         """Aggregate Level-2 bid/ask volume imbalance for one stream symbol,
         summing across the OPTIONS book only.  Returns a ratio in
@@ -433,41 +462,38 @@ class StreamingService:
 
         Assumes *self._lock* is held (called from handlers and trend_data).
         """
-        bid_vol = 0.0
-        ask_vol = 0.0
-        for books in (self._books_options,):
-            content = books.get(symbol)
-            if not content:
-                continue
-            for ask in (content.get("ASKS") or []):
-                try:
-                    ask_vol += float(ask.get("TOTAL_VOLUME") or 0)
-                except (TypeError, ValueError):
-                    pass
-            for bid in (content.get("BIDS") or []):
-                try:
-                    bid_vol += float(bid.get("TOTAL_VOLUME") or 0)
-                except (TypeError, ValueError):
-                    pass
+        vols = self._book_volume_for_symbol(symbol)
+        if vols is None:
+            return None
+        bid_vol, ask_vol = vols
         total = bid_vol + ask_vol
         if total <= 0:
             return None
         return (bid_vol - ask_vol) / total
 
     def _update_book_imbalance(self, symbol: str) -> None:
-        """Recompute and record the book-imbalance history for a symbol.
+        """Recompute and record the book-imbalance and resting-depth history
+        for a symbol.
 
         Assumes *self._lock* is held (called from the book handlers).
         """
-        ratio = self._book_imbalance_for_symbol(symbol)
-        if ratio is None:
+        vols = self._book_volume_for_symbol(symbol)
+        if vols is None:
+            return
+        bid_vol, ask_vol = vols
+        total = bid_vol + ask_vol
+        if total <= 0:
             return
         now = _time_mod.time()
         hist = self._book_imb_history.setdefault(symbol, [])
-        hist.append((now, ratio))
+        hist.append((now, (bid_vol - ask_vol) / total))
         cutoff = now - 60
         while hist and hist[0][0] < cutoff:
             hist.pop(0)
+        depth = self._book_depth_history.setdefault(symbol, [])
+        depth.append((now, total))
+        while depth and depth[0][0] < cutoff:
+            depth.pop(0)
 
     def _flow_speed_and_accel(self, symbol: str) -> tuple[float, float]:
         """Derive flow_speed / flow_acceleration from the L2 book-imbalance
@@ -501,19 +527,43 @@ class StreamingService:
         flow_acceleration = recent_flow - previous_flow
         return flow_speed, flow_acceleration
 
+    def _liquidity_flow(self, symbol: str) -> float | None:
+        """Net L2 liquidity change over the trailing 60 s: resting depth at
+        the best levels now minus the depth at the window start (contracts
+        of liquidity added [+]/drained [-]).  Returns None when fewer than
+        2 depth samples exist.
+
+        Positive = liquidity is being posted (book refilling); negative =
+        liquidity is being consumed (book draining — a break risk).
+
+        Assumes *self._lock* is held.
+        """
+        depth = self._book_depth_history.get(symbol)
+        if not depth or len(depth) < 2:
+            return None
+        now = _time_mod.time()
+        while depth and depth[0][0] < now - 60:
+            depth.pop(0)
+        if len(depth) < 2:
+            return None
+        return depth[-1][1] - depth[0][1]
+
     def trend_data(self, stream_symbol: str) -> dict:
         """L2-sourced trend snapshot for a stream symbol, matching the dict
         shape previously produced by
         ``StreamingService.get_ticker_trend_data``:
 
-            {trend, book_imbalance, flow_speed, flow_acceleration,
-             trend_reversal, book_imbalance_history, flow_history}
+             {trend, book_imbalance, flow_speed, flow_acceleration,
+              liquidity_flow, trend_reversal, book_imbalance_history,
+              flow_history}
 
         ``book_imbalance`` is the current L2 OPTIONS-book bid/ask volume
         ratio (aggregated from ``_books_options`` — see
         ``_book_imbalance_for_symbol``); ``flow_speed`` /
         ``flow_acceleration`` are the first and second differences of that
-        ratio over the trailing 60s window.  All trend thresholds (>±0.3)
+        ratio over the trailing 60s window; ``liquidity_flow`` is the net
+        change in resting depth at the best levels over the same window
+        (contracts added/drained).  All trend thresholds (>±0.3)
         match the option-flow derivation, so downstream consumers
         (``flow.maybe_fire_wall_zone_alerts`` and the grid Trend column,
         plus the Telegram formatter) consume the trend and trend_reversal
@@ -523,6 +573,7 @@ class StreamingService:
             ratio = self._book_imbalance_for_symbol(stream_symbol)
             history = list(self._book_imb_history.get(stream_symbol) or [])
             flow_speed, flow_acceleration = self._flow_speed_and_accel(stream_symbol)
+            liquidity_flow = self._liquidity_flow(stream_symbol)
 
             # trend direction from L2 book pressure (same thresholds as before)
             if ratio is None or len(history) < 2:
@@ -555,6 +606,7 @@ class StreamingService:
             "book_imbalance": ratio,
             "flow_speed": flow_speed,
             "flow_acceleration": flow_acceleration,
+            "liquidity_flow": liquidity_flow,
             "trend_reversal": reversal,
             "book_imbalance_history": book_imbalance_history,
             "flow_history": [],

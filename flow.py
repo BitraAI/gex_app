@@ -627,6 +627,7 @@ def maybe_fire_wall_zone_alerts() -> None:
                               book_imbalance=ticker_data.get("book_imbalance"),
                               flow_speed=ticker_data.get("flow_speed"),
                               flow_acceleration=ticker_data.get("flow_acceleration"),
+                              liquidity_flow=ticker_data.get("liquidity_flow"),
                               absorption=atm_svc.get_ticker_absorption(t_upper),
                               absorbed_at_wall=_absorbed_at_wall,
                               net_flow=_net_60,
@@ -639,6 +640,7 @@ def maybe_fire_wall_zone_alerts() -> None:
                               book_imbalance=ticker_data.get("book_imbalance"),
                               flow_speed=ticker_data.get("flow_speed"),
                               flow_acceleration=ticker_data.get("flow_acceleration"),
+                              liquidity_flow=ticker_data.get("liquidity_flow"),
                               absorption=atm_svc.get_ticker_absorption(t_upper),
                               absorbed_at_wall=_absorbed_at_wall,
                               net_flow=_net_60,
@@ -1127,6 +1129,7 @@ def render_atm_order_flow_grid():
                 "Book Imbalance": book_imbalance,
                 "Flow Speed": flow_speed,
                 "Flow Acceleration": flow_acceleration,
+                "Liquidity Flow": ticker_data.get("liquidity_flow") if _svc is not None else None,
                 "Absorption": atm_svc.get_ticker_absorption(t_upper) if atm_svc else None,
                 "Buy/Sell": (f"{_buy_vol:,.0f} | {_sell_vol:,.0f}"
                              if _buy_vol is not None and _sell_vol is not None else None),
@@ -1148,7 +1151,7 @@ def render_atm_order_flow_grid():
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
-          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"], r["Absorption"], r["Buy/Sell"], r["Net Flow"])
+          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"], r["Liquidity Flow"], r["Absorption"], r["Buy/Sell"], r["Net Flow"])
         for r in rows
     )
     data_hash = hash((data_key, _atm_epoch, _wall_epoch))
@@ -1225,6 +1228,17 @@ def render_atm_order_flow_grid():
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
+    def _liquidity_flow_color(val):
+        """Color L2 liquidity flow (net depth change over 60 s): green =
+        liquidity being posted (book refilling), red = liquidity draining."""
+        if val is None:
+            return ""
+        if val > 0:
+            return "color: #00cc96; font-weight: bold;"
+        if val < 0:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+
     def _spot_bg(row):
         spot = row["Spot"]
         support = row["Support"]
@@ -1283,6 +1297,7 @@ def render_atm_order_flow_grid():
         _styler = _styler.map(_flow_acceleration_color, subset=["Flow Acceleration"])
         _styler = _styler.map(_absorption_color, subset=["Absorption"])
         _styler = _styler.map(_net_flow_color, subset=["Net Flow"])
+        _styler = _styler.map(_liquidity_flow_color, subset=["Liquidity Flow"])
     else:
         _styler = _styler.apply(_trend_color, subset=["Trend"])
         _styler = _styler.apply(_book_imbalance_color, subset=["Book Imbalance"])
@@ -1290,6 +1305,7 @@ def render_atm_order_flow_grid():
         _styler = _styler.apply(_flow_acceleration_color, subset=["Flow Acceleration"])
         _styler = _styler.apply(_absorption_color, subset=["Absorption"])
         _styler = _styler.apply(_net_flow_color, subset=["Net Flow"])
+        _styler = _styler.apply(_liquidity_flow_color, subset=["Liquidity Flow"])
 
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
@@ -1304,6 +1320,7 @@ def render_atm_order_flow_grid():
         "Flow Speed": lambda v: f"{v:+,.0f}" if v is not None else "",
         "Flow Acceleration": lambda v: f"{v:+,.2f}" if v is not None else "",
         "Absorption": lambda v: f"{v:,.0f}" if v is not None else "",
+        "Liquidity Flow": lambda v: f"{v:+,.0f}" if v is not None else "",
         "Buy/Sell": lambda v: v if v is not None else "",
         "Net Flow": lambda v: f"{v:+,.0f}" if v is not None else "",
     })
