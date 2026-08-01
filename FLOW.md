@@ -116,7 +116,7 @@ outside the buffer those scores contribute nothing.
 
 ```
 Schwab WebSocket (LEVEL1_EQUITIES + NASDAQ_BOOK / NYSE_BOOK)
-                         |
+        |
         |----------------------------------|
         v                                  v
   LEVEL1 trades                      LEVEL2 order books
