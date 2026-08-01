@@ -21,6 +21,7 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Book Imbalance** | Live Level-2 order-book pressure (OPTIONS): Positive → bullish, Negative → bearish. Ratio `(sum bid TOTAL_VOLUME − sum ask TOTAL_VOLUME) / sum` over the best book levels, range [-1, 1], refreshed on every book update. |
 | **Flow Speed** | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. |
 | **Flow Acceleration** | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, `mid = max(1, len(history) // 2)`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. |
+| **Absorption** | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot displacement over the same window. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -266,6 +267,27 @@ and rendered with the trade suggestion (e.g. `🟢 up - BUY CALL $8.25`).
 only `up`, `down`, and the reversal labels fire a send. Like all wall-zone
 alerts, trend alerts require the walls to be stable for 2 consecutive
 refreshes and respect the 600 s per-ticker cooldown.
+
+### Order absorption (Telegram + grid)
+
+**Price-impact absorption** (`AtmOptionVolumeService.get_ticker_absorption`,
+surfaced as the grid **Absorption** column and the Telegram
+`Absorption: <n> vol/$1` header line) measures how much aggressive ATM option
+flow the book consumed without moving the price:
+
+    absorption = Δ(cumulative ATM volume over 60 s) / max(|Δspot| over 60 s, 0.05)
+
+High absorption (≥ 1000 vol/$1) means heavy flow is being soaked up at a level
+(price pinned — support/resistance holding); low absorption (< 300) means the
+price is drifting on thin flow.
+
+**Wall absorption** in `flow.maybe_fire_wall_zone_alerts` snapshots the
+cumulative ATM volume when spot enters a wall zone and reports how many
+contracts were absorbed while spot stayed inside (Telegram
+`Wall absorbed: <n> contracts`). When spot then leaves the zone after
+absorbing ≥ 100 contracts, the wall is treated as **broken** and a dedicated
+💥 `Resistance/Support wall BROKE after absorbing <n> contracts` alert fires —
+heavy absorption followed by a break is a high-conviction move.
 
 ### Registration & subscription order
 

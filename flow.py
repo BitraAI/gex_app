@@ -457,6 +457,13 @@ _WALL_ZONE_BUFFER = 0.0002  # 0.02 % — must match grid coloring in flow.py
 _WALL_ZONE_MIN_BUFFER = 0.05  # absolute buffer floor ($) for low-priced tickers
 _WALL_ZONE_ALERT_COOLDOWN = 600.0  # min seconds between consecutive alerts per ticker
 
+# Order-absorption grid colour thresholds (contracts per $1 of spot move).
+_ABSORPTION_HIGH = 1000.0  # heavy flow absorbed, price pinned
+_ABSORPTION_LOW = 300.0    # price drifting on thin flow
+
+# Min contracts absorbed at a wall before a "wall broke" alert fires.
+_WALL_BREAK_MIN_ABSORBED = 100.0
+
 
 def _wall_buffer(wall: float | None) -> float:
     """Near-wall zone width: 0.02 % of the wall price, floored at 5 cents so
@@ -570,6 +577,32 @@ def maybe_fire_wall_zone_alerts() -> None:
             _trend_signal = _trend_reversal
         elif _trend_dir in ("up", "down"):
             _trend_signal = _trend_dir
+
+        # ---- Wall absorption (order absorption at the wall) ------------- #
+        # Snapshot cumulative ATM volume when spot enters a wall zone; while
+        # inside, "absorbed" is the flow consumed since entry.  When spot
+        # leaves the zone after absorbing a heavy volume, the wall is treated
+        # as BROKEN and a dedicated alert fires (high-conviction move).
+        _flow_b, _flow_br = atm_svc.get_ticker_flow(t_upper)
+        _flow_vol = (_flow_b or 0) + (_flow_br or 0) if _flow_b is not None else None
+        _prev_zone = (prev or {}).get("_wall_zone")
+        if _prev_zone != wall_zone:
+            if wall_zone is not None:
+                next_state["_zone_entry_vol"] = _flow_vol
+            else:
+                _entry_vol = (prev or {}).get("_zone_entry_vol")
+                if _prev_zone in ("Resistance", "Support") and _entry_vol is not None and _flow_vol is not None:
+                    _absorbed_at_zone = _flow_vol - _entry_vol
+                    if _absorbed_at_zone >= _WALL_BREAK_MIN_ABSORBED:
+                        new_alerts = [f"💥 {_prev_zone} wall BROKE after absorbing {_absorbed_at_zone:,.0f} contracts"]
+                next_state["_zone_entry_vol"] = None
+        else:
+            next_state["_zone_entry_vol"] = (prev or {}).get("_zone_entry_vol")
+        next_state["_wall_zone"] = wall_zone
+        _absorbed_at_wall = None
+        if wall_zone is not None and _flow_vol is not None and next_state.get("_zone_entry_vol") is not None:
+            _absorbed_at_wall = max(0.0, _flow_vol - next_state["_zone_entry_vol"])
+
         last_ts = (prev or {}).get("last_alert_ts", 0.0)
         next_state["last_alert_ts"] = last_ts
         next_state["_prev_call_wall"] = call_wall
@@ -593,6 +626,8 @@ def maybe_fire_wall_zone_alerts() -> None:
                               book_imbalance=ticker_data.get("book_imbalance"),
                               flow_speed=ticker_data.get("flow_speed"),
                               flow_acceleration=ticker_data.get("flow_acceleration"),
+                              absorption=atm_svc.get_ticker_absorption(t_upper),
+                              absorbed_at_wall=_absorbed_at_wall,
                               disable_notification=False)
             else:
                 notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
@@ -602,6 +637,8 @@ def maybe_fire_wall_zone_alerts() -> None:
                               book_imbalance=ticker_data.get("book_imbalance"),
                               flow_speed=ticker_data.get("flow_speed"),
                               flow_acceleration=ticker_data.get("flow_acceleration"),
+                              absorption=atm_svc.get_ticker_absorption(t_upper),
+                              absorbed_at_wall=_absorbed_at_wall,
                               disable_notification=False)
         else:
             state[t_upper] = next_state
@@ -1084,6 +1121,7 @@ def render_atm_order_flow_grid():
                 "Book Imbalance": book_imbalance,
                 "Flow Speed": flow_speed,
                 "Flow Acceleration": flow_acceleration,
+                "Absorption": atm_svc.get_ticker_absorption(t_upper) if atm_svc else None,
             })
 
     if not rows:
@@ -1101,7 +1139,7 @@ def render_atm_order_flow_grid():
     data_key = tuple(
         (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
-          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"])
+          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"], r["Absorption"])
         for r in rows
     )
     data_hash = hash((data_key, _atm_epoch, _wall_epoch))
@@ -1154,6 +1192,17 @@ def render_atm_order_flow_grid():
         if val > 0:
             return "color: #00cc96; font-weight: bold;"
         if val < 0:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+
+    def _absorption_color(val):
+        """Color order absorption (contracts per $1): green = heavy flow
+        absorbed with little price move, red = price drifting on thin flow."""
+        if val is None:
+            return ""
+        if val >= _ABSORPTION_HIGH:
+            return "color: #00cc96; font-weight: bold;"
+        if val < _ABSORPTION_LOW:
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
@@ -1213,11 +1262,13 @@ def render_atm_order_flow_grid():
         _styler = _styler.map(_book_imbalance_color, subset=["Book Imbalance"])
         _styler = _styler.map(_flow_speed_color, subset=["Flow Speed"])
         _styler = _styler.map(_flow_acceleration_color, subset=["Flow Acceleration"])
+        _styler = _styler.map(_absorption_color, subset=["Absorption"])
     else:
         _styler = _styler.apply(_trend_color, subset=["Trend"])
         _styler = _styler.apply(_book_imbalance_color, subset=["Book Imbalance"])
         _styler = _styler.apply(_flow_speed_color, subset=["Flow Speed"])
         _styler = _styler.apply(_flow_acceleration_color, subset=["Flow Acceleration"])
+        _styler = _styler.apply(_absorption_color, subset=["Absorption"])
 
     styled = _styler.format({
         "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
@@ -1231,6 +1282,7 @@ def render_atm_order_flow_grid():
         "Book Imbalance": lambda v: f"{v:+.2f}" if v is not None else "",
         "Flow Speed": lambda v: f"{v:+,.0f}" if v is not None else "",
         "Flow Acceleration": lambda v: f"{v:+,.2f}" if v is not None else "",
+        "Absorption": lambda v: f"{v:,.0f}" if v is not None else "",
     })
 
     s._flow_styled_hash = data_hash
