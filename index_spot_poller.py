@@ -10,7 +10,7 @@ grid and the main chart display.
 
 import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import List
 
 from client import fetch_quotes
 from _constants import INDEX_QUOTE_MAP
@@ -42,8 +42,6 @@ class IndexSpotPoller:
         self._running = False
         self._task = None
         
-        # Cache for avoiding redundant API calls
-        self._last_quotes: Dict[str, Dict[str, Any]] = {}
         self._last_poll_time = 0
         
     @property
@@ -142,7 +140,6 @@ class IndexSpotPoller:
                                 raise
                     
                     self._last_poll_time = current_time
-                    self._last_quotes = idx_resp
                     
                     # Process and update each ticker's spot price
                     for ticker_upper, oauth_symbol in INDEX_QUOTE_MAP.items():

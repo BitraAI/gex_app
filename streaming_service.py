@@ -24,7 +24,6 @@ class StreamingService:
 
         # Debug state
         self._ticks_received = 0
-        self._handler_errors = 0
         self._connected = False
         self._last_error: str | None = None
 
@@ -112,7 +111,6 @@ class StreamingService:
             self._current_bucket = None
             self._current_bar = None
             self._ticks_received = 0
-            self._handler_errors = 0
             self._bid_price = None
             self._ask_price = None
             self._last_price = None
@@ -256,7 +254,7 @@ class StreamingService:
                     try:
                         self._aggregate_tick(int(t), float(price), int(size))
                     except Exception:
-                        self._handler_errors += 1
+                        pass
 
         # ---- NASDAQ book handler (Level 2) ---------------------------- #
         def _nasdaq_handler(msg):

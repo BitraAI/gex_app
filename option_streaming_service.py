@@ -118,7 +118,6 @@ class AtmOptionVolumeService:
 
         # Streaming stats
         self._ticks_received = 0
-        self._resubscribes = 0
 
         # Timestamp (time.time()) of the last tick processed by _option_handler.
         # Used by the Order Flow watchdog to detect a silently dead feed.
@@ -219,10 +218,8 @@ class AtmOptionVolumeService:
             if abs(new_strike - self._atm_strike) > 0.001:
                 self._atm_strike = new_strike
                 if self._running and self._expiration:
-                    self._resubscribes += 1
                     sc = self._stream_client
             elif self._running and self._expiration and self._subscribed_call_sym is None:
-                self._resubscribes += 1
                 sc = self._stream_client
             for _key, _t in self._ticker_flows.items():
                 if _t.get("stream_symbol") != self._symbol:
@@ -290,7 +287,6 @@ class AtmOptionVolumeService:
             self._current_bucket = None
             self._current_bar = None
             self._ticks_received = 0
-            self._resubscribes = 0
             self._call_bid = None
             self._call_ask = None
             self._put_bid = None
