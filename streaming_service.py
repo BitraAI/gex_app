@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time as _time_mod
 
 import pandas as pd
 from schwab.streaming import StreamClient
@@ -8,11 +9,18 @@ from _constants import MAX_BAR_ROWS
 
 
 class StreamingService:
-    """Subscribes to Schwab LEVELONE_EQUITIES, NASDAQ_BOOK, NYSE_BOOK.
-    Extracts raw tick data (LAST_PRICE + TRADE_TIME_MILLIS + LAST_SIZE)
-    plus BID_PRICE/ASK_PRICE to infer trade direction, and aggregates
-    into 1-second OHLCV bars with buy/sell volume split for delta.
-    Level 2 order book depth is stored separately."""
+    """Subscribes to Schwab LEVELONE_EQUITIES plus NASDAQ_BOOK / NYSE_BOOK for
+    the chart symbol and every tracked ticker.  Extracts raw tick data
+    (LAST_PRICE + TRADE_TIME_MILLIS + LAST_SIZE) plus BID_PRICE/ASK_PRICE to
+    infer trade direction, and aggregates into 1-second OHLCV bars with a
+    buy/sell volume split for delta.
+
+    The Level 2 order books (keyed per stream symbol) are the single source
+    for book_imbalance / flow_speed / flow_acceleration — see
+    ``trend_data``.  A book is subscribed for every tracked ticker so the
+    per-ticker Order Flow grid and the wall-zone / Telegram alerts all
+    consume L2 book pressure rather than option-quote-derived imbalance.
+    """
 
     def __init__(self, async_client, loop):
         self._client = async_client
@@ -48,9 +56,15 @@ class StreamingService:
         self._ask_price: float | None = None
         self._last_price: float | None = None
 
-        # Level 2 order book snapshots
-        self._nasdaq_book: dict | None = None
-        self._nyse_book: dict | None = None
+        # Level 2 order book snapshots, keyed by schwab stream symbol.  One
+        # entry per tracked ticker we have asked Schwab to stream a book for.
+        self._book_symbols: set[str] = set()        # stream symbols currently subscribed
+        self._books_nasdaq: dict[str, dict] = {}    # stream_symbol -> latest NASDAQ_BOOK content msg
+        self._books_nyse: dict[str, dict] = {}      # stream_symbol -> latest NYSE_BOOK content msg
+        # Per-symbol L2 book-imbalance history: stream_symbol -> list[(ts, ratio)],
+        # pruned to the last 60s, used to derive flow_speed / flow_acceleration.
+        self._book_imb_history: dict[str, list] = {}
+        self._prev_trend: dict[str, str] = {}        # stream_symbol -> last trend label (reversal)
 
     @property
     def symbol(self) -> str | None:
@@ -114,8 +128,6 @@ class StreamingService:
             self._bid_price = None
             self._ask_price = None
             self._last_price = None
-            self._nasdaq_book = None
-            self._nyse_book = None
         self._symbol = symbol
         self._running = True
         self._stream_task = asyncio.run_coroutine_threadsafe(
@@ -256,15 +268,24 @@ class StreamingService:
                     except Exception:
                         pass
 
-        # ---- NASDAQ book handler (Level 2) ---------------------------- #
+        # ---- Level 2 book handlers (one message may carry many symbols) - #
         def _nasdaq_handler(msg):
             with self._lock:
-                self._nasdaq_book = msg
+                for content in (msg.get("content") or []):
+                    sym = content.get("SYMBOL")
+                    if sym is None:
+                        continue
+                    self._books_nasdaq[sym] = content
+                    self._update_book_imbalance(sym)
 
-        # ---- NYSE book handler (Level 2) ------------------------------ #
         def _nyse_handler(msg):
             with self._lock:
-                self._nyse_book = msg
+                for content in (msg.get("content") or []):
+                    sym = content.get("SYMBOL")
+                    if sym is None:
+                        continue
+                    self._books_nyse[sym] = content
+                    self._update_book_imbalance(sym)
 
         # Add handlers before subscribing
         sc.add_level_one_equity_handler(_l1_handler)
@@ -278,12 +299,12 @@ class StreamingService:
                 self._last_error = f"Login failed: {e}"
             return
 
-        # Subscribe to all three services
+        # Subscribe to all services: Level 1 for the chart symbol + Level 2
+        # books for the chart symbol and every tracked ticker.
         while self._running and self._symbol:
             try:
                 await sc.level_one_equity_subs([self._symbol])
-                await sc.nasdaq_book_subs([self._symbol])
-                await sc.nyse_book_subs([self._symbol])
+                await self._subscribe_books(sc)
             except Exception as e:
                 with self._lock:
                     self._last_error = f"Subs failed: {e}"
@@ -309,8 +330,7 @@ class StreamingService:
                         while self._running and self._symbol:
                             try:
                                 await sc.level_one_equity_subs([self._symbol])
-                                await sc.nasdaq_book_subs([self._symbol])
-                                await sc.nyse_book_subs([self._symbol])
+                                await self._subscribe_books(sc)
                             except Exception:
                                 await asyncio.sleep(2)
                                 continue
@@ -350,3 +370,193 @@ class StreamingService:
         re-login and re-subscription.  Used by AtmOptionVolumeService to
         re-subscribe its LEVELONE_OPTIONS after the equity feed reconnects."""
         self._on_reconnect_cbs.append(callback)
+
+    # ------------------------------------------------------------------ #
+    # Level 2 book trend (subscribed per tracked ticker)
+    # ------------------------------------------------------------------ #
+
+    @property
+    def book_symbols(self) -> set[str]:
+        """Stream symbols currently subscribed for Level 2 books."""
+        with self._lock:
+            return set(self._book_symbols)
+
+    def subscribe_book_symbols(self, stream_symbols: list[str]) -> None:
+        """Ensure Level 2 books are subscribed for exactly *stream_symbols*.
+
+        Safe to call frequently (e.g. once per grid refresh): it diffs
+        against the current subscription set and only issues SUBS for new
+        symbols and UNSUBS for dropped symbols.  The Schwab calls are
+        scheduled on the background stream loop and never block the caller;
+        a symbol's book will not be populated until the first update lands,
+        so ``trend_data`` is None-safe in the meantime.
+        """
+        want = [s for s in stream_symbols if s]
+        with self._lock:
+            to_add = [s for s in want if s not in self._book_symbols]
+            to_remove = [s for s in self._book_symbols if s not in want]
+            for s in to_add:
+                self._book_symbols.add(s)
+            for s in to_remove:
+                self._book_symbols.discard(s)
+                self._books_nasdaq.pop(s, None)
+                self._books_nyse.pop(s, None)
+                self._book_imb_history.pop(s, None)
+                self._prev_trend.pop(s, None)
+            if not to_add and not to_remove:
+                return
+            sc = self._sc
+            loop = self._loop
+        # Fire-and-forget: schedule the async SUBS/UNSUBS on the stream loop.
+        if sc is not None and loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._apply_book_subscriptions(to_add, to_remove), loop)
+
+    async def _apply_book_subscriptions(self, to_add, to_remove):
+        try:
+            sc = self._sc
+            if sc is None:
+                return
+            if to_add:
+                await sc.nasdaq_book_subs(to_add)
+                await sc.nyse_book_subs(to_add)
+            if to_remove:
+                await sc.nasdaq_book_unsubs(to_remove)
+                await sc.nyse_book_unsubs(to_remove)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    async def _subscribe_books(self, sc: StreamClient):
+        """Subscribe NASDAQ + NYSE books for the chart symbol and every
+        tracked ticker.  Called from ``_stream`` right after login and
+        after each re-login so tracked-ticker books survive reconnects."""
+        book_syms = [self._symbol] if self._symbol else []
+        with self._lock:
+            book_syms += [s for s in self._book_symbols if s and s != self._symbol]
+        if book_syms:
+            await sc.nasdaq_book_subs(book_syms)
+            await sc.nyse_book_subs(book_syms)
+
+    def _book_imbalance_for_symbol(self, symbol: str) -> float | None:
+        """Aggregate Level-2 bid/ask volume imbalance for one stream symbol,
+        summing across the NASDAQ and NYSE books.  Returns a ratio in
+        [-1, 1] (positive = bullish pressure) or None when no book yet.
+
+        Assumes *self._lock* is held (called from handlers and trend_data).
+        """
+        bid_vol = 0.0
+        ask_vol = 0.0
+        for books in (self._books_nasdaq, self._books_nyse):
+            content = books.get(symbol)
+            if not content:
+                continue
+            for ask in (content.get("ASKS") or []):
+                try:
+                    ask_vol += float(ask.get("TOTAL_VOLUME") or 0)
+                except (TypeError, ValueError):
+                    pass
+            for bid in (content.get("BIDS") or []):
+                try:
+                    bid_vol += float(bid.get("TOTAL_VOLUME") or 0)
+                except (TypeError, ValueError):
+                    pass
+        total = bid_vol + ask_vol
+        if total <= 0:
+            return None
+        return (bid_vol - ask_vol) / total
+
+    def _update_book_imbalance(self, symbol: str) -> None:
+        """Recompute and record the book-imbalance history for a symbol.
+
+        Assumes *self._lock* is held (called from the book handlers).
+        """
+        ratio = self._book_imbalance_for_symbol(symbol)
+        if ratio is None:
+            return
+        now = _time_mod.time()
+        hist = self._book_imb_history.setdefault(symbol, [])
+        hist.append((now, ratio))
+        cutoff = now - 60
+        while hist and hist[0][0] < cutoff:
+            hist.pop(0)
+
+    def _flow_speed_and_accel(self, symbol: str) -> tuple[float, float]:
+        """Derive flow_speed / flow_acceleration from the L2 book-imbalance
+        series, mirroring the legacy option-flow momentum math so the same
+        sign / >0.3 thresholds still apply downstream.
+
+        Assumes *self._lock* is held.
+        """
+        history = self._book_imb_history.get(symbol)
+        if not history or len(history) < 2:
+            return 0.0, 0.0
+        now = _time_mod.time()
+        while history and history[0][0] < now - 60:
+            history.pop(0)
+        if len(history) < 2:
+            return 0.0, 0.0
+        segment_size = max(1, len(history) // 2)
+        older_first = history[0][1]
+        newer_first = history[-segment_size][1]
+        flow_speed = newer_first - older_first
+        previous_flow = history[segment_size - 1][1] - history[0][1]
+        recent_flow = history[-1][1] - history[-segment_size][1]
+        flow_acceleration = recent_flow - previous_flow
+        return flow_speed, flow_acceleration
+
+    def trend_data(self, stream_symbol: str) -> dict:
+        """L2-sourced trend snapshot for a stream symbol, matching the dict
+        shape previously produced by
+        ``AtmOptionVolumeService.get_ticker_trend_data``:
+
+            {trend, book_imbalance, flow_speed, flow_acceleration,
+             trend_reversal, book_imbalance_history, flow_history}
+
+        ``book_imbalance`` is the current NASDAQ+NYSE volume ratio;
+        ``flow_speed`` / ``flow_acceleration`` are the first and second
+        differences of that ratio over the trailing 60s window.  All trend
+        thresholds (>±0.3) match the option-flow derivation, so downstream
+        consumers (``flow.classify_trend_signal``, the Telegram formatter,
+        and the grid styler) need no changes.
+        """
+        with self._lock:
+            ratio = self._book_imbalance_for_symbol(stream_symbol)
+            history = list(self._book_imb_history.get(stream_symbol) or [])
+            flow_speed, flow_acceleration = self._flow_speed_and_accel(stream_symbol)
+
+            # trend direction from L2 book pressure (same thresholds as before)
+            if ratio is None or len(history) < 2:
+                trend = "flat"
+            elif ratio > 0.3 and flow_speed > 0 and flow_acceleration > 0:
+                trend = "up"
+            elif ratio < -0.3 and flow_speed < 0 and flow_acceleration < 0:
+                trend = "down"
+            elif ratio > 0.3 and flow_speed > 0:
+                trend = "up"
+            elif ratio < -0.3 and flow_speed < 0:
+                trend = "down"
+            else:
+                trend = "flat"
+
+            prev = self._prev_trend.get(stream_symbol)
+            self._prev_trend[stream_symbol] = trend
+
+        reversal: str | None = None
+        if prev is not None and prev != trend:
+            if prev == "down" and trend == "up":
+                reversal = "bullish"
+            elif prev == "up" and trend == "down":
+                reversal = "bearish"
+
+        now = _time_mod.time()
+        book_imbalance_history = [(t, r) for (t, r) in history if t >= now - 60]
+        return {
+            "trend": trend,
+            "book_imbalance": ratio,
+            "flow_speed": flow_speed,
+            "flow_acceleration": flow_acceleration,
+            "trend_reversal": reversal,
+            "book_imbalance_history": book_imbalance_history,
+            "flow_history": [],
+        }

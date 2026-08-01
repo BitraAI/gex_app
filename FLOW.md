@@ -18,9 +18,9 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Put Price** | Mid price of the ATM put option. |
 | **Support** | Put wall value (support level from Options data). |
 | **Resistance** | Call wall value (resistance level from Options data). |
-| **Book Imbalance** | Order book pressure: Positive → bullish, Negative → bearish. Range [-1, 1], updated every 10 trades with history for last 60 seconds. |
-| **Flow Speed** | Net flow momentum change `newer_first − older_first` over the last 60 s. Green > 0, red < 0, orange otherwise. |
-| **Flow Acceleration** | Rate of change of flow speed. Green > 0, red < 0, orange otherwise. |
+| **Book Imbalance** | Live Level-2 order-book pressure (NASDAQ + NYSE): Positive → bullish, Negative → bearish. Ratio `(sum bid TOTAL_VOLUME − sum ask TOTAL_VOLUME) / sum` over the best book levels, range [-1, 1], refreshed on every book update. |
+| **Flow Speed** | Momentum of the L2 book-imbalance series: `newer_first − older_first` over the last 60 s. Green > 0, red < 0, orange otherwise. |
+| **Flow Acceleration** | Rate of change of L2 flow speed. Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -44,43 +44,42 @@ Market-hours detection lives in `flow.is_market_open()`.
 
 ### Trend
 
-Trend reflects the **rate of change of net-flow momentum** over the last 60
-seconds, not the absolute level. It is computed in
-`AtmOptionVolumeService._snapshot_flow` and rendered in
-`flow.render_atm_order_flow_grid`.
-
-Note: Flow direction is derived from **net flow momentum** and **book imbalance** (latest 60s snapshots) — not from cumulative volume.
+Trend reflects the **rate of change of L2 book-imbalance pressure** over the
+last 60 seconds, not the absolute level. It is computed on demand by
+`StreamingService.trend_data()` from the NASDAQ + NYSE LEVEL2 books and read
+by the grid and the Telegram trend alerts via
+`AtmOptionVolumeService.get_ticker_trend_data(streaming_service=...)`.
 
 How it works:
 
-1. **Snapshots** — every ~10 trades a `(timestamp, net)` snapshot is appended
-   to the per-ticker `flow_history`, where `net = bullish − bearish`. Snapshots
-   older than 60 seconds are pruned.
-2. **Cold-start guard** — if fewer than 2 snapshots exist the trend is
-   **flat** and `flow_speed` is 0.
-3. **Flow-momentum diff** — the history is split in half and the first point
-   of the newer half is compared with the first point of the entire history:
+1. **Book snapshots** - on every Level 2 book update the aggregate
+   `book_imbalance = (sum bid TOTAL_VOLUME - sum ask TOTAL_VOLUME) / sum`
+   across the best NASDAQ and NYSE price levels is appended as
+   `(timestamp, ratio)` to a per-symbol 60s history.
+2. **Cold-start guard** - if fewer than 2 samples exist the trend is
+   **flat** and `flow_speed` / `flow_acceleration` are 0.
+3. **Book-pressure momentum** - the history is split in half and the first
+   point of the newer half is compared with the first point of the whole
+   history (same momentum math as before):
    - `older_first = history[0][1]`
    - `newer_first = history[-segment_size][1]`
-   - `flow_diff = newer_first − older_first`
-   - `flow_diff > 0` → base trend **up**
-   - `flow_diff < 0` → base trend **down**
-   - `flow_diff == 0` → base trend **flat**
-    - `flow_diff` is stored as `ticker["flow_speed"]`; the ratio `flow_diff / older_first` is stored as `ticker["flow_speed_ratio"]`.
-4. **Book-imbalance override** — `_calculate_book_imbalance()` is recorded on
-   every snapshot. If `|imbalance| > 0.3` (strong order-book pressure) it
-   overrides the flow-diff trend:
-   - `> +0.3` → force **up**
-   - `< −0.3` → force **down**
-5. **Reversal detection** — compared against the previous trend:
-   - **up → down** → `trend_reversal = "bearish"`
-   - **down → up** → `trend_reversal = "bullish"`
-   - otherwise → `trend_reversal = None`
+   - `flow_speed = newer_first - older_first`
+   - `previous_flow = history[segment_size-1][1] - history[0][1]`
+   - `recent_flow = history[-1][1] - history[-segment_size][1]`
+   - `flow_acceleration = recent_flow - previous_flow`
+   - `flow_speed > 0` => base trend **up**; `< 0` => **down**; `== 0` => **flat**
+4. **Book-imbalance override** - if `|book_imbalance| > 0.3` (strong
+   order-book pressure) it overrides the momentum trend:
+   - `> +0.3` => force **up**
+   - `< -0.3` => force **down**
+5. **Reversal detection** - compared against the previous trend:
+   - **up -> down** => `trend_reversal = "bearish"`
+   - **down -> up** => `trend_reversal = "bullish"`
+   - otherwise => `trend_reversal = None`
 
-The final `trend` is stored on the ticker and read by the grid. (`trend_reversal`
-is still computed by the streaming service but is **not** used by the grid
-anymore — the Trend column comes purely from the buy/sell signal formula
-below.)
+The final `trend` (and `book_imbalance`, `flow_speed`, `flow_acceleration`) is
+returned by `StreamingService.trend_data` and consumed unchanged by the grid
+and alerts via `flow.classify_trend_signal` (see table below).
 
 **Trend column display** — the grid classifies each ticker with a buy/sell
 signal formula that combines the spot's position relative to the walls
@@ -116,36 +115,27 @@ outside the buffer those scores contribute nothing.
 ## Data pipeline
 
 ```
-Schwab WebSocket (LEVEL1 + LEVEL2)
-        │
-        ├──────────────────────────────────┐
-        ▼                                  ▼
-  LEVEL1 trades                      LEVEL2 order book
-  bid, ask, last,                    (_calculate_book_imbalance)
-  volume, open interest,             (bid_size - ask_size)
-  greeks                            ────────────────────
-  (_process_trade_ticker)            (bid_size + ask_size)
-  → buy/sell
-  → GEX totals
-        │                                        │
-        ▼                                        │
-  Cumulative per-ticker GEX totals               │
-  { Put Wall, Call Wall }                        │
-        │                                        │
-        ▼  Snapshot every ~10 trades             │
-  flow_history = [(t0, net0), ...]               │
-  flow_speed   = newer_first - older_first       │
-  flow_acceleration = recent_flow - previous_flow│
-        │                                        │
-        ▼  Combined in _snapshot_flow            │
-  book_imbalance + flow_momentum                 │
-  → trend + reversal                             │
-         ◄───────────────────────────────────────┘
-        │
-        ▼
-flow_cache (st.session_state)  — updated by update_flow_cache()
-        │
-        ▼
+Schwab WebSocket (LEVEL1_EQUITIES + NASDAQ_BOOK / NYSE_BOOK)
+        |
+        |----------------------------------+
+        v                                  v
+  LEVEL1 trades                      LEVEL2 order books
+  bid, ask, last,                     per-symbol book messages
+  volume, greeks                      (BIDS / ASKS level TOTAL_VOLUME)
+  (_process_trade_ticker)             (StreamingService book handlers)
+  -> buy/sell                         -> book_imbalance ratio [-1, 1]
+  -> GEX totals                       -> appended to per-symbol 60s history
+        |                              -> flow_speed / flow_acceleration
+        |                                  (newer_first - older_first, etc.)
+        |                                  -> trend (up/down/flat) + reversal
+        v                                  (StreamingService.trend_data)
+  Cumulative per-ticker GEX totals
+  { Put Wall, Call Wall }
+        |
+        v
+flow_cache (st.session_state)  -- updated by update_flow_cache()
+        |
+        v
 ATM Order Flow dataframe (Streamlit, styled like Options Data table)
 ```
 
