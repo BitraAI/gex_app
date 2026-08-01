@@ -14,6 +14,13 @@ from calculations import calculate_atm_strike, get_strike_spacing
 # fresh in the Order Flow grid.
 _WALL_REFRESH_MIN_INTERVAL = 30.0
 
+# Order-absorption thresholds (price-impact absorption, contracts per $1):
+#   absorption = delta(cumulative ATM option volume over 60s) /
+#                max(|delta spot| over 60s, _ABSORPTION_MIN_SPOT_MOVE)
+# Below _ABSORPTION_MIN_VOL contracts the ratio is not meaningful (None).
+_ABSORPTION_MIN_VOL = 20
+_ABSORPTION_MIN_SPOT_MOVE = 0.05  # $ floor so a pinned price can't yield inf
+
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
 
 
@@ -353,6 +360,8 @@ class AtmOptionVolumeService:
                     "bullish": 0,
                     "bearish": 0,
                     "flow_history": [],
+                    "vol_history": [],
+                    "spot_history": [],
                     "flow_speed": 0,
                     "flow_acceleration": 0,
                     "book_imbalance": None,
@@ -395,6 +404,44 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return None, None
             return ticker["bullish"], ticker["bearish"]
+
+    def get_ticker_absorption(self, display_symbol: str) -> float | None:
+        """Return the current order absorption for a tracked ticker:
+        cumulative ATM option volume over the trailing 60 s divided by the
+        spot displacement over the same window (contracts per $1).
+
+        High absorption means the book/level soaked up heavy flow with
+        little price movement (price pinned); low absorption means the
+        price is drifting on thin flow.  Returns None when the ticker is
+        untracked, the 60 s flow is below ``_ABSORPTION_MIN_VOL``, or
+        fewer than 2 samples exist in either window.
+
+        The spot window is sampled on each call (the grid polls every 2 s),
+        so no extra bookkeeping is needed on the streaming hot path."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            now = _time_mod.time()
+            spot = ticker.get("spot", 0.0) or 0.0
+            if spot > 0:
+                sh = ticker.setdefault("spot_history", [])
+                sh.append((now, spot))
+                while sh and sh[0][0] < now - 60:
+                    sh.pop(0)
+            vh = ticker.setdefault("vol_history", [])
+            while vh and vh[0][0] < now - 60:
+                vh.pop(0)
+            sh = ticker.setdefault("spot_history", [])
+            while sh and sh[0][0] < now - 60:
+                sh.pop(0)
+            if len(vh) < 2 or len(sh) < 2:
+                return None
+            vol_60 = vh[-1][1] - vh[0][1]
+            if vol_60 < _ABSORPTION_MIN_VOL:
+                return None
+            spot_move = abs(sh[-1][1] - sh[0][1])
+            return vol_60 / max(spot_move, _ABSORPTION_MIN_SPOT_MOVE)
 
     def get_ticker_option_prices(self, display_symbol: str) -> dict:
         """Return {call_price, put_price} mid-market for a tracked ticker,
@@ -1121,6 +1168,14 @@ class AtmOptionVolumeService:
             half = size // 2
             ticker["bullish"] += half
             ticker["bearish"] += size - half
+
+        # Rolling 60 s window of cumulative ATM volume for order absorption
+        # (delta over the window is the recent aggressive flow).
+        now = _time_mod.time()
+        vh = ticker.setdefault("vol_history", [])
+        vh.append((now, ticker["bullish"] + ticker["bearish"]))
+        while vh and vh[0][0] < now - 60:
+            vh.pop(0)
 
     def _infer_dir(self, price: float, bid: float | None, ask: float | None) -> str:
         if bid is not None and ask is not None:
