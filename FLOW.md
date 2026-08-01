@@ -18,7 +18,7 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Put Price** | Mid price of the ATM put option. |
 | **Support** | Put wall value (support level from Options data). |
 | **Resistance** | Call wall value (resistance level from Options data). |
-| **Book Imbalance** | Live Level-2 order-book pressure (NASDAQ + NYSE): Positive → bullish, Negative → bearish. Ratio `(sum bid TOTAL_VOLUME − sum ask TOTAL_VOLUME) / sum` over the best book levels, range [-1, 1], refreshed on every book update. |
+| **Book Imbalance** | Live Level-2 order-book pressure (OPTIONS): Positive → bullish, Negative → bearish. Ratio `(sum bid TOTAL_VOLUME − sum ask TOTAL_VOLUME) / sum` over the best book levels, range [-1, 1], refreshed on every book update. |
 | **Flow Speed** | Momentum of the L2 book-imbalance series: `newer_first − older_first` over the last 60 s. Green > 0, red < 0, orange otherwise. |
 | **Flow Acceleration** | Rate of change of L2 flow speed. Green > 0, red < 0, orange otherwise. |
 
@@ -46,15 +46,15 @@ Market-hours detection lives in `flow.is_market_open()`.
 
 Trend reflects the **rate of change of L2 book-imbalance pressure** over the
 last 60 seconds, not the absolute level. It is computed on demand by
-`StreamingService.trend_data()` from the NASDAQ + NYSE LEVEL2 books and read
+`StreamingService.trend_data()` from the OPTIONS LEVEL2 books and read
 by the grid and the Telegram trend alerts via
 `StreamingService.get_ticker_trend_data(display_symbol)`.
 
 How it works:
 
-1. **Book snapshots** - on every Level 2 book update the aggregate
+1. **Book snapshots** - on every Level 2 options book update the aggregate
    `book_imbalance = (sum bid TOTAL_VOLUME - sum ask TOTAL_VOLUME) / sum`
-   across the best NASDAQ and NYSE price levels is appended as
+   across the best options book price levels is appended as
    `(timestamp, ratio)` to a per-symbol 60s history.
 2. **Cold-start guard** - if fewer than 2 samples exist the trend is
    **flat** and `flow_speed` / `flow_acceleration` are 0.
@@ -115,22 +115,22 @@ outside the buffer those scores contribute nothing.
 ## Data pipeline
 
 ```
-Schwab WebSocket (LEVEL1_EQUITIES + NASDAQ_BOOK / NYSE_BOOK)
+Schwab WebSocket (LEVEL1_EQUITIES + LEVEL1_OPTIONS + OPTIONS_BOOK)
         |
         |----------------------------------|
         v                                  v
-  LEVEL1 trades                      LEVEL2 order books
-  bid, ask, last,                     per-symbol book messages
-  volume, greeks                      (BIDS / ASKS level TOTAL_VOLUME)
-  (_process_trade_ticker)             (StreamingService book handlers)
-  -> buy/sell                         -> book_imbalance ratio [-1, 1]
-  -> GEX totals                       -> appended to per-symbol 60s history
+   LEVEL1 trades                      LEVEL2 options books
+   bid, ask, last,                     per-symbol book messages
+   volume (ATM service)                (BIDS / ASKS level TOTAL_VOLUME)
+   (_process_trade_ticker)             (StreamingService book handlers)
+   -> buy/sell                         -> book_imbalance ratio [-1, 1]
+   -> GEX totals                       -> appended to per-symbol 60s rolling history
         |                              -> flow_speed / flow_acceleration
         |                                  (newer_first - older_first, etc.)
         |                                  -> trend (up/down/flat) + reversal
         v                                  (StreamingService.trend_data)
-  Cumulative per-ticker GEX totals
-  { Put Wall, Call Wall }
+   Cumulative per-ticker GEX totals
+   { Put Wall, Call Wall }
         |
         v
 flow_cache (st.session_state)  -- updated by update_flow_cache()
@@ -190,7 +190,8 @@ Both the equity stream (`StreamingService`) and ATM option flow
 and therefore a single WebSocket connection. The equity service owns the
 connection and runs the `handle_message()` loop; the ATM service registers
 its handler via `add_level_one_option_handler` and subscribes via
-`level_one_option_subs`.
+`level_one_option_subs`. The streaming service also subscribes to LEVEL1_OPTIONS
+for continuous ATM flow and OPTIONS_BOOK for Level 2 options data.
 
 ### Spot price feeding
 

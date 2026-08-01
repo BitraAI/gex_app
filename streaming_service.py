@@ -60,12 +60,15 @@ class StreamingService:
         # Level 2 order book snapshots, keyed by schwab stream symbol.  One
         # entry per tracked ticker we have asked Schwab to stream a book for.
         self._book_symbols: set[str] = set()        # stream symbols currently subscribed
-        self._books_nasdaq: dict[str, dict] = {}    # stream_symbol -> latest NASDAQ_BOOK content msg
-        self._books_nyse: dict[str, dict] = {}      # stream_symbol -> latest NYSE_BOOK content msg
+        self._books_options: dict[str, dict] = {}   # stream_symbol -> latest OPTIONS_BOOK content msg
         # Per-symbol L2 book-imbalance history: stream_symbol -> list[(ts, ratio)],
         # pruned to the last 60s, used to derive flow_speed / flow_acceleration.
         self._book_imb_history: dict[str, list] = {}
         self._prev_trend: dict[str, str] = {}        # stream_symbol -> last trend label (reversal)
+        
+        # Level 1 options subscription for continuous ATM flow
+        self._options_subscribed_symbols: set[str] = set()
+        self._options_level_one_data: dict[str, dict] = {}  # store latest L1 options data
 
     @property
     def symbol(self) -> str | None:
@@ -269,29 +272,42 @@ class StreamingService:
                     except Exception:
                         pass
 
-        # ---- Level 2 book handlers (one message may carry many symbols) - #
-        def _nasdaq_handler(msg):
+        # ---- Level 1 options handler (trades + quotes) ------------------ #
+        def _l1_options_handler(msg):
             with self._lock:
-                for content in (msg.get("content") or []):
-                    sym = content.get("SYMBOL")
-                    if sym is None:
+                for c in msg.get("content", []):
+                    sym = c.get("key", "") or c.get("SYMBOL", "")
+                    if not sym:
                         continue
-                    self._books_nasdaq[sym] = content
-                    self._update_book_imbalance(sym)
+                    
+                    # Normalize symbol for consistency
+                    sym_norm = sym.replace(" ", "")
+                    
+                    # Store latest L1 options data
+                    self._options_level_one_data[sym_norm] = {
+                        "bid": float(c.get("BID_PRICE", 0)) if c.get("BID_PRICE") else None,
+                        "ask": float(c.get("ASK_PRICE", 0)) if c.get("ASK_PRICE") else None,
+                        "last": float(c.get("LAST_PRICE", 0)) if c.get("LAST_PRICE") else None,
+                        "bid_size": float(c.get("BID_SIZE", 0)) if c.get("BID_SIZE") else None,
+                        "ask_size": float(c.get("ASK_SIZE", 0)) if c.get("ASK_SIZE") else None,
+                        "time": c.get("TRADE_TIME_MILLIS", 0),
+                        "trade_price": float(c.get("LAST_PRICE", 0)) if c.get("LAST_PRICE") else None,
+                    }
 
-        def _nyse_handler(msg):
+        # ---- Level 2 book handlers (one message may carry many symbols) - #
+        def _options_book_handler(msg):
             with self._lock:
                 for content in (msg.get("content") or []):
                     sym = content.get("SYMBOL")
                     if sym is None:
                         continue
-                    self._books_nyse[sym] = content
+                    self._books_options[sym] = content
                     self._update_book_imbalance(sym)
 
         # Add handlers before subscribing
         sc.add_level_one_equity_handler(_l1_handler)
-        sc.add_nasdaq_book_handler(_nasdaq_handler)
-        sc.add_nyse_book_handler(_nyse_handler)
+        sc.add_level_one_option_handler(_l1_options_handler)
+        sc.add_options_book_handler(_options_book_handler)
 
         try:
             await sc.login()
@@ -301,10 +317,12 @@ class StreamingService:
             return
 
         # Subscribe to all services: Level 1 for the chart symbol + Level 2
-        # books for the chart symbol and every tracked ticker.
+        # books for the chart symbol and every tracked ticker + Level 1 options
+        # for ATM option flow.
         while self._running and self._symbol:
             try:
                 await sc.level_one_equity_subs([self._symbol])
+                await self._subscribe_options(sc)
                 await self._subscribe_books(sc)
             except Exception as e:
                 with self._lock:
@@ -331,6 +349,7 @@ class StreamingService:
                         while self._running and self._symbol:
                             try:
                                 await sc.level_one_equity_subs([self._symbol])
+                                await self._subscribe_options(sc)
                                 await self._subscribe_books(sc)
                             except Exception:
                                 await asyncio.sleep(2)
@@ -402,6 +421,7 @@ class StreamingService:
                 self._book_symbols.discard(s)
                 self._books_nasdaq.pop(s, None)
                 self._books_nyse.pop(s, None)
+                self._books_options.pop(s, None)
                 self._book_imb_history.pop(s, None)
                 self._prev_trend.pop(s, None)
             if not to_add and not to_remove:
@@ -421,15 +441,17 @@ class StreamingService:
             if to_add:
                 await sc.nasdaq_book_subs(to_add)
                 await sc.nyse_book_subs(to_add)
+                await sc.options_book_subs(to_add)
             if to_remove:
                 await sc.nasdaq_book_unsubs(to_remove)
                 await sc.nyse_book_unsubs(to_remove)
+                await sc.options_book_unsubs(to_remove)
         except Exception:
             import traceback
             traceback.print_exc()
 
     async def _subscribe_books(self, sc: StreamClient):
-        """Subscribe NASDAQ + NYSE books for the chart symbol and every
+        """Subscribe NASDAQ + NYSE + OPTIONS books for the chart symbol and every
         tracked ticker.  Called from ``_stream`` right after login and
         after each re-login so tracked-ticker books survive reconnects."""
         book_syms = [self._symbol] if self._symbol else []
@@ -438,17 +460,29 @@ class StreamingService:
         if book_syms:
             await sc.nasdaq_book_subs(book_syms)
             await sc.nyse_book_subs(book_syms)
+            await sc.options_book_subs(book_syms)
+    
+    async def _subscribe_options(self, sc: StreamClient):
+        """Subscribe to Level 1 options for the chart symbol and every
+        tracked ticker to provide continuous ATM flow.
+        Called from ``_stream`` right after login and
+        after each re-login so options survive reconnects."""
+        option_syms = [self._symbol] if self._symbol else []
+        with self._lock:
+            option_syms += [s for s in self._book_symbols if s and s != self._symbol]
+        if option_syms:
+            await sc.level_one_option_subs(option_syms)
 
     def _book_imbalance_for_symbol(self, symbol: str) -> float | None:
         """Aggregate Level-2 bid/ask volume imbalance for one stream symbol,
-        summing across the NASDAQ and NYSE books.  Returns a ratio in
+        summing across the OPTIONS book only.  Returns a ratio in
         [-1, 1] (positive = bullish pressure) or None when no book yet.
 
         Assumes *self._lock* is held (called from handlers and trend_data).
         """
         bid_vol = 0.0
         ask_vol = 0.0
-        for books in (self._books_nasdaq, self._books_nyse):
+        for books in (self._books_options,):
             content = books.get(symbol)
             if not content:
                 continue
