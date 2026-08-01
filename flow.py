@@ -516,6 +516,15 @@ def maybe_fire_wall_zone_alerts() -> None:
         return
     now = _time_mod.monotonic()
     state = s.setdefault("atm_alert_state", {})
+
+    # Ensure Level 2 books are subscribed for every tracked ticker so the
+    # L2-sourced trend below is populated (idempotent; diffs each call).
+    _svc = s.get("streaming_service")
+    if _svc is not None:
+        _svc.subscribe_book_symbols(
+            [_get_stream_symbol(t) for t in atm_svc.tracked_tickers()]
+        )
+
     for t in atm_svc.tracked_tickers():
         t_upper = _normalize_display_symbol(t)
         spot = atm_svc.get_ticker_spot(t_upper)
@@ -580,7 +589,9 @@ def maybe_fire_wall_zone_alerts() -> None:
             analytics["put_wall_mark"] = _cp  # BUY CALL signal shows the call price
         if _pp is not None:
             analytics["call_wall_mark"] = _pp  # BUY PUT signal shows the put price
-        ticker_data = atm_svc.get_ticker_trend_data(t_upper) or {}
+        ticker_data = atm_svc.get_ticker_trend_data(
+            t_upper, streaming_service=s.get("streaming_service")
+        ) or {}
         new_alerts, next_state = diff_alerts(prev, analytics, spot)
         wall_zone = None
         if call_wall is not None and spot >= call_wall - _wall_buffer(call_wall):
@@ -1063,6 +1074,9 @@ def render_atm_order_flow_grid():
     update_flow_cache()
 
     tickers = s.get("ticker_history", [])
+    _svc = s.get("streaming_service")
+    if _svc is not None:
+        _svc.subscribe_book_symbols([_get_stream_symbol(t) for t in tickers])
     rows = []
     if tickers:
         for t in tickers:
@@ -1075,7 +1089,9 @@ def render_atm_order_flow_grid():
             flow_speed = 0
             flow_acceleration = 0
             if atm_svc:
-                ticker_data = atm_svc.get_ticker_trend_data(t_upper)
+                ticker_data = atm_svc.get_ticker_trend_data(
+                    t_upper, streaming_service=s.get("streaming_service")
+                )
                 if ticker_data:
                     book_imbalance = ticker_data["book_imbalance"]
                     flow_speed = ticker_data.get("flow_speed", 0)
