@@ -6,8 +6,8 @@ safely from either entry point without re-running app.py's top-level code.
 """
 
 import asyncio
+import html
 import time as _time_mod
-import pandas as pd
 import streamlit as st
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -23,13 +23,11 @@ from functools import partial
 from analytics import _filter_strikes_near_atm, compute_analytics
 from calculations import aggregate_by_expiration, build_greeks_lookup, parse_option_chain
 from client import (
+    compute_iv_rank,
     fetch_option_chain,
-    fetch_price_history_daily,
     get_20d_rv,
     get_interest_rate,
     get_yield,
-    load_candle_cache,
-    save_candle_cache,
 )
 from signals import generate_recommendations, assess_market_bias
 from telegram_notifier import diff_alerts, notify_alerts
@@ -66,6 +64,27 @@ async def _fetch_quotes_with_retry(client, symbols, max_retries=None):
                 await asyncio.sleep(0.5 + random.random() * 1.0)
             else:
                 raise
+
+
+async def _fetch_chain_with_retry(client, symbol: str) -> dict | None:
+    """Fetch an option chain with _FETCH_RETRIES attempts / 1 s backoff.
+    Returns ``None`` when every attempt fails."""
+    raw = None
+    for attempt in range(_FETCH_RETRIES):
+        try:
+            raw = await fetch_option_chain(
+                client, symbol, strike_count=75, include_quotes=True,
+            )
+            break
+        except Exception:
+            if attempt < _FETCH_RETRIES - 1:
+                await asyncio.sleep(1.0)
+    if raw is None:
+        logger.warning(
+            "fetch_option_chain failed for %s after %d retries",
+            symbol, _FETCH_RETRIES,
+        )
+    return raw
 
 
 def _ensure_async_loop() -> asyncio.AbstractEventLoop:
@@ -205,7 +224,7 @@ def ensure_atm_streaming(stream_symbol: str):
         # blocking the Streamlit thread on every 2-second fragment tick.
         # Between fetches we feed whatever is already in spot_cache.
         # Index symbols are excluded — their spot comes from the
-        # index quote ($SPX:X etc.), not the ETF proxy quote.
+        # index quote ($SPX etc.), not the ETF proxy quote.
         _last_fetch_ts = s.get("_spot_fetch_ts", 0.0)
         if _time_mod.time() - _last_fetch_ts >= 10:
             s["_spot_fetch_ts"] = _time_mod.time()
@@ -243,7 +262,6 @@ def ensure_atm_streaming(stream_symbol: str):
             if sc is not None:
                 atm_svc._needs_reconnect = False
                 atm_svc.register(sc, stream_symbol, _first_exp)
-                atm_svc.start()
             if _was_reconnect:
                 return
             # Reset the index quote throttle so the next cycle
@@ -552,7 +570,7 @@ def maybe_fire_wall_zone_alerts() -> None:
         #     to at most once per MIN interval per ticker.
         #   - slow path: full recompute (analytics + IV rank + alerts) at a
         #     fixed slower cadence so alert headers stay fresh too.
-        _raw_t = t_upper  # retains :X suffix for index symbols
+        _raw_t = t_upper
         _ref = _last_ref_price.get(_raw_t)
         _inc = _strike_inc.get(_raw_t, 1.0)
         _last_re = _last_recompute_ts.get(_raw_t, 0.0)
@@ -794,18 +812,8 @@ async def _compute_walls_for_symbol(client, symbol: str) -> dict | None:
     latest walls can be fetched much more often without hammering the API.
     Returns ``None`` when the chain cannot be loaded.
     """
-    raw = None
-    for attempt in range(3):
-        try:
-            raw = await fetch_option_chain(
-                client, symbol, strike_count=75, include_quotes=True,
-            )
-            break
-        except Exception:
-            if attempt < 2:
-                await asyncio.sleep(1.0)
+    raw = await _fetch_chain_with_retry(client, symbol)
     if raw is None:
-        logger.warning("fetch_option_chain failed for %s after 3 retries", symbol)
         return None
 
     try:
@@ -830,18 +838,8 @@ async def _compute_walls_for_symbol(client, symbol: str) -> dict | None:
 
 async def _compute_for_symbol(client, symbol: str) -> dict | None:
     """Fetch chain + compute analytics + IV rank for one symbol."""
-    raw = None
-    for attempt in range(3):
-        try:
-            raw = await fetch_option_chain(
-                client, symbol, strike_count=75, include_quotes=True,
-            )
-            break
-        except Exception:
-            if attempt < 2:
-                await asyncio.sleep(1.0)
+    raw = await _fetch_chain_with_retry(client, symbol)
     if raw is None:
-        logger.warning("fetch_option_chain failed for %s after 3 retries", symbol)
         return None
 
     try:
@@ -895,22 +893,7 @@ async def _compute_for_symbol(client, symbol: str) -> dict | None:
 
     iv_rank = None
     try:
-        df = load_candle_cache(symbol, "1d")
-        if df.empty or len(df) < 2:
-            raw_ph = await fetch_price_history_daily(client, symbol, years=1)
-            if raw_ph:
-                df = pd.DataFrame(raw_ph)
-                save_candle_cache(df, symbol, "1d")
-        if not df.empty and len(df) >= 2:
-            df = df.sort_values("datetime")
-            closes = df["close"].tolist()
-            returns = [(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
-            if len(returns) >= 2:
-                recent_252 = returns[-252:]
-                current = returns[-1]
-                lo = min(recent_252)
-                hi = max(recent_252)
-                iv_rank = round((current - lo) / (hi - lo) * 100, 2) if hi != lo else 50.0
+        iv_rank = await compute_iv_rank(client, symbol)
     except Exception as exc:
         logger.warning("failed to compute IV rank for %s: %s", symbol, exc)
 
@@ -923,7 +906,7 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
     try:
         _cache_key = display_key.split(":")[0]
         if _cache_key in STREAM_SYMBOL_MAP:
-            api_symbol = f"${_cache_key}:X"
+            api_symbol = f"${_cache_key}"
         else:
             api_symbol = display_key
 
@@ -941,8 +924,8 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         }
 
         # Push walls and ATM option prices to the ATM service.
-        # Use display_key (retains :X suffix for index symbols) so
-        # _find_flow_for_display can match the stored ticker key.
+        # Use the normalized display key so _find_flow_for_display can
+        # match the stored ticker key.
         if atm_svc:
             _pw = analytics.get("put_wall")
             _cw = analytics.get("call_wall")
@@ -965,6 +948,14 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                             elif e["type"] == "PUT" and _put_mark is None:
                                 _put_mark = e.get("mark")
                 atm_svc.set_ticker_option_prices(display_key, _call_mark, _put_mark)
+            # Option marks at the key wall strikes: CALL at the put wall
+            # (support) and PUT at the call wall (resistance).  These are
+            # what the grid shows in the Call/Put Price columns.
+            atm_svc.set_ticker_wall_prices(
+                display_key,
+                analytics.get("put_wall_call_price"),
+                analytics.get("call_wall_put_price"),
+            )
 
         strikes = sorted(set(e["strike"] for e in data))
         if len(strikes) >= 2:
@@ -1027,7 +1018,7 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
     try:
         _cache_key = display_key.split(":")[0]
         if _cache_key in STREAM_SYMBOL_MAP:
-            api_symbol = f"${_cache_key}:X"
+            api_symbol = f"${_cache_key}"
         else:
             api_symbol = display_key
 
@@ -1058,6 +1049,12 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
                             elif e["type"] == "PUT" and _put_mark is None:
                                 _put_mark = e.get("mark")
                 atm_svc.set_ticker_option_prices(display_key, _call_mark, _put_mark)
+            # Option marks at the key wall strikes (Call/Put Price columns).
+            atm_svc.set_ticker_wall_prices(
+                display_key,
+                analytics.get("put_wall_call_price"),
+                analytics.get("call_wall_put_price"),
+            )
 
         strikes = sorted(set(e["strike"] for e in data))
         if len(strikes) >= 2:
@@ -1116,26 +1113,61 @@ def render_flow_legend_and_style():
     """
     st.markdown("""
     <style>
-    div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
-    div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
+    div.flow-grid-wrap { width: 100%; overflow-x: auto; }
+    table.flow-grid {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+        font-size: 12px;
+        font-family: var(--font, "Source Sans Pro", sans-serif);
+    }
+    table.flow-grid thead th {
+        padding: 6px 4px;
+        text-align: center;
+        vertical-align: bottom;
+        white-space: normal;
+        overflow-wrap: break-word;
+        word-break: break-word;
+        line-height: 1.15;
+        font-weight: 600;
+        color: var(--text-color, #31333f);
+        background-color: var(--secondary-background-color, #f0f2f6);
+        border-bottom: 1px solid var(--border-color, #e0e2e6);
+    }
+    table.flow-grid tbody td {
+        padding: 4px 5px;
+        color: var(--text-color, #31333f);
+        white-space: nowrap;
+        border-bottom: 1px solid var(--border-color, #e0e2e6);
+    }
+    table.flow-grid tbody td:first-child {
+        text-align: left !important;
+        font-weight: 600;
+        white-space: normal;
+    }
+    table.flow-grid tbody tr:hover td {
+        background-color: var(--secondary-background-color, #f7f8fa);
+    }
     </style>
     """, unsafe_allow_html=True)
 
 
 def render_atm_order_flow_grid():
-    """Render the ATM Order Flow as a Streamlit dataframe (mirrors the style of
-    the main app's Options Data table): one row per tracked ticker with
+    """Render the ATM Order Flow as an HTML table (mirrors the style of the
+    main app's Options Data table): one row per tracked ticker with
     Bullish / Bearish flow, a coloured Status cell, and formatted numbers.
 
     Used by the Order Flow tab in the main app (wrapped in a refresh fragment).
     The legend and CSS style are rendered separately via
     ``render_flow_legend_and_style`` so they are not re-injected every tick.
 
-    The styled DataFrame is cached in session state and only rebuilt when the
-    underlying data actually changes.  A fixed Styler UUID prevents pandas
-    from generating unique CSS class names per instance, which would cause
-    Streamlit to see a "change" and re-render the DOM even when the data
-    is identical.
+    A plain HTML table (via ``st.markdown``) is used instead of
+    ``st.dataframe`` because Streamlit's dataframe draws its headers on a
+    canvas, which cannot wrap them; ``table-layout: fixed`` + wrapping
+    headers keep all 14 columns visible.
+
+    The rendered HTML is cached in session state and only rebuilt when the
+    underlying data actually changes.
     """
     s = st.session_state
     current_sym = _normalize_display_symbol(s.get("symbol", ""))
@@ -1152,7 +1184,7 @@ def render_atm_order_flow_grid():
         for t in tickers:
             t_upper = _normalize_display_symbol(t)
             opt_prices = atm_svc.get_ticker_option_prices(t_upper) if atm_svc else {}
-            atm_strike = atm_svc.get_ticker_atm_strike(t_upper) if atm_svc else None
+            wall_prices = atm_svc.get_ticker_wall_prices(t_upper) if atm_svc else {}
             spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
             # Get book imbalance and trend from ticker data (L2-sourced via
             # StreamingService.trend_data: trend is up/down/flat, reversal is
@@ -1182,27 +1214,24 @@ def render_atm_order_flow_grid():
             if call_wall_val is None and t_upper == current_sym:
                 call_wall_val = (s.get("analytics") or {}).get("call_wall")
 
-            _buy_vol, _sell_vol, _net_60 = (
-                atm_svc.get_ticker_executed_flow(t_upper) if atm_svc else (None, None, None)
+            _net_60 = (
+                atm_svc.get_ticker_executed_flow(t_upper)[2] if atm_svc else None
             )
             rows.append({
                 "Ticker": t_upper,
                 "Spot": spot,
-                "ATM Strike": atm_strike,
                 "Expiration": atm_svc.get_ticker_expiration(t_upper) if atm_svc else None,
                 "Support": put_wall_val,
                 "Resistance": call_wall_val,
-                "Call Price": opt_prices.get("call_price"),
-                "Put Price": opt_prices.get("put_price"),
+                "Call Price": wall_prices.get("call_price") if wall_prices.get("call_price") is not None else opt_prices.get("call_price"),
+                "Put Price": wall_prices.get("put_price") if wall_prices.get("put_price") is not None else opt_prices.get("put_price"),
                 "Trend": trend_display,
                 "Book Imbalance": book_imbalance,
                 "Flow Speed": flow_speed,
                 "Flow Acceleration": flow_acceleration,
+                "Net Flow": _net_60,
                 "Liquidity Flow": ticker_data.get("liquidity_flow") if _svc is not None else None,
                 "Absorption": atm_svc.get_ticker_absorption(t_upper) if atm_svc else None,
-                "Buy/Sell": (f"{_buy_vol:,.0f} | {_sell_vol:,.0f}"
-                             if _buy_vol is not None and _sell_vol is not None else None),
-                "Net Flow": _net_60,
             })
 
     if not rows:
@@ -1210,7 +1239,7 @@ def render_atm_order_flow_grid():
         return
 
     # Hash the row data to detect whether anything actually changed.
-    # Include a 10 s epoch so the ATM Strike column is re-rendered every
+    # Include a 10 s epoch so the Spot column is re-rendered every
     # 10 s even when the cached value is unchanged, keeping the display
     # visibly "alive" for users who watch the grid.
     # Include a 60 s epoch so the Support / Resistance wall columns are
@@ -1218,9 +1247,9 @@ def render_atm_order_flow_grid():
     _atm_epoch = int(_time_mod.time() // 10)
     _wall_epoch = int(_time_mod.time() // 60)
     data_key = tuple(
-        (r["Ticker"], r["Spot"], r["ATM Strike"], r["Expiration"],
+        (r["Ticker"], r["Spot"], r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
-          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"], r["Liquidity Flow"], r["Absorption"], r["Buy/Sell"], r["Net Flow"])
+          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"], r["Net Flow"], r["Liquidity Flow"], r["Absorption"])
         for r in rows
     )
     data_hash = hash((data_key, _atm_epoch, _wall_epoch))
@@ -1228,11 +1257,15 @@ def render_atm_order_flow_grid():
     cached_hash = s.get("_flow_styled_hash")
     cached_styled = s.get("_flow_styled")
     if data_hash == cached_hash and cached_styled is not None:
-        st.dataframe(cached_styled, height=700, width="stretch")
+        st.markdown(cached_styled, unsafe_allow_html=True)
         return
 
-    df = pd.DataFrame(rows)
-
+    # ---- HTML table rendering ------------------------------------------ #
+    # Streamlit's dataframe draws its column headers on a canvas, so CSS
+    # cannot wrap them to fit all 14 columns.  Render the grid as a plain
+    # HTML table instead: `table-layout: fixed` distributes the tab width
+    # evenly across the columns and the headers wrap onto multiple lines
+    # (see render_flow_legend_and_style for the `.flow-grid` CSS).
     def _trend_color(val):
         """Color the Trend label (up/down/flat/bullish/bearish) by direction.
 
@@ -1309,6 +1342,7 @@ def render_atm_order_flow_grid():
         return "color: #ff9800; font-weight: bold;"
 
     def _spot_bg(row):
+        """Background color for the Spot cell based on near-wall pressure."""
         spot = row["Spot"]
         support = row["Support"]
         resistance = row["Resistance"]
@@ -1343,65 +1377,76 @@ def render_atm_order_flow_grid():
                     score += 1
                 elif fa < 0:
                     score -= 1
-        styles = [""] * len(row)
-        col_idx = list(row.index)
-        spot_i = col_idx.index("Spot")
         if score >= 2:
-            styles[spot_i] = "background-color: #a5d6a7"
-        elif score == 1:
-            styles[spot_i] = "background-color: #ccffcc"
-        elif score <= -2:
-            styles[spot_i] = "background-color: #ef9a9a"
-        elif score == -1:
-            styles[spot_i] = "background-color: #ffcccc"
-        return styles
+            return "background-color: #a5d6a7;"
+        if score == 1:
+            return "background-color: #ccffcc;"
+        if score <= -2:
+            return "background-color: #ef9a9a;"
+        if score == -1:
+            return "background-color: #ffcccc;"
+        return ""
 
-    _styler = df.style.set_uuid("flow_grid")
-    _styler = _styler.apply(_spot_bg, axis=1)
+    def _fmt_money(v):
+        return f"${v:,.2f}" if v is not None else ""
 
-    if hasattr(_styler, "map"):
-        _styler = _styler.map(_trend_color, subset=["Trend"])
-        _styler = _styler.map(_book_imbalance_color, subset=["Book Imbalance"])
-        _styler = _styler.map(_flow_speed_color, subset=["Flow Speed"])
-        _styler = _styler.map(_flow_acceleration_color, subset=["Flow Acceleration"])
-        _styler = _styler.map(_absorption_color, subset=["Absorption"])
-        _styler = _styler.map(_net_flow_color, subset=["Net Flow"])
-        _styler = _styler.map(_liquidity_flow_color, subset=["Liquidity Flow"])
-    else:
-        _styler = _styler.apply(_trend_color, subset=["Trend"])
-        _styler = _styler.apply(_book_imbalance_color, subset=["Book Imbalance"])
-        _styler = _styler.apply(_flow_speed_color, subset=["Flow Speed"])
-        _styler = _styler.apply(_flow_acceleration_color, subset=["Flow Acceleration"])
-        _styler = _styler.apply(_absorption_color, subset=["Absorption"])
-        _styler = _styler.apply(_net_flow_color, subset=["Net Flow"])
-        _styler = _styler.apply(_liquidity_flow_color, subset=["Liquidity Flow"])
+    def _fmt_signed(v, dec):
+        return f"{v:+,.{dec}f}" if v is not None else ""
 
-    styled = _styler.format({
-        "Spot": lambda v: f"${v:,.2f}" if v is not None else "",
-        "ATM Strike": lambda v: f"${v:,.2f}" if v is not None else "",
-        "Expiration": lambda v: _format_expiration(v),
-        "Support": lambda v: f"${v:,.2f}" if v is not None else "",
-        "Resistance": lambda v: f"${v:,.2f}" if v is not None else "",
-        "Trend": lambda v: v,
-        "Call Price": lambda v: f"${v:,.2f}" if v is not None else "",
-        "Put Price": lambda v: f"${v:,.2f}" if v is not None else "",
-        "Book Imbalance": lambda v: f"{v:+.2f}" if v is not None else "",
-        "Flow Speed": lambda v: f"{v:+,.0f}" if v is not None else "",
-        "Flow Acceleration": lambda v: f"{v:+,.2f}" if v is not None else "",
-        "Absorption": lambda v: f"{v:,.0f}" if v is not None else "",
-        "Liquidity Flow": lambda v: f"{v:+,.0f}" if v is not None else "",
-        "Buy/Sell": lambda v: v if v is not None else "",
-        "Net Flow": lambda v: f"{v:+,.0f}" if v is not None else "",
-    })
+    def _fmt_commas(v):
+        return f"{v:,.0f}" if v is not None else ""
+
+    def _mk_color(col_name, color_fn):
+        def _c(row):
+            return color_fn(row[col_name])
+        return _c
+
+    cols = [
+        ("Ticker", "left", lambda v: html.escape(str(v)) if v is not None else "", None),
+        ("Spot", "center", _fmt_money, _spot_bg),
+        ("Expiration", "center", lambda v: html.escape(_format_expiration(v)), None),
+        ("Support", "right", _fmt_money, None),
+        ("Resistance", "right", _fmt_money, None),
+        ("Call Price", "right", _fmt_money, None),
+        ("Put Price", "right", _fmt_money, None),
+        ("Trend", "center", lambda v: html.escape(str(v)) if v is not None else "", _mk_color("Trend", _trend_color)),
+        ("Book Imbalance", "right", lambda v: _fmt_signed(v, 2), _mk_color("Book Imbalance", _book_imbalance_color)),
+        ("Flow Speed", "right", lambda v: _fmt_signed(v, 0), _mk_color("Flow Speed", _flow_speed_color)),
+        ("Flow Acceleration", "right", lambda v: _fmt_signed(v, 2), _mk_color("Flow Acceleration", _flow_acceleration_color)),
+        ("Net Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Net Flow", _net_flow_color)),
+        ("Liquidity Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Liquidity Flow", _liquidity_flow_color)),
+        ("Absorption", "right", _fmt_commas, _mk_color("Absorption", _absorption_color)),
+    ]
+
+    thead = "".join(f"<th>{name}</th>" for name, *_rest in cols)
+    tbody = []
+    for r in rows:
+        cells = []
+        for name, align, fmt, colorer in cols:
+            text = fmt(r[name])
+            style = colorer(r) if colorer else ""
+            if align == "right":
+                style += " text-align:right;"
+            elif align == "center":
+                style += " text-align:center;"
+            cells.append(f'<td style="{style}">{text}</td>')
+        tbody.append("<tr>" + "".join(cells) + "</tr>")
+    table_html = (
+        '<div class="flow-grid-wrap">'
+        '<table class="flow-grid">'
+        f"<thead><tr>{thead}</tr></thead>"
+        f"<tbody>{''.join(tbody)}</tbody>"
+        "</table></div>"
+    )
 
     s._flow_styled_hash = data_hash
-    s._flow_styled = styled
-    st.dataframe(styled, height=700, width="stretch")
+    s._flow_styled = table_html
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 @st.fragment(run_every=2)
 def render_flow_frag():
-    """Renders the Order Flow dataframe with fast updates.
+    """Renders the Order Flow grid with fast updates.
 
     Includes a watchdog: if no option ticks arrive for 60 s while the
     market is open, the feed is assumed dead and a reconnection is forced.
@@ -1425,7 +1470,7 @@ def render_flow_frag():
     st.subheader("Order Flow")
     # Market status indicator at the header row
     render_market_status()
-    # CSS styles for the dataframe (only need to inject once)
+    # CSS styles for the grid (only need to inject once)
     if "_flow_css_injected" not in s:
         render_flow_legend_and_style()
         s["_flow_css_injected"] = True

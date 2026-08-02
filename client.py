@@ -343,6 +343,37 @@ def save_candle_cache(df: pd.DataFrame, symbol: str, timeframe: str):
     df.to_parquet(p, index=False)
 
 
+async def compute_iv_rank(client: AsyncClient, symbol: str) -> float | None:
+    """Compute the trailing-252-day IV rank from daily close data.
+
+    Uses the cached daily candles, falling back to a REST fetch of the last
+    year of daily history when the cache is empty or too short.  Returns
+    ``None`` when not enough data is available."""
+    df = load_candle_cache(symbol, "1d")
+    if df.empty or len(df) < 2:
+        try:
+            raw_ph = await fetch_price_history_daily(client, symbol, years=1)
+            if raw_ph:
+                df = pd.DataFrame(raw_ph)
+                save_candle_cache(df, symbol, "1d")
+        except Exception:
+            return None
+    if df.empty or len(df) < 2:
+        return None
+    df = df.sort_values("datetime")
+    closes = df["close"].tolist()
+    returns = [(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
+    if len(returns) < 2:
+        return None
+    recent_252 = returns[-252:]
+    current = returns[-1]
+    lo = min(recent_252)
+    hi = max(recent_252)
+    if hi == lo:
+        return 50.0
+    return round((current - lo) / (hi - lo) * 100, 2)
+
+
 async def fetch_price_history_daily(
     client: AsyncClient, symbol: str, years: int = 1,
 ) -> list[dict]:

@@ -134,6 +134,15 @@ def compute_analytics(
     analytics["call_wall_mark"] = min(_call_wall_opts, key=lambda e: e.get("days_to_exp", 999)).get("mark") if _call_wall_opts else None
     analytics["put_wall_mark"] = min(_put_wall_opts, key=lambda e: e.get("days_to_exp", 999)).get("mark") if _put_wall_opts else None
 
+    # Cross-wall marks: the CALL price at the put-wall (support) strike and
+    # the PUT price at the call-wall (resistance) strike.  These power the
+    # grid's Call Price / Put Price columns so the options are priced at the
+    # key levels rather than at-the-money.
+    _put_wall_calls = [e for e in data if e["strike"] == put_wall and e["type"] == "CALL"] if put_wall else []
+    _call_wall_puts = [e for e in data if e["strike"] == call_wall and e["type"] == "PUT"] if call_wall else []
+    analytics["put_wall_call_price"] = min(_put_wall_calls, key=lambda e: e.get("days_to_exp", 999)).get("mark") if _put_wall_calls else None
+    analytics["call_wall_put_price"] = min(_call_wall_puts, key=lambda e: e.get("days_to_exp", 999)).get("mark") if _call_wall_puts else None
+
     atm_strike = min(strikes, key=lambda s: abs(s["strike"] - spot))["strike"] if strikes else None
     analytics["atm_strike"] = atm_strike
 

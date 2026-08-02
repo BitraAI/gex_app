@@ -1,7 +1,7 @@
 """Index symbol REST API polling service for SPX, RUT, NDX spots.
 
 This service continuously polls Schwab REST API for index symbol quotes
-($SPX:X, $RUT:X, $NDX:X) every 2 seconds and updates the ATM Order Flow
+($SPX, $RUT, $NDX) every 2 seconds and updates the ATM Order Flow
 grid and candlestick charts with live spot prices.
 
 This ensures index symbols update in real-time in both the order flow
@@ -117,10 +117,12 @@ class IndexSpotPoller:
                     await asyncio.sleep(sleep_time)
                     continue
                 
-                # Fetch quotes for all index symbols we track
-                index_syms_to_fetch = [
+                # Fetch quotes for all index symbols we track.  Several map
+                # keys (SPX/SPXW, RUT/RUTW, ...) share one OAuth quote symbol,
+                # so dedupe to avoid sending duplicate symbols per request.
+                index_syms_to_fetch = list(dict.fromkeys(
                     INDEX_QUOTE_MAP[t] for t in self._tickers
-                ]
+                ))
                 
                 if not index_syms_to_fetch:
                     # No index tickers to track - sleep longer

@@ -23,7 +23,6 @@ class NewsService:
         self._seen: set[str] = set()
         self._last_poll: float = 0.0
         self._running = False
-        self._tickers: list[str] = []
 
     @property
     def is_running(self) -> bool:
