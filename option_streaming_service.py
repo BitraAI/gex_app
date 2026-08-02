@@ -97,7 +97,6 @@ class AtmOptionVolumeService:
         self._running = False
 
         # Spot & ATM strike state (for primary/chart symbol)
-        self._spot: float = 0.0
         self._atm_strike: float = 0.0
         self._subscribed_call_sym: str | None = None
         self._subscribed_put_sym: str | None = None
@@ -210,17 +209,11 @@ class AtmOptionVolumeService:
         with self._lock:
             return self._ticks_received > 0
 
-    def start(self):
-        """Start the service - called after register to begin streaming."""
-        if not self._running and self._symbol and self._stream_client:
-            self._running = True
-
     def update_spot(self, spot: float):
         """Called when the underlying spot price changes (e.g. from equity
         streaming).  If the ATM strike changes, triggers a re-subscription."""
         sc = None
         with self._lock:
-            self._spot = spot
             new_strike = calculate_atm_strike(spot)
             if abs(new_strike - self._atm_strike) > 0.001:
                 self._atm_strike = new_strike
@@ -357,6 +350,10 @@ class AtmOptionVolumeService:
                     "call_ask": None,
                     "put_bid": None,
                     "put_ask": None,
+                    "call_mark": None,
+                    "put_mark": None,
+                    "put_wall_call_price": None,
+                    "call_wall_put_price": None,
                     "bullish": 0,
                     "bearish": 0,
                     "buy_vol": 0,
@@ -435,9 +432,6 @@ class AtmOptionVolumeService:
             vh = ticker.setdefault("vol_history", [])
             while vh and vh[0][0] < now - 60:
                 vh.pop(0)
-            sh = ticker.setdefault("spot_history", [])
-            while sh and sh[0][0] < now - 60:
-                sh.pop(0)
             if len(vh) < 2 or len(sh) < 2:
                 return None
             vol_60 = vh[-1][1] - vh[0][1]
@@ -448,9 +442,10 @@ class AtmOptionVolumeService:
 
     def get_ticker_executed_flow(self, display_symbol: str) -> tuple:
         """Return (buy_vol, sell_vol, net_60) for a tracked ticker:
-        session-cumulative executed buy/sell ATM volume, plus the net
-        (buy - sell) over the trailing 60 s window.  Any element is None
-        when the ticker is untracked or no data exists yet."""
+        session-cumulative delta-adjusted executed ATM volume (buying calls
+        / selling puts -> buy; selling calls / buying puts -> sell), plus
+        the net (buy - sell) over the trailing 60 s window.  Any element is
+        None when the ticker is untracked or no data exists yet."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is None:
@@ -472,19 +467,39 @@ class AtmOptionVolumeService:
         available, else the single available side.
         Falls back to the primary ticker's class-level bid/ask when the
         per-ticker values are unavailable (for any ticker that shares the
-        primary's stream symbol, e.g. index tickers like SPX using SPY)."""
+        primary's stream symbol).
+
+        Index symbols (SPX, RUT, NDX) stream the ETF proxy (SPY, IWM,
+        QQQ), so their streamed option bid/ask belong to the proxy, not
+        the index.  For those tickers the REST ATM marks pushed via
+        ``set_ticker_option_prices`` are the only valid display price;
+        the streamed proxy quotes (which still drive buy/sell direction
+        inference) are never served."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is None:
                 return {}
             result = {}
+            _is_idx = _normalize_display_symbol(display_symbol) in STREAM_SYMBOL_MAP
+            if _is_idx:
+                _cm = ticker.get("call_mark")
+                if _cm is not None:
+                    result["call_price"] = round(_cm, 2)
+                _pm = ticker.get("put_mark")
+                if _pm is not None:
+                    result["put_price"] = round(_pm, 2)
+                return result
             cb, ca = ticker.get("call_bid"), ticker.get("call_ask")
             # Fallback to primary's class-level bid/ask if per-ticker is empty
-            # and this ticker uses the same stream symbol as the primary
+            # and this ticker uses the same stream symbol as the primary.
             _stream_sym = _get_stream_symbol(display_symbol)
             if cb is None and ca is None and _stream_sym == self._symbol:
                 cb, ca = self._call_bid, self._call_ask
-            if cb is not None and ca is not None and ca > 0:
+            if cb is None and ca is None:
+                _cm = ticker.get("call_mark")
+                if _cm is not None:
+                    result["call_price"] = round(_cm, 2)
+            elif cb is not None and ca is not None and ca > 0:
                 result["call_price"] = round((cb + ca) / 2, 2)
             elif cb is not None:
                 result["call_price"] = round(cb, 2)
@@ -493,7 +508,11 @@ class AtmOptionVolumeService:
             pb, pa = ticker.get("put_bid"), ticker.get("put_ask")
             if pb is None and pa is None and _stream_sym == self._symbol:
                 pb, pa = self._put_bid, self._put_ask
-            if pb is not None and pa is not None and pa > 0:
+            if pb is None and pa is None:
+                _pm = ticker.get("put_mark")
+                if _pm is not None:
+                    result["put_price"] = round(_pm, 2)
+            elif pb is not None and pa is not None and pa > 0:
                 result["put_price"] = round((pb + pa) / 2, 2)
             elif pb is not None:
                 result["put_price"] = round(pb, 2)
@@ -614,15 +633,17 @@ class AtmOptionVolumeService:
         Used to populate the Call Price / Put Price columns in the ATM
         Order Flow grid.  For index symbols (SPX, RUT, NDX) that stream
         the ETF proxy (SPY, IWM, QQQ), these REST marks are the only
-        source of truth.  For equity tickers they serve as a fallback
-        before live WebSocket option trades populate bid/ask.  Without
-        this setter ``get_ticker_option_prices`` would fall back to the
-        ETF's option bid/ask mid (for index tickers) or return empty
-        (for equity tickers) before WebSocket ticks arrive.
+        source of truth, because the streamed bid/ask belong to the
+        ETF's options, not the index options.  For equity tickers they
+        serve as a fallback before live WebSocket option trades populate
+        bid/ask.
 
-        Values are written into both ``call_bid`` and ``call_ask`` (same
-        for puts) so ``get_ticker_option_prices`` returns the supplied
-        mark verbatim and does not recompute a mid from stale ticks."""
+        Marks are stored in dedicated ``call_mark`` / ``put_mark`` fields
+        so they are never clobbered by the ETF-proxy streamed quotes that
+        continue to drive buy/sell direction inference in
+        ``_process_trade_ticker``.  ``get_ticker_option_prices`` serves
+        the marks to index tickers and uses them as the pre-stream
+        fallback for equity tickers."""
         if call_price is None and put_price is None:
             return
         with self._lock:
@@ -630,11 +651,49 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return
             if call_price is not None:
-                ticker["call_bid"] = float(call_price)
-                ticker["call_ask"] = float(call_price)
+                ticker["call_mark"] = float(call_price)
             if put_price is not None:
-                ticker["put_bid"] = float(put_price)
-                ticker["put_ask"] = float(put_price)
+                ticker["put_mark"] = float(put_price)
+
+    def set_ticker_wall_prices(self, display_symbol: str,
+                                put_wall_call_price: float | None,
+                                call_wall_put_price: float | None):
+        """Store the option marks at the key wall strikes for a tracked
+        ticker: the CALL mark at the put-wall (support) strike and the PUT
+        mark at the call-wall (resistance) strike.
+
+        Pushed alongside ``set_ticker_walls`` from the REST chain recompute
+        (``_recompute_symbol`` / ``_refresh_walls_for_symbol``) so the grid
+        can price the options at the levels rather than at-the-money."""
+        if put_wall_call_price is None and call_wall_put_price is None:
+            return
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return
+            if put_wall_call_price is not None:
+                ticker["put_wall_call_price"] = float(put_wall_call_price)
+            if call_wall_put_price is not None:
+                ticker["call_wall_put_price"] = float(call_wall_put_price)
+
+    def get_ticker_wall_prices(self, display_symbol: str) -> dict:
+        """Return {call_price, put_price} for a tracked ticker, where
+        call_price is the CALL mark at the put-wall (support) strike and
+        put_price is the PUT mark at the call-wall (resistance) strike.
+        Returns {} if the ticker is untracked or the prices have not been
+        computed yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return {}
+            result = {}
+            _c = ticker.get("put_wall_call_price")
+            if _c is not None:
+                result["call_price"] = round(_c, 2)
+            _p = ticker.get("call_wall_put_price")
+            if _p is not None:
+                result["put_price"] = round(_p, 2)
+            return result
 
     def _recalc_atm_if_moved(self, display_symbol: str, ticker: dict,
                              prev_spot: float, spot: float) -> bool:
@@ -695,12 +754,15 @@ class AtmOptionVolumeService:
                     "call_ask": None,
                     "put_bid": None,
                     "put_ask": None,
+                    "call_mark": None,
+                    "put_mark": None,
+                    "put_wall_call_price": None,
+                    "call_wall_put_price": None,
                     "bullish": 0,
                     "bearish": 0,
                     "flow_history": [],
                     "trend": "flat",
                 }
-                self._spot_changed = True
                 if self._running and self._expiration:
                     sc = self._stream_client
             else:
@@ -708,9 +770,8 @@ class AtmOptionVolumeService:
                 ticker["spot"] = spot
                 # Only recalc ATM strike when the spot has moved by at least
                 # half a strike increment from the last reference price.
-                self._recalc_atm_if_moved(display_symbol, ticker, old, spot)
                 if abs(spot - old) / max(old, 1) > 0.001:
-                    self._spot_changed = True
+                    self._recalc_atm_if_moved(display_symbol, ticker, old, spot)
                 if (ticker["call_sym"] is None or ticker["put_sym"] is None or
                         abs(spot - old) / max(old, 1) > 0.001) and \
                    self._running and self._expiration:
@@ -842,7 +903,7 @@ class AtmOptionVolumeService:
                     # subscription (SPY/IWM/QQQ).  The UNDERLYING_PRICE in
                     # those option ticks is the ETF's price, not the index
                     # level, so NEVER overwrite the correct index spot
-                    # that was set from the index quote ($SPX:X etc.).
+                    # that was set from the index quote ($SPX etc.).
                     _is_idx = (
                         ticker_display is not None
                         and ticker_display.upper().lstrip("$") in STREAM_SYMBOL_MAP
@@ -901,15 +962,11 @@ class AtmOptionVolumeService:
                 # Also update primary service bid/ask/spot for chart merge
                 if is_primary:
                     if contract_type in ("CALL", "C"):
-                        if underlying is not None:
-                            self._spot = float(underlying)
                         if bid is not None:
                             self._call_bid = float(bid)
                         if ask is not None:
                             self._call_ask = float(ask)
                     elif contract_type in ("PUT", "P"):
-                        if underlying is not None:
-                            self._spot = float(underlying)
                         if bid is not None:
                             self._put_bid = float(bid)
                         if ask is not None:
@@ -1136,35 +1193,39 @@ class AtmOptionVolumeService:
                 "call_sell_vol": csv,
                 "put_buy_vol": pbv,
                 "put_sell_vol": psv,
-                "total_buy_vol": cbv + pbv,
-                "total_sell_vol": csv + psv,
+                "total_buy_vol": cbv + psv,
+                "total_sell_vol": csv + pbv,
             }
         else:
             bar = self._current_bar
             if direction == "buy":
-                bar["total_buy_vol"] += size
                 if opt_type == "CALL":
                     bar["call_buy_vol"] += size
+                    bar["total_buy_vol"] += size
                 else:
                     bar["put_buy_vol"] += size
+                    bar["total_sell_vol"] += size
             elif direction == "sell":
-                bar["total_sell_vol"] += size
                 if opt_type == "CALL":
                     bar["call_sell_vol"] += size
+                    bar["total_sell_vol"] += size
                 else:
                     bar["put_sell_vol"] += size
+                    bar["total_buy_vol"] += size
             else:
                 # Unknown — split evenly
                 half = size // 2
                 rem = size - half
-                bar["total_buy_vol"] += half
-                bar["total_sell_vol"] += rem
                 if opt_type == "CALL":
                     bar["call_buy_vol"] += half
                     bar["call_sell_vol"] += rem
+                    bar["total_buy_vol"] += half
+                    bar["total_sell_vol"] += rem
                 else:
                     bar["put_buy_vol"] += half
                     bar["put_sell_vol"] += rem
+                    bar["total_buy_vol"] += rem
+                    bar["total_sell_vol"] += half
 
     def _process_trade_ticker(self, ticker: dict | None, price: float, size: int, opt_type: str):
         """Accumulate a trade into a per-ticker flow total (cumulative,
@@ -1176,18 +1237,24 @@ class AtmOptionVolumeService:
         else:
             direction = self._infer_dir(price, ticker["put_bid"], ticker["put_ask"])
 
+        # buy_vol / sell_vol are delta-adjusted at the ATM: buying calls and
+        # selling puts are bullish (buy) pressure; selling calls and buying
+        # puts are bearish (sell) pressure.  So buy_vol == bullish and
+        # sell_vol == bearish by construction.
         if direction == "buy":
             if opt_type == "CALL":
                 ticker["bullish"] += size
+                ticker["buy_vol"] = ticker.get("buy_vol", 0) + size
             else:
                 ticker["bearish"] += size
-            ticker["buy_vol"] = ticker.get("buy_vol", 0) + size
+                ticker["sell_vol"] = ticker.get("sell_vol", 0) + size
         elif direction == "sell":
             if opt_type == "CALL":
                 ticker["bearish"] += size
+                ticker["sell_vol"] = ticker.get("sell_vol", 0) + size
             else:
                 ticker["bullish"] += size
-            ticker["sell_vol"] = ticker.get("sell_vol", 0) + size
+                ticker["buy_vol"] = ticker.get("buy_vol", 0) + size
         else:
             # Unknown direction — split evenly between bullish and bearish
             half = size // 2

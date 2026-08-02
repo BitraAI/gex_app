@@ -387,8 +387,6 @@ class StreamingService:
                 self._book_symbols.add(s)
             for s in to_remove:
                 self._book_symbols.discard(s)
-                self._books_nasdaq.pop(s, None)
-                self._books_nyse.pop(s, None)
                 self._books_options.pop(s, None)
                 self._book_imb_history.pop(s, None)
                 self._book_depth_history.pop(s, None)
@@ -403,32 +401,33 @@ class StreamingService:
                 self._apply_book_subscriptions(to_add, to_remove), loop)
 
     async def _apply_book_subscriptions(self, to_add, to_remove):
+        sc = self._sc
+        if sc is None:
+            return
+        # Socket not open yet (initial login or re-login in progress): skip.
+        # All subscribed book symbols are re-subscribed after the next login
+        # via _subscribe_books, so nothing is lost by dropping this send.
+        if getattr(sc, "_socket", None) is None:
+            return
         try:
-            sc = self._sc
-            if sc is None:
-                return
             if to_add:
-                await sc.nasdaq_book_subs(to_add)
-                await sc.nyse_book_subs(to_add)
                 await sc.options_book_subs(to_add)
             if to_remove:
-                await sc.nasdaq_book_unsubs(to_remove)
-                await sc.nyse_book_unsubs(to_remove)
                 await sc.options_book_unsubs(to_remove)
         except Exception:
-            import traceback
-            traceback.print_exc()
+            # Fire-and-forget: if the socket dropped mid-send, the next
+            # (re)login re-subscribes the full _book_symbols set, so this is
+            # benign — keep the log quiet.
+            pass
 
     async def _subscribe_books(self, sc: StreamClient):
-        """Subscribe NASDAQ + NYSE + OPTIONS books for the chart symbol and every
+        """Subscribe OPTIONS books for the chart symbol and every
         tracked ticker.  Called from ``_stream`` right after login and
         after each re-login so tracked-ticker books survive reconnects."""
         book_syms = [self._symbol] if self._symbol else []
         with self._lock:
             book_syms += [s for s in self._book_symbols if s and s != self._symbol]
         if book_syms:
-            await sc.nasdaq_book_subs(book_syms)
-            await sc.nyse_book_subs(book_syms)
             await sc.options_book_subs(book_syms)
 
     def _book_volume_for_symbol(self, symbol: str) -> tuple[float, float] | None:

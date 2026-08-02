@@ -714,32 +714,7 @@ def prefetch_daily_candles(symbol: str):
 
 
 def compute_iv_rank(symbol: str) -> float | None:
-    df = load_candle_cache(symbol, "1d")
-    if df.empty or len(df) < 2:
-        try:
-            raw = run_async(fetch_price_history_daily(st.session_state.client, symbol, years=1))
-            if raw:
-                df = pd.DataFrame(raw)
-                save_candle_cache(df, symbol, "1d")
-        except Exception:
-            return None
-    if df.empty or len(df) < 2:
-        return None
-    df = df.sort_values("datetime")
-    closes = df["close"].tolist()
-
-    returns = [(closes[i] / closes[i-1] - 1) for i in range(1, len(closes))]
-    if len(returns) < 2:
-        return None
-
-    recent_252 = returns[-252:]
-    current = returns[-1]
-
-    lo = min(recent_252)
-    hi = max(recent_252)
-    if hi == lo:
-        return 50.0
-    return round((current - lo) / (hi - lo) * 100, 2)
+    return run_async(client_mod.compute_iv_rank(st.session_state.client, symbol))
 
 
 def render_sidebar():
@@ -1197,7 +1172,7 @@ def render_candlesticks_frag():
                 pass
 
         # ---- Index symbols (SPX, RUT, NDX): build a live bar from the real
-        # index spot poll (s.spot_cache, updated every ~2s by the $SPX:X etc.
+        # index spot poll (s.spot_cache, updated every ~2s by the $SPX etc.
         # fetch above) and merge it into the chart so $SPX/$RUT/$NDX
         # candlesticks update like equities.  Index symbols cannot be streamed
         # via the equity WebSocket (Schwab only supports LEVELONE_EQUITIES for

@@ -142,20 +142,11 @@ def diff_alerts(
     analytics: dict[str, Any],
     spot: float,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Pure diff of the previous per-symbol state vs the current analytics.
+    """Track per-symbol alert state across polls.
 
-    Returns ``(new_alerts, next_state)``. If ``prev`` is None or empty this is
-    treated as a first-seen baseline: it returns ``([], <baseline>)`` so the
-    first poll after a ticker is added does not fire a storm of spurious
-    "changed" alerts.
-
-    The set of events detected is exactly what ``check_alerts`` produced in
-    ``app.py`` before the refactor, so the Streamlit UI and the standalone
-    runner report identical signal changes:
-        - Gamma Flip change
-        - Call Wall / Put Wall change
-        - Dealer gamma flip (Long ↔ Short)
-        - Spot crossing above/below Call Wall or Put Wall
+    Returns ``(new_alerts, next_state)``. The caller stores *next_state* as
+    the new baseline; *new_alerts* is always empty — live alert generation is
+    handled by ``check_alerts``/_build_strategy_alerts.
     """
     cur = {
         "gamma_flip": analytics.get("gamma_flip"),
@@ -167,12 +158,7 @@ def diff_alerts(
         "atm_strike": analytics.get("atm_strike"),
     }
 
-    if not prev:
-        return [], cur
-
-    new_alerts: list[str] = []
-
-    return new_alerts, cur
+    return [], cur
 
 
 def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, vrp: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, book_imbalance: Optional[float] = None, flow_speed: Optional[float] = None, flow_acceleration: Optional[float] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None, liquidity_flow: Optional[float] = None) -> str:
