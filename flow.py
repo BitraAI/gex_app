@@ -1454,8 +1454,8 @@ def render_atm_order_flow_grid():
         ("Book Imbalance", "right", lambda v: _fmt_signed(v, 2), _mk_color("Book Imbalance", _book_imbalance_color)),
         ("Flow Speed", "right", lambda v: _fmt_signed(v, 0), _mk_color("Flow Speed", _flow_speed_color)),
         ("Flow Acceleration", "right", lambda v: _fmt_signed(v, 2), _mk_color("Flow Acceleration", _flow_acceleration_color)),
-        ("Net Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Net Flow", _net_flow_color)),
         ("Liquidity Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Liquidity Flow", _liquidity_flow_color)),
+        ("Net Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Net Flow", _net_flow_color)),
         ("Absorption", "right", _fmt_commas, _mk_color("Absorption", _absorption_color)),
     ]
 

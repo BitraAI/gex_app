@@ -71,8 +71,8 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - **Order absorption:** `Absorption` (vol/$1) and `Wall absorbed` headers on trend/wall alerts, plus a 💥 "wall BROKE after absorbing N contracts" alert when a wall that soaked up heavy flow finally breaks
   - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
   Two delivery paths:
-  - **In-app:** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
-  - **Automatic multi-ticker:** `telegram_alerts.py` polls every symbol in the saved ticker history list once per run and sends alerts on detected transitions — schedule it on cron for hands-off monitoring during market hours.
+  - **In-app (single-ticker):** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
+  - **In-app (multi-ticker):** `flow.maybe_fire_wall_zone_alerts()` runs on every Order Flow grid refresh and diffs every tracked ticker in `ticker_history.json` against the persisted per-symbol baseline — no cron / standalone runner required.
   All alerts are Markdown-formatted with the symbol header and current spot. Reads `BOT_TOKEN` / `CHAT_ID` from the `[telegram]` section of `config.toml` (overridable via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars). Set `enabled = false` to mute alerts without removing secrets. Alerts are delivered silently by default so they don't buzz the recipient's device on every refresh.
 
 ## Setup
@@ -87,7 +87,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 
 ```bash
 $ python3 -m venv gex_venv
-$ source gex_env/bin/activate
+$ source gex_venv/bin/activate
 (gex_venv) $ python -m pip install -U pip
 (gex_venv) $ python -m pip install -U uv
 (gex_venv) $ git clone https://github.com/BitraAI/gex_app.git
@@ -147,39 +147,13 @@ CHAT_ID = "YOUR_CHAT_ID"           # from @userinfobot (or a negative group id, 
 - Environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` override `config.toml`.
 - Alerts are sent synchronously over HTTPS via the Telegram Bot API (no extra async runtime needed) and never raise into the Streamlit app — failed sends are logged but do not interrupt the dashboard.
 
-#### Automatic Multi-Ticker Alerts (cron)
+#### Automatic Multi-Ticker Alerts
 
-`telegram_alerts.py` is a standalone runner that polls every ticker in `~/.local/share/gex_app/ticker_history.json` (the same list the dashboard maintains as you flip through symbols), computes GEX analytics via the Schwab API, and pushes Telegram alerts on detected transitions. Per-symbol previous state is persisted to `~/.local/share/gex_app/alert_state.json` so consecutive runs detect true transitions rather than re-broadcasting the current state on every poll.
+Multi-ticker alerts run **inside the Streamlit app** — there is no cron job or standalone runner. Each Order Flow grid refresh invokes `flow.maybe_fire_wall_zone_alerts()`, which iterates every ticker in `~/.local/share/gex_app/ticker_history.json` (the same list the dashboard maintains as you flip through symbols), diffs each symbol's current state against its previous baseline, and pushes Telegram alerts on detected transitions.
 
-By default it only operates during US regular trading hours (Mon–Fri 09:30–16:00 America/New_York) and silently returns 0 outside RTH — safe to schedule on a 5-minute cron without polluting Schwab's quota or your inbox on weekends/evenings.
+Per-symbol previous state is persisted to `~/.local/share/gex_app/alert_state.json` so consecutive refreshes detect true transitions rather than re-broadcasting the current state on every poll. The loop is self-guarded: it is a no-op outside US regular trading hours (Mon–Fri 09:30–16:00 America/New_York) and the heavy full-recompute path is throttled per-ticker (price-move OR max-age triggered, with a minimum cooldown) so Schwab's API quota is respected.
 
-```bash
-# Single poll (what cron invokes):
-uv run python telegram_alerts.py
-
-# Loop forever (foreground), polling every 5 min:
-uv run python telegram_alerts.py --loop --interval 300
-
-# Force a run outside market hours (testing):
-uv run python telegram_alerts.py --outside-rth
-
-# Dry-run: compute analytics + diff but only log (no Telegram sends):
-uv run python telegram_alerts.py --dry-run
-```
-
-Flags:
-- `--loop` — run forever, sleeping `--interval` seconds between polls.
-- `--interval N` — polling period in seconds (default `300`). Clamped to a minimum of 30s in loop mode.
-- `--outside-rth` — poll even outside US regular trading hours.
-- `--dry-run` — compute and log alerts but do not send Telegram messages (also implied when Telegram is disabled in config).
-
-Example `crontab -e` entry — every 5 minutes during RTH (the script self-guards off-hours):
-
-```cron
-*/5 9-15 * * * cd ~/gex_app && ~/gex_venv/bin/python telegram_alerts.py >> /tmp/gex_alerts.log 2>&1
-```
-
-The alert types fired are identical to the in-app `check_alerts` flow — both paths share the same pure `diff_alerts(prev, analytics, spot)` implementation in `telegram_notifier.py`.
+Because the alerts piggyback on the dashboard's existing L1/L2 option stream, every tracked ticker sees its own streaming spot, walls, and trend data drive `diff_alerts` — the same pure rule the in-app single-ticker path and the historical cron runner used (`telegram_notifier.diff_alerts`). Keeping the dashboard open during market hours is all that's required for hands-free multi-ticker alerts.
 
 ### Schwab Authentication
 
@@ -259,7 +233,6 @@ gex_app/
 ├── schwab_auth.py         # OAuth authentication script
 ├── signals.py             # Strategy signals engine (scoring, recommendations, bias)
 ├── telegram_notifier.py   # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
-├── telegram_alerts.py     # Standalone cron runner — multi-ticker alerts from ticker_history.json (RTH-guarded)
 ├── svi.py                 # SSVI volatility surface (Raw SVI + SSVI surface calibration)
 ├── test_calculations.py   # Unit tests for calculations
 ├── test_streaming.py      # Unit tests for streaming service
