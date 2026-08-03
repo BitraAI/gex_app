@@ -355,13 +355,16 @@ The **Book Imbalance**, **Flow Speed**, and **Flow Acceleration** columns are
 all derived from the same per-symbol **Level 2** OPTIONS-book data by
 `StreamingService`, fed by the `OPTIONS_BOOK` messages on the shared WebSocket
 (the Level 2 depth feed, distinct from the Level 1 trade/quotes stream).
-On every book update the resting volume on each BIDS / ASKS level
-(`TOTAL_VOLUME`) is summed (`_book_volume_for_symbol`) and a
-`(timestamp, ratio)` sample is appended to a per-symbol **60 s rolling
-history** (`_update_book_imbalance`).
+Because `OPTIONS_BOOK` subscriptions require full OCC option-contract symbols
+(not underlyings), `StreamingService` subscribes each tracked ticker's **ATM
+call and put contracts** (`set_book_contracts`) and aggregates their resting
+volume per underlying.  On every book update the resting volume on each
+BIDS / ASKS level (`TOTAL_VOLUME`) is summed across those contracts
+(`_book_volume_for_symbol`) and a `(timestamp, ratio)` sample is appended to
+a per-symbol **60 s rolling history** (`_update_book_imbalance`).
 
 **Book Imbalance** (`_book_imbalance_for_symbol`) — the current bid/ask
-pressure ratio over the full book:
+pressure ratio over the subscribed ATM contracts:
 
     bid_vol          = Σ BIDS.TOTAL_VOLUME
     ask_vol          = Σ ASKS.TOTAL_VOLUME

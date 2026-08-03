@@ -934,13 +934,17 @@ def render_candlesticks_frag():
                     quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                     for disp_sym, stream_sym in zip(_all_tickers, _stream_symbols):
                         _disp_upper = _normalize_display_symbol(disp_sym)
-                        if _disp_upper in INDEX_QUOTE_MAP:
-                            continue
                         qd = quote_resp.get(stream_sym, {}) or {}
                         quote = qd.get("quote", {}) or qd.get(stream_sym, {})
                         last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
                         if last is not None and float(last) > 0:
                             spot = float(last)
+                            if _disp_upper in INDEX_QUOTE_MAP:
+                                # The ETF-proxy price (SPY) drives the index
+                                # ticker's OCC subscription strikes, not its
+                                # displayed index-level spot.
+                                atm_svc.set_ticker_proxy_spot(_disp_upper, spot)
+                                continue
                             s.spot_cache[_disp_upper] = spot
                             # Also update ATM service
                             atm_svc.set_ticker_spot(_disp_upper, spot)

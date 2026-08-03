@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import time as _time_mod
+from datetime import datetime
 import pandas as pd
 from _constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS
 from calculations import calculate_atm_strike, get_strike_spacing
@@ -43,6 +44,35 @@ def _make_option_symbol(root: str, yymmdd: str, call_put: str, strike: float) ->
     cp = "C" if call_put.upper() == "C" else "P"
     strike_int = int(round(strike * 1000))
     return f"{root}{yymmdd}{cp}{strike_int:08d}"
+
+
+def _index_option_root(display_symbol: str, expiration: str) -> str | None:
+    """Return the OCC root for an index option (SPX/RUT/NDX) at a given
+    expiration.  Standard expirations are the third Friday of the month
+    (SPX/RUT/NDX); every other listed expiration is a weekly/EOM
+    (SPXW/RUTW/NDXP).  Returns None when the expiration is unparseable."""
+    try:
+        d = datetime.strptime(expiration, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+    _standard = {"SPX": "SPX", "RUT": "RUT", "NDX": "NDX"}
+    _weekly = {"SPX": "SPXW", "RUT": "RUTW", "NDX": "NDXP"}
+    sym = display_symbol.upper().lstrip("$")
+    if sym not in _standard:
+        return None
+    friday_count = 0
+    day = 1
+    while True:
+        try:
+            cand = d.replace(day=day)
+        except ValueError:
+            break
+        if cand.weekday() == 4:
+            friday_count += 1
+        if cand == d:
+            break
+        day += 1
+    return (_standard[sym] if friday_count == 3 else _weekly[sym])
 
 
 def _get_stream_symbol(display_symbol: str) -> str:
@@ -544,6 +574,65 @@ class AtmOptionVolumeService:
                 return calculate_atm_strike(ticker["spot"])
             return None
 
+    def get_ticker_call_sym(self, display_symbol: str) -> str | None:
+        """Return the ATM call OCC symbol currently subscribed for a tracked
+        ticker, or None if not tracked / not subscribed yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("call_sym")
+
+    def get_ticker_put_sym(self, display_symbol: str) -> str | None:
+        """Return the ATM put OCC symbol currently subscribed for a tracked
+        ticker, or None if not tracked / not subscribed yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("put_sym")
+
+    def get_ticker_quote_symbols(self, display_symbol: str) -> dict:
+        """Return {label: OCC symbol} for the option quotes that keep the
+        Call/Put Price columns live:
+          'call_wall' -> CALL at the put-wall (support) strike
+          'put_wall'  -> PUT at the call-wall (resistance) strike
+          'call_atm'  -> CALL at the ATM strike
+          'put_atm'   -> PUT at the ATM strike
+        Empty dict when the ticker lacks usable strikes/expiration.  Index
+        tickers (SPX/RUT/NDX) use their own index-option root so the quoted
+        prices are index-level, not the ETF-proxy (SPY/IWM/QQQ) strikes."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return {}
+            exp = ticker.get("expiration") or self._expiration
+            if not exp:
+                return {}
+            parts = exp.split("-")
+            if len(parts) != 3:
+                return {}
+            yymmdd = parts[0][2:] + parts[1] + parts[2]
+            norm = _normalize_display_symbol(display_symbol)
+            stream_sym = _get_stream_symbol(norm)
+            if stream_sym != norm:
+                root = _index_option_root(norm, exp)
+                if root is None:
+                    return {}
+            else:
+                root = stream_sym
+            out = {}
+
+            def _add(label: str, call_put: str, strike) -> None:
+                if strike and strike > 0:
+                    out[label] = _make_option_symbol(root, yymmdd, call_put, strike)
+
+            _add("call_wall", "C", ticker.get("put_wall"))
+            _add("put_wall", "P", ticker.get("call_wall"))
+            _add("call_atm", "C", ticker.get("atm_strike"))
+            _add("put_atm", "P", ticker.get("atm_strike"))
+            return out
+
     def get_ticker_expiration(self, display_symbol: str) -> str | None:
         """Return the front expiration date for a tracked ticker.
         Tries per-ticker expiration first (which may be set from option
@@ -758,6 +847,7 @@ class AtmOptionVolumeService:
                     "put_mark": None,
                     "put_wall_call_price": None,
                     "call_wall_put_price": None,
+                    "proxy_spot": None,
                     "bullish": 0,
                     "bearish": 0,
                     "flow_history": [],
@@ -776,6 +866,38 @@ class AtmOptionVolumeService:
                         abs(spot - old) / max(old, 1) > 0.001) and \
                    self._running and self._expiration:
                     sc = self._stream_client
+        if sc is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._do_subscribe(sc), self._loop,
+            )
+
+    def set_ticker_proxy_spot(self, display_symbol: str, proxy_spot: float):
+        """Store the ETF-proxy last price (SPY/IWM/QQQ) for an index ticker
+        (SPX/RUT/NDX) so its Level-1 options / OPTIONS_BOOK subscriptions are
+        built at *proxy* strikes (SPY ~570) rather than index-level strikes
+        (SPX ~5700), which don't exist on the proxy's chain.
+
+        The index-level ``spot`` is left untouched: it feeds the Spot / ATM
+        Strike display columns and wall logic, while ``proxy_spot`` drives
+        only the OCC subscription symbols.  Re-subscribes when the proxy's
+        ATM strike moves or when symbols were never built yet."""
+        sc = None
+        _resub = False
+        with self._lock:
+            if proxy_spot is None or float(proxy_spot) <= 0:
+                return
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return
+            ticker["proxy_spot"] = float(proxy_spot)
+            new_sub_atm = calculate_atm_strike(float(proxy_spot))
+            if ticker.get("sub_atm_strike") != new_sub_atm:
+                ticker["sub_atm_strike"] = new_sub_atm
+                _resub = True
+            if ticker.get("call_sym") is None or ticker.get("put_sym") is None:
+                _resub = True
+            if _resub and self._running and self._expiration:
+                sc = self._stream_client
         if sc is not None:
             asyncio.run_coroutine_threadsafe(
                 self._do_subscribe(sc), self._loop,
@@ -853,29 +975,31 @@ class AtmOptionVolumeService:
                 sym_raw = sym
                 sym = sym.replace(" ", "")
 
-                # Check if this option belongs to a tracked per-ticker flow
-                ticker_display = self._sym_to_ticker.get(sym_raw)
-                if ticker_display is None:
-                    ticker_display = self._sym_to_ticker.get(sym)
-                ticker = self._ticker_flows.get(ticker_display) if ticker_display else None
-
-                # Fallback: match by root prefix (the OCC root is the stock
-                # symbol leading the option symbol, followed by the date).
-                # Handles both padded (e.g. "AAPL  ") and unpadded formats.
-                # IMPORTANT: skip index-symbol entries (e.g. SPX, RUT) whose
-                # stream_symbol is an ETF proxy — the prefix match against
-                # the ETF's option ticks would overwrite their spot with the
-                # ETF's underlying price (SPY instead of SPX, etc.).
-                if ticker is None:
-                    for _td, _tk in self._ticker_flows.items():
-                        stock_sym = _tk.get("stream_symbol") or ""
-                        _td_norm = _td.upper().lstrip("$")
-                        if _td_norm != stock_sym:
-                            continue
-                        if sym.startswith(stock_sym) or sym.startswith(stock_sym.ljust(6).replace(" ", "")):
-                            ticker = _tk
-                            ticker_display = _td
-                            break
+                # Route to EVERY flow entry whose stream symbol matches this
+                # option's root (padded or unpadded).  Index entries
+                # (SPX/RUT/NDX) share the ETF-proxy root (SPY/IWM/QQQ) with
+                # the ETF ticker itself, so one option tick updates BOTH
+                # flows (the index proxy flow AND the ETF's own flow).  The
+                # per-entry _is_idx guard below keeps index entries' spots
+                # at their index level instead of the ETF underlying price.
+                matched = []
+                _seen = set()
+                _exact = self._sym_to_ticker.get(sym_raw) or self._sym_to_ticker.get(sym)
+                if _exact:
+                    _tk = self._ticker_flows.get(_exact)
+                    if _tk is not None:
+                        matched.append((_exact, _tk))
+                        _seen.add(_exact)
+                for _td, _tk in self._ticker_flows.items():
+                    if _td in _seen:
+                        continue
+                    stock_sym = _tk.get("stream_symbol") or ""
+                    if not stock_sym:
+                        continue
+                    if sym.startswith(stock_sym) or sym.startswith(stock_sym.ljust(6).replace(" ", "")):
+                        matched.append((_td, _tk))
+                        _seen.add(_td)
+                ticker = matched[0][1] if matched else None
 
                 # Detect primary ticker by root prefix (space-insensitive)
                 is_primary = bool(
@@ -897,67 +1021,64 @@ class AtmOptionVolumeService:
                 contract_type = c.get("CONTRACT_TYPE", "").upper()
                 underlying = c.get("UNDERLYING_PRICE")
 
-                # Update the relevant ticker's bid/ask/spot
-                if ticker:
-                    # Index symbols (SPX/RUT/NDX) share an ETF proxy
-                    # subscription (SPY/IWM/QQQ).  The UNDERLYING_PRICE in
-                    # those option ticks is the ETF's price, not the index
-                    # level, so NEVER overwrite the correct index spot
-                    # that was set from the index quote ($SPX etc.).
-                    _is_idx = (
-                        ticker_display is not None
-                        and ticker_display.upper().lstrip("$") in STREAM_SYMBOL_MAP
-                    )
+                # Update bid/ask/spot for every matching flow entry.
+                # Index symbols (SPX/RUT/NDX) share an ETF proxy
+                # subscription (SPY/IWM/QQQ).  The UNDERLYING_PRICE in those
+                # option ticks is the ETF's price, not the index level, so
+                # NEVER overwrite the correct index spot that was set from
+                # the index quote ($SPX etc.).
+                for _td, _tk in matched:
+                    _is_idx = _td.upper().lstrip("$") in STREAM_SYMBOL_MAP
                     if contract_type in ("CALL", "C"):
                         if underlying is not None and not _is_idx:
-                            ticker["spot"] = float(underlying)
+                            _tk["spot"] = float(underlying)
                         if bid is not None:
-                            ticker["call_bid"] = float(bid)
+                            _tk["call_bid"] = float(bid)
                         if ask is not None:
-                            ticker["call_ask"] = float(ask)
+                            _tk["call_ask"] = float(ask)
                         if bid_size is not None:
-                            ticker["current_bid_size"] = float(bid_size)
+                            _tk["current_bid_size"] = float(bid_size)
                         if ask_size is not None:
-                            ticker["current_ask_size"] = float(ask_size)
+                            _tk["current_ask_size"] = float(ask_size)
                     elif contract_type in ("PUT", "P"):
                         if underlying is not None and not _is_idx:
-                            ticker["spot"] = float(underlying)
+                            _tk["spot"] = float(underlying)
                         if bid is not None:
-                            ticker["put_bid"] = float(bid)
+                            _tk["put_bid"] = float(bid)
                         if ask is not None:
-                            ticker["put_ask"] = float(ask)
+                            _tk["put_ask"] = float(ask)
                         if bid_size is not None:
-                            ticker["current_bid_size"] = float(bid_size)
+                            _tk["current_bid_size"] = float(bid_size)
                         if ask_size is not None:
-                            ticker["current_ask_size"] = float(ask_size)
-                    
-                    # Maintain cross-ticker bid/ask consistency for the primary symbol
-                    if is_primary:
-                        if contract_type in ("CALL", "C"):
-                            if bid is not None:
-                                self._call_bid = float(bid)
-                            if ask is not None:
-                                self._call_ask = float(ask)
-                        elif contract_type in ("PUT", "P"):
-                            if bid is not None:
-                                self._put_bid = float(bid)
-                            if ask is not None:
-                                self._put_ask = float(ask)
-                        
-                        # Also update primary symbol's per-ticker entry for backwards compatibility
-                        if self._symbol:
-                            primary_ticker = _find_flow_for_display(self._ticker_flows, self._symbol)
-                            if primary_ticker:
-                                if contract_type in ("CALL", "C"):
-                                    if bid is not None:
-                                        primary_ticker["call_bid"] = float(bid)
-                                    if ask is not None:
-                                        primary_ticker["call_ask"] = float(ask)
-                                elif contract_type in ("PUT", "P"):
-                                    if bid is not None:
-                                        primary_ticker["put_bid"] = float(bid)
-                                    if ask is not None:
-                                        primary_ticker["put_ask"] = float(ask)
+                            _tk["current_ask_size"] = float(ask_size)
+
+                # Maintain cross-ticker bid/ask consistency for the primary symbol
+                if ticker and is_primary:
+                    if contract_type in ("CALL", "C"):
+                        if bid is not None:
+                            self._call_bid = float(bid)
+                        if ask is not None:
+                            self._call_ask = float(ask)
+                    elif contract_type in ("PUT", "P"):
+                        if bid is not None:
+                            self._put_bid = float(bid)
+                        if ask is not None:
+                            self._put_ask = float(ask)
+
+                    # Also update primary symbol's per-ticker entry for backwards compatibility
+                    if self._symbol:
+                        primary_ticker = _find_flow_for_display(self._ticker_flows, self._symbol)
+                        if primary_ticker:
+                            if contract_type in ("CALL", "C"):
+                                if bid is not None:
+                                    primary_ticker["call_bid"] = float(bid)
+                                if ask is not None:
+                                    primary_ticker["call_ask"] = float(ask)
+                            elif contract_type in ("PUT", "P"):
+                                if bid is not None:
+                                    primary_ticker["put_bid"] = float(bid)
+                                if ask is not None:
+                                    primary_ticker["put_ask"] = float(ask)
 
                 # Also update primary service bid/ask/spot for chart merge
                 if is_primary:
@@ -999,7 +1120,8 @@ class AtmOptionVolumeService:
                 try:
                     ct = c.get("CONTRACT_TYPE", "").upper()
                     opt_type = "CALL" if ct in ("CALL", "C") else "PUT"
-                    self._process_trade_ticker(ticker, price, size, opt_type)
+                    for _td, _tk in matched:
+                        self._process_trade_ticker(_tk, price, size, opt_type)
                     if is_primary:
                         self._aggregate_tick(
                             int(t), float(price), int(size), opt_type,
@@ -1053,9 +1175,27 @@ class AtmOptionVolumeService:
                 parts = exp.split("-")
                 yymmdd = parts[0][2:] + parts[1] + parts[2]
 
+                # Display ATM strike is always derived from the ticker's own
+                # spot (index level for SPX/RUT/NDX).  But index symbols
+                # stream their ETF proxy's options, so the OCC symbols must
+                # be struck at the *proxy* price (SPY ~570) — using the
+                # index level (~5700) would build non-existent SPY strikes.
+                # Skip an index ticker until its proxy spot has arrived.
+                _disp_norm = _normalize_display_symbol(display_sym)
+                if _get_stream_symbol(_disp_norm) != _disp_norm:
+                    proxy_spot = info.get("proxy_spot") or 0.0
+                    if proxy_spot <= 0:
+                        info["call_sym"] = None
+                        info["put_sym"] = None
+                        skipped_no_spot.append(display_sym)
+                        continue
+                    sub_atm = calculate_atm_strike(proxy_spot)
+                    info["sub_atm_strike"] = sub_atm
+                else:
+                    sub_atm = calculate_atm_strike(spot)
                 atm = calculate_atm_strike(spot)
-                call_sym = _make_option_symbol(stream_sym, yymmdd, "C", atm)
-                put_sym = _make_option_symbol(stream_sym, yymmdd, "P", atm)
+                call_sym = _make_option_symbol(stream_sym, yymmdd, "C", sub_atm)
+                put_sym = _make_option_symbol(stream_sym, yymmdd, "P", sub_atm)
                 all_symbols.append(call_sym)
                 all_symbols.append(put_sym)
                 info["call_sym"] = call_sym
@@ -1080,7 +1220,8 @@ class AtmOptionVolumeService:
             if _skipped_set != self._last_skipped_no_spot:
                 print(
                     f"[AtmOptionVolumeService] _do_subscribe: skipped "
-                    f"{len(skipped_no_spot)} ticker(s) with unknown spot: "
+                    f"{len(skipped_no_spot)} ticker(s) with unknown "
+                    f"(proxy) spot: "
                     f"{skipped_no_spot} (will subscribe when spot arrives)"
                 )
                 self._last_skipped_no_spot = _skipped_set
