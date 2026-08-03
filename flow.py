@@ -1387,6 +1387,27 @@ def render_atm_order_flow_grid():
             return "background-color: #ffcccc;"
         return ""
 
+    def _call_price_bg(row):
+        """Background for the Call Price cell (CALL mark at the put-wall /
+        support strike): green when spot is trading near the support level."""
+        spot = row["Spot"]
+        support = row["Support"]
+        if spot is not None and support is not None:
+            if spot <= support + _wall_buffer(support):
+                return "background-color: #ccffcc;"
+        return ""
+
+    def _put_price_bg(row):
+        """Background for the Put Price cell (PUT mark at the call-wall /
+        resistance strike): green when spot is trading near the resistance
+        level."""
+        spot = row["Spot"]
+        resistance = row["Resistance"]
+        if spot is not None and resistance is not None:
+            if spot >= resistance - _wall_buffer(resistance):
+                return "background-color: #ccffcc;"
+        return ""
+
     def _fmt_money(v):
         return f"${v:,.2f}" if v is not None else ""
 
@@ -1407,8 +1428,8 @@ def render_atm_order_flow_grid():
         ("Expiration", "center", lambda v: html.escape(_format_expiration(v)), None),
         ("Support", "right", _fmt_money, None),
         ("Resistance", "right", _fmt_money, None),
-        ("Call Price", "right", _fmt_money, None),
-        ("Put Price", "right", _fmt_money, None),
+        ("Call Price", "right", _fmt_money, _call_price_bg),
+        ("Put Price", "right", _fmt_money, _put_price_bg),
         ("Trend", "center", lambda v: html.escape(str(v)) if v is not None else "", _mk_color("Trend", _trend_color)),
         ("Book Imbalance", "right", lambda v: _fmt_signed(v, 2), _mk_color("Book Imbalance", _book_imbalance_color)),
         ("Flow Speed", "right", lambda v: _fmt_signed(v, 0), _mk_color("Flow Speed", _flow_speed_color)),
