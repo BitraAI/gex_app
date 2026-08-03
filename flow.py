@@ -1387,6 +1387,26 @@ def render_atm_order_flow_grid():
             return "background-color: #ffcccc;"
         return ""
 
+    def _support_bg(row):
+        """Background for the Support cell: green when spot is trading near
+        the support (put wall) level."""
+        spot = row["Spot"]
+        support = row["Support"]
+        if spot is not None and support is not None:
+            if spot <= support + _wall_buffer(support):
+                return "background-color: #ccffcc;"
+        return ""
+
+    def _resistance_bg(row):
+        """Background for the Resistance cell: red when spot is trading near
+        the resistance (call wall) level."""
+        spot = row["Spot"]
+        resistance = row["Resistance"]
+        if spot is not None and resistance is not None:
+            if spot >= resistance - _wall_buffer(resistance):
+                return "background-color: #ffcccc;"
+        return ""
+
     def _call_price_bg(row):
         """Background for the Call Price cell (CALL mark at the put-wall /
         support strike): green when spot is trading near the support level."""
@@ -1426,8 +1446,8 @@ def render_atm_order_flow_grid():
         ("Ticker", "left", lambda v: html.escape(str(v)) if v is not None else "", None),
         ("Spot", "center", _fmt_money, _spot_bg),
         ("Expiration", "center", lambda v: html.escape(_format_expiration(v)), None),
-        ("Support", "right", _fmt_money, None),
-        ("Resistance", "right", _fmt_money, None),
+        ("Support", "right", _fmt_money, _support_bg),
+        ("Resistance", "right", _fmt_money, _resistance_bg),
         ("Call Price", "right", _fmt_money, _call_price_bg),
         ("Put Price", "right", _fmt_money, _put_price_bg),
         ("Trend", "center", lambda v: html.escape(str(v)) if v is not None else "", _mk_color("Trend", _trend_color)),
