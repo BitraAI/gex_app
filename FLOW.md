@@ -8,21 +8,21 @@ expiration of every ticker in `~/.local/share/gex_app/ticker_history.json`.
 A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
     tracked ticker:
 
-| Column | Meaning |
-| --- | --- |
-| **Ticker** | Display symbol (index symbols like `SPX` kept as-is; streamed via ETF proxy `SPY`/`IWM`/`QQQ`). |
-| **Spot** | Latest spot price (REST pre-fetch or live equity stream). |
-| **Trend** | Direction of L2 book-imbalance pressure over the last 60 s, sourced from `StreamingService.trend_data()`. Labels: **up** / **down** (plain direction), **UP** / **DOWN** (strong: `|book_imbalance| > 0.3` **and** matching sign on `flow_speed` **and** `flow_acceleration`), **bullish** / **bearish** (reversal: previous tick was `down→up` or `up→down` — the reversal label takes precedence and is always bolded in the grid), or **flat** (cold-start or no strong signal). |
-| **Call Price** | CALL option mark at the **put-wall (support) strike** — what the call is worth at the support level. Falls back to the ATM call mark until the wall prices are computed. For index symbols (SPX/RUT/NDX) only REST chain marks are used (the streamed bid/ask belong to the ETF proxy's options). |
-| **Put Price** | PUT option mark at the **call-wall (resistance) strike** — what the put is worth at the resistance level. Falls back to the ATM put mark until the wall prices are computed. Same index-symbol rule as Call Price. |
-| **Support** | Put wall value (support level from Options data). |
-| **Resistance** | Call wall value (resistance level from Options data). |
-| **Book Imbalance** | Live Level-2 order-book pressure (OPTIONS): Positive → bullish, Negative → bearish. Ratio `(sum bid TOTAL_VOLUME − sum ask TOTAL_VOLUME) / sum` over the best book levels, range [-1, 1], refreshed on every book update. |
-| **Flow Speed** | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. |
-| **Flow Acceleration** | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, `mid = max(1, len(history) // 2)`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. |
-| **Absorption** | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot displacement over the same window. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
-| **Net Flow** | Net executed flow over the trailing 60 s: `buy_vol − sell_vol` (rolling window, delta-adjusted). Green > 0, red < 0, orange otherwise. |
-| **Liquidity Flow** | Net change in L2 OPTIONS-book resting depth at the best levels over the trailing 60 s: `liquidity_flow = depth_now − depth_60s_ago` (from `StreamingService.trend_data`). Positive = liquidity being posted (book refilling); negative = liquidity being drained (break risk). Green > 0, red < 0, orange otherwise. |
+| Column | Source | Meaning |
+| --- | --- | --- |
+| **Ticker** | — | Display symbol (index symbols like `SPX` kept as-is; streamed via ETF proxy `SPY`/`IWM`/`QQQ`). |
+| **Spot** | **Level 1** (equity stream) or REST pre-fetch | Latest spot price. |
+| **Trend** | **Level 2** (OPTIONS_BOOK) | Direction of L2 book-imbalance pressure over the last 60 s, sourced from `StreamingService.trend_data()`. Labels: **up** / **down** (plain direction), **UP** / **DOWN** (strong: `|book_imbalance| > 0.3` **and** matching sign on `flow_speed` **and** `flow_acceleration`), **bullish** / **bearish** (reversal: previous tick was `down→up` or `up→down` — the reversal label takes precedence and is always bolded in the grid), or **flat** (cold-start or no strong signal). |
+| **Call Price** | **Level 1** (option quotes) / REST chain marks | CALL option mark at the **put-wall (support) strike** — what the call is worth at the support level. Falls back to the ATM call mark until the wall prices are computed. For index symbols (SPX/RUT/NDX) only REST chain marks are used (the streamed bid/ask belong to the ETF proxy's options). |
+| **Put Price** | **Level 1** (option quotes) / REST chain marks | PUT option mark at the **call-wall (resistance) strike** — what the put is worth at the resistance level. Falls back to the ATM put mark until the wall prices are computed. Same index-symbol rule as Call Price. |
+| **Support** | REST option chain | Put wall value (support level from option-chain OI). |
+| **Resistance** | REST option chain | Call wall value (resistance level from option-chain OI). |
+| **Book Imbalance** | **Level 2** (OPTIONS_BOOK) | Live Level-2 order-book pressure (OPTIONS): Positive → bullish, Negative → bearish. Ratio `(Σ bid TOTAL_VOLUME − Σ ask TOTAL_VOLUME) / (Σ bid TOTAL_VOLUME + Σ ask TOTAL_VOLUME)`, range [-1, 1], refreshed on every book update. See **Book pressure (L2 OPTIONS book)** below. |
+| **Flow Speed** | **Level 2** (OPTIONS_BOOK, derived) | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
+| **Flow Acceleration** | **Level 2** (OPTIONS_BOOK, derived) | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, `mid = max(1, len(history) // 2)`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
+| **Absorption** | **Level 1** (ATM option volume + spot displacement) | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot displacement over the same window. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
+| **Net Flow** | **Level 1** (ATM option trades) | Net executed flow over the trailing 60 s: `net_60 = exec_history[-1][1] − exec_history[0][1]`, i.e. the change in delta-adjusted `buy_vol − sell_vol` (buying calls / selling puts = buy; selling calls / buying puts = sell) over the trailing 60 s window, from the ATM call/put only. Green > 0, red < 0, orange otherwise. See **Order absorption (Telegram + grid)**. |
+| **Liquidity Flow** | **Level 2** (OPTIONS_BOOK) | Net change in L2 OPTIONS-book resting depth at the best levels over the trailing 60 s: `liquidity_flow = depth_now − depth_60s_ago` (from `StreamingService.trend_data`). Positive = liquidity being posted (book refilling); negative = liquidity being drained (break risk). Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -133,24 +133,20 @@ meaningful zone). Outside the buffer those scores contribute nothing.
 ```
 Schwab WebSocket (LEVEL1_EQUITIES + LEVEL1_OPTIONS + OPTIONS_BOOK)
         |
-        |----------------------------------|
-        v                                  v
-   LEVEL1 trades                      LEVEL2 options books
-   bid, ask, last,                     per-symbol book messages
-   volume (ATM service)                (BIDS / ASKS level TOTAL_VOLUME)
-   (_process_trade_ticker)             (StreamingService book handlers)
-   -> buy/sell                         -> book_imbalance ratio [-1, 1]
-   -> GEX totals                       -> appended to per-symbol 60s rolling history
-         |                              -> flow_speed / flow_acceleration
-         |                                  (first / second difference)
-        |                                  -> trend (up/down/UP/DOWN/flat)
-        |                                  -> reversal (bullish/bearish)
-        v                                  (StreamingService.trend_data)
-   Cumulative per-ticker GEX totals
-   { Put Wall, Call Wall }
-        |
-        v
-flow_cache (st.session_state)  -- updated by update_flow_cache()
+        |---------------------------------------------|
+        v                                             v
+   LEVEL 1 (trades + quotes)                   LEVEL 2 (OPTIONS_BOOK)
+   ATM option trades (bid/ask/last/vol)        per-symbol book messages
+   (_process_trade_ticker)                     (BIDS / ASKS level TOTAL_VOLUME)
+   -> buy/sell (direction vs bid/ask mid)      -> book_imbalance ratio [-1, 1]     [Level 2]
+   -> buy_vol / sell_vol (delta-adjusted)      -> appended to per-symbol 60s history [Level 2]
+   -> GEX totals                               -> flow_speed / flow_acceleration  [Level 2]
+   -> Net Flow 60s  (exec_history Δ)           -> trend / reversal (trend_data)   [Level 2]
+   -> Absorption  (vol / spot displacement)    -> Liquidity Flow (depth Δ)        [Level 2]
+         |                                             |
+         |  Spot [Level 1 equity] / walls [REST chain] |
+         v                                             v
+   flow_cache (st.session_state)  -- updated by update_flow_cache()
         |
         v
 ATM Order Flow dataframe (Streamlit, styled like Options Data table)
@@ -307,7 +303,9 @@ refreshes and respect the 600 s per-ticker cooldown.
 surfaced as the grid **Absorption** column and the Telegram
 `Absorption: <n> vol/$1` header line — folded into the compact trend signal
 line as `Abs`) measures how much aggressive ATM option flow the book consumed
-without moving the price:
+without moving the price. **Level 1** data: ATM option trade volume (from
+`LEVEL1_OPTIONS`) over the spot displacement (from the `LEVEL1_EQUITIES`
+stream):
 
     absorption = Δ(cumulative ATM volume over 60 s) / max(|Δspot| over 60 s, 0.05)
 
@@ -318,7 +316,8 @@ price is drifting on thin flow.
 **Executed flow** (`AtmOptionVolumeService.get_ticker_executed_flow`, the grid
 **Net Flow** column and the Telegram
 `Net Flow (60s): <n>` header line — folded into the compact trend signal
-line as `Net`) is the **delta-adjusted** aggressor split: every trade
+line as `Net`) is the **delta-adjusted** aggressor split, sourced from
+**Level 1** ATM option trade prints (`LEVEL1_OPTIONS`): every trade
 print is classified buyer- vs seller-initiated (`_infer_dir` against the
 bid/ask mid), then folded by option side so `buy_vol` counts **buying calls
 and selling puts** (bullish pressure) while `sell_vol` counts selling calls
@@ -327,11 +326,17 @@ and buying puts (bearish pressure):
     buy_vol   = call_buy_vol  + put_sell_vol
     sell_vol  = call_sell_vol + put_buy_vol
 
-A rolling 60 s net (`buy_vol − sell_vol`) gives current pressure, so the
-`Net` line is the delta-adjusted net flow (equivalent to `bullish − bearish`).
+`buy_vol` / `sell_vol` are session-cumulative (delta-adjusted), and on every
+trade a `(timestamp, buy_vol − sell_vol)` sample is appended to a per-symbol
+`exec_history` pruned to the trailing 60 s. The grid's **Net Flow** cell is
+the change over that window (the 60 s net — equivalent to `bullish − bearish`):
+
+    net_60 = exec_history[-1][1] − exec_history[0][1]   (Δ buy_vol − sell_vol over trailing 60 s)
+
 The per-contract raw sides (`call_buy_vol` / `call_sell_vol` /
 `put_buy_vol` / `put_sell_vol`) are still kept in the 1-second OHLCV bars, so
-both views remain computable.
+both views remain computable. Only the ATM call and ATM put at the per-ticker
+front expiration are subscribed, so Net Flow is strictly ATM flow.
 
 **Wall absorption** in `flow.maybe_fire_wall_zone_alerts` snapshots the
 cumulative ATM volume when spot enters a wall zone and reports how many
@@ -341,13 +346,57 @@ absorbing ≥ 100 contracts, the wall is treated as **broken** and a dedicated
 💥 `Resistance/Support wall BROKE after absorbing <n> contracts` alert fires —
 heavy absorption followed by a break is a high-conviction move.
 
+### Book pressure (L2 OPTIONS book)
+
+The **Book Imbalance**, **Flow Speed**, and **Flow Acceleration** columns are
+all derived from the same per-symbol **Level 2** OPTIONS-book data by
+`StreamingService`, fed by the `OPTIONS_BOOK` messages on the shared WebSocket
+(the Level 2 depth feed, distinct from the Level 1 trade/quotes stream).
+On every book update the resting volume on each BIDS / ASKS level
+(`TOTAL_VOLUME`) is summed (`_book_volume_for_symbol`) and a
+`(timestamp, ratio)` sample is appended to a per-symbol **60 s rolling
+history** (`_update_book_imbalance`).
+
+**Book Imbalance** (`_book_imbalance_for_symbol`) — the current bid/ask
+pressure ratio over the full book:
+
+    bid_vol          = Σ BIDS.TOTAL_VOLUME
+    ask_vol          = Σ ASKS.TOTAL_VOLUME
+    book_imbalance   = (bid_vol − ask_vol) / (bid_vol + ask_vol)   ∈ [−1, 1]
+
+Positive = more resting bid volume (bullish pressure); negative = more resting
+ask volume (bearish). Returns `None` when there is no book yet or total ≤ 0.
+
+**Flow Speed** — the first difference of the imbalance ratio over the trailing
+60 s window (`_flow_speed_and_accel`):
+
+    flow_speed = history[-1][1] − history[0][1]
+
+the last ratio minus the first ratio in the window — the window's net change
+in book pressure (dimensionless, in ratio units).
+
+**Flow Acceleration** — the second difference of the ratio, i.e. the change in
+book-pressure momentum. The window is split at its exact midpoint so every
+sample is used, and the older half's change is subtracted from the recent
+half's change:
+
+    mid               = max(1, len(history) // 2)
+    previous_flow     = history[mid-1][1] − history[0][1]
+    recent_flow       = history[-1][1]    − history[mid][1]
+    flow_acceleration = recent_flow − previous_flow
+
+Cold-start guard: with fewer than 2 history samples both `flow_speed` and
+`flow_acceleration` are 0 (and the trend is `flat`). Agreement between
+`flow_speed` / `flow_acceleration` signs and `|book_imbalance| > 0.3`
+drives the strong **UP** / **DOWN** trend labels (see the Trend section).
+
 ### Liquidity flow (L2 book)
 
 **Liquidity flow** (`StreamingService._liquidity_flow`, exposed via
 `trend_data` as the grid **Liquidity Flow** column and the Telegram
 `Liquidity Flow: <n>` header line — folded into the compact trend signal
-line as `Liq`) measures whether resting liquidity at the best L2 OPTIONS-book
-levels is being added or drained over the trailing 60 s:
+line as `Liq`) measures whether resting liquidity at the best **Level 2**
+OPTIONS-book levels is being added or drained over the trailing 60 s:
 
     depth = Σ bid TOTAL_VOLUME + Σ ask TOTAL_VOLUME (best levels)
     liquidity_flow = depth_now − depth_60s_ago   (contracts)
