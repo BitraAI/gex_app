@@ -10,17 +10,20 @@ from option_streaming_service import _get_stream_symbol
 
 
 class StreamingService:
-    """Subscribes to Schwab LEVELONE_EQUITIES plus NASDAQ_BOOK / NYSE_BOOK for
-    the chart symbol and every tracked ticker.  Extracts raw tick data
+    """Subscribes to Schwab LEVELONE_EQUITIES plus OPTIONS_BOOK for the chart
+    symbol and every tracked ticker.  Extracts raw tick data
     (LAST_PRICE + TRADE_TIME_MILLIS + LAST_SIZE) plus BID_PRICE/ASK_PRICE to
     infer trade direction, and aggregates into 1-second OHLCV bars with a
     buy/sell volume split for delta.
 
-    The Level 2 order books (keyed per stream symbol) are the single source
-    for book_imbalance / flow_speed / flow_acceleration — see
-    ``trend_data``.  A book is subscribed for every tracked ticker so the
-    per-ticker Order Flow grid and the wall-zone / Telegram alerts all
-    consume L2 book pressure rather than option-quote-derived imbalance.
+    The Level 2 OPTIONS books (keyed per underlying stream symbol) are the
+    single source for book_imbalance / flow_speed / flow_acceleration — see
+    ``trend_data``.  OPTIONS_BOOK requires full OCC option-contract symbols
+    (not underlyings), so the ATM call/put contracts for every tracked
+    ticker are subscribed (see ``set_book_contracts``) and their resting
+    volume is aggregated per underlying so the per-ticker Order Flow grid
+    and the wall-zone / Telegram alerts all consume L2 book pressure rather
+    than option-quote-derived imbalance.
     """
 
     def __init__(self, async_client, loop):
@@ -57,10 +60,17 @@ class StreamingService:
         self._ask_price: float | None = None
         self._last_price: float | None = None
 
-        # Level 2 order book snapshots, keyed by schwab stream symbol.  One
-        # entry per tracked ticker we have asked Schwab to stream a book for.
-        self._book_symbols: set[str] = set()        # stream symbols currently subscribed
-        self._books_options: dict[str, dict] = {}   # stream_symbol -> latest OPTIONS_BOOK content msg
+        # Level 2 order book snapshots.  OPTIONS_BOOK messages are keyed by
+        # OCC option-contract symbol (e.g. "AAPL  260905C00195000"); the
+        # per-underlying subscription/aggregation maps are kept alongside.
+        self._book_symbols: set[str] = set()        # underlying stream symbols to keep books for
+        self._books_options: dict[str, dict] = {}   # OCC contract symbol -> latest OPTIONS_BOOK content msg
+        # underlying stream symbol -> [OCC contract symbols] to subscribe, and
+        # the reverse lookup (both padded and space-stripped OCC forms) used to
+        # route incoming book messages back to their underlying for aggregation.
+        self._book_contracts: dict[str, list[str]] = {}
+        self._contract_to_underlying: dict[str, str] = {}
+        self._subscribed_contracts: set[str] = set()  # contracts currently subscribed via OPTIONS_BOOK
         # Per-symbol L2 book-imbalance history: stream_symbol -> list[(ts, ratio)],
         # pruned to the last 60s, used to derive flow_speed / flow_acceleration.
         self._book_imb_history: dict[str, list] = {}
@@ -276,11 +286,23 @@ class StreamingService:
         def _options_book_handler(msg):
             with self._lock:
                 for content in (msg.get("content") or []):
-                    sym = content.get("SYMBOL")
+                    # Schwab book content carries the symbol either as the
+                    # numeric SYMBOL field (0) or as the non-numeric "key"
+                    # member; some feeds omit one or the other.
+                    sym = content.get("SYMBOL") or content.get("key")
                     if sym is None:
                         continue
+                    # Store per OCC contract; also index by the stripped form
+                    # in case the root padding is dropped in some messages.
                     self._books_options[sym] = content
-                    self._update_book_imbalance(sym)
+                    self._books_options[sym.replace(" ", "")] = content
+                    # Route back to the underlying so the aggregated
+                    # book-imbalance history for the ticker advances.
+                    und = self._contract_to_underlying.get(sym)
+                    if und is None:
+                        und = self._contract_to_underlying.get(sym.replace(" ", ""))
+                    if und is not None:
+                        self._update_book_imbalance(und)
 
         # Add handlers before subscribing
         sc.add_level_one_equity_handler(_l1_handler)
@@ -370,16 +392,16 @@ class StreamingService:
     # ------------------------------------------------------------------ #
 
     def subscribe_book_symbols(self, stream_symbols: list[str]) -> None:
-        """Ensure Level 2 books are subscribed for exactly *stream_symbols*.
+        """Declare the set of underlying stream symbols we want to keep
+        Level 2 books for.
 
         Safe to call frequently (e.g. once per grid refresh): it diffs
-        against the current subscription set and only issues SUBS for new
-        symbols and UNSUBS for dropped symbols.  The Schwab calls are
-        scheduled on the background stream loop and never block the caller;
-        a symbol's book will not be populated until the first update lands,
-        so ``trend_data`` is None-safe in the meantime.
+        against the current key set and drops book state (histories and
+        snapshots) for symbols that are no longer tracked.  The actual
+        OPTIONS_BOOK subscription symbols are the ATM contracts registered
+        via ``set_book_contracts`` — callers should update both together.
         """
-        want = [s for s in stream_symbols if s]
+        want = [s.upper().lstrip("$") for s in stream_symbols if s]
         with self._lock:
             to_add = [s for s in want if s not in self._book_symbols]
             to_remove = [s for s in self._book_symbols if s not in want]
@@ -387,71 +409,136 @@ class StreamingService:
                 self._book_symbols.add(s)
             for s in to_remove:
                 self._book_symbols.discard(s)
-                self._books_options.pop(s, None)
                 self._book_imb_history.pop(s, None)
                 self._book_depth_history.pop(s, None)
                 self._prev_trend.pop(s, None)
-            if not to_add and not to_remove:
+                for c in self._book_contracts.get(s, []):
+                    self._books_options.pop(c, None)
+                    self._books_options.pop(c.replace(" ", ""), None)
+
+    def set_book_contracts(self, contracts: dict[str, list[str]]) -> None:
+        """Register the OCC option-contract symbols to stream via
+        OPTIONS_BOOK, keyed by underlying stream symbol, e.g.::
+
+            {"SPY": ["SPY  260905C00550000", "SPY  260905P00550000"]}
+
+        OPTIONS_BOOK subscriptions require full OCC option-contract symbols,
+        not underlyings, so this mapping is what makes the book feed arrive.
+        Safe to call on every grid refresh: when the registered set changes
+        it issues a full ``OPTIONS_BOOK`` SUBS (Schwab's SUBS replaces the
+        feed, so dropped contracts are torn down server-side) plus UNSUBS for
+        any contracts that moved.  Books and history stay keyed by the
+        *underlying* stream symbol, so ``trend_data`` and the Order Flow grid
+        are unchanged.
+        """
+        want = {}
+        for und, occ in (contracts or {}).items():
+            und = und.upper().lstrip("$")
+            occ = [c for c in occ if c]
+            if und and occ:
+                want[und] = occ
+        with self._lock:
+            if want == self._book_contracts:
                 return
+            self._book_contracts = want
+            self._contract_to_underlying = {
+                c: und for und, occ in want.items() for c in occ
+            }
+            # Also route space-stripped OCC symbols (some book messages drop
+            # the root padding) back to the same underlying.
+            self._contract_to_underlying.update({
+                c.replace(" ", ""): und
+                for und, occ in want.items() for c in occ
+            })
+            canonical = {c for occ in want.values() for c in occ}
+            to_unsub = [c for c in self._subscribed_contracts if c not in canonical]
+            for c in to_unsub:
+                # Drop stale snapshots for contracts that changed strike/expiry.
+                self._books_options.pop(c, None)
+                self._books_options.pop(c.replace(" ", ""), None)
+            self._subscribed_contracts = canonical
+            # Full authoritative set: SUBS replaces the feed, so always send
+            # the complete current set to self-heal any dropped subscription.
+            to_sub = [c for occ in want.values() for c in occ]
             sc = self._sc
             loop = self._loop
-        # Fire-and-forget: schedule the async SUBS/UNSUBS on the stream loop.
-        if sc is not None and loop is not None:
+        if sc is not None and loop is not None and (to_sub or to_unsub):
             asyncio.run_coroutine_threadsafe(
-                self._apply_book_subscriptions(to_add, to_remove), loop)
+                self._apply_book_subscriptions(to_sub, to_unsub), loop)
 
-    async def _apply_book_subscriptions(self, to_add, to_remove):
+    async def _apply_book_subscriptions(self, subscribe, unsubscribe):
         sc = self._sc
         if sc is None:
             return
         # Socket not open yet (initial login or re-login in progress): skip.
-        # All subscribed book symbols are re-subscribed after the next login
+        # All subscribed OCC contracts are re-subscribed after the next login
         # via _subscribe_books, so nothing is lost by dropping this send.
         if getattr(sc, "_socket", None) is None:
             return
         try:
-            if to_add:
-                await sc.options_book_subs(to_add)
-            if to_remove:
-                await sc.options_book_unsubs(to_remove)
-        except Exception:
-            # Fire-and-forget: if the socket dropped mid-send, the next
-            # (re)login re-subscribes the full _book_symbols set, so this is
-            # benign — keep the log quiet.
-            pass
+            if subscribe:
+                await sc.options_book_subs(subscribe)
+            if unsubscribe:
+                await sc.options_book_unsubs(unsubscribe)
+        except Exception as e:
+            # Don't wedge silently: if a SUBS is rejected (bad symbol, budget,
+            # socket race) the next refresh's full SUBS retries it.  Surface
+            # it so the failure is visible instead of invisible.
+            print(f"[StreamingService] OPTIONS_BOOK subscribe error: {e}")
 
     async def _subscribe_books(self, sc: StreamClient):
-        """Subscribe OPTIONS books for the chart symbol and every
-        tracked ticker.  Called from ``_stream`` right after login and
-        after each re-login so tracked-ticker books survive reconnects."""
-        book_syms = [self._symbol] if self._symbol else []
+        """Subscribe OPTIONS_BOOK for the ATM OCC contracts of the chart
+        symbol and every tracked ticker.  Called from ``_stream`` right
+        after login and after each re-login so tracked-ticker books survive
+        reconnects."""
         with self._lock:
-            book_syms += [s for s in self._book_symbols if s and s != self._symbol]
-        if book_syms:
-            await sc.options_book_subs(book_syms)
+            underlyings = set(self._book_symbols)
+            if self._symbol:
+                underlyings.add(self._symbol)
+            contracts = []
+            seen = set()
+            for und in underlyings:
+                for c in self._book_contracts.get(und, []):
+                    if c not in seen:
+                        seen.add(c)
+                        contracts.append(c)
+        if contracts:
+            await sc.options_book_subs(contracts)
 
     def _book_volume_for_symbol(self, symbol: str) -> tuple[float, float] | None:
-        """Sum Level-2 OPTIONS-book resting volume for one stream symbol:
-        TOTAL_VOLUME across the best bid levels and best ask levels.
-        Returns ``(bid_vol, ask_vol)`` or None when no book yet.
+        """Sum Level-2 OPTIONS-book resting volume for one underlying stream
+        symbol, aggregated across the ATM call/put OCC contracts registered
+        for it: TOTAL_VOLUME across the best bid levels and best ask levels.
+        Returns ``(bid_vol, ask_vol)`` or None when no contract book has
+        arrived yet.
 
         Assumes *self._lock* is held (called from handlers and trend_data).
         """
-        content = self._books_options.get(symbol)
-        if not content:
+        contracts = self._book_contracts.get(symbol)
+        if not contracts:
             return None
         bid_vol = 0.0
         ask_vol = 0.0
-        for ask in (content.get("ASKS") or []):
-            try:
-                ask_vol += float(ask.get("TOTAL_VOLUME") or 0)
-            except (TypeError, ValueError):
-                pass
-        for bid in (content.get("BIDS") or []):
-            try:
-                bid_vol += float(bid.get("TOTAL_VOLUME") or 0)
-            except (TypeError, ValueError):
-                pass
+        found = False
+        for c in contracts:
+            content = self._books_options.get(c)
+            if content is None:
+                content = self._books_options.get(c.replace(" ", ""))
+            if not content:
+                continue
+            found = True
+            for ask in (content.get("ASKS") or []):
+                try:
+                    ask_vol += float(ask.get("TOTAL_VOLUME") or 0)
+                except (TypeError, ValueError):
+                    pass
+            for bid in (content.get("BIDS") or []):
+                try:
+                    bid_vol += float(bid.get("TOTAL_VOLUME") or 0)
+                except (TypeError, ValueError):
+                    pass
+        if not found:
+            return None
         return bid_vol, ask_vol
 
     def _book_imbalance_for_symbol(self, symbol: str) -> float | None:
@@ -557,7 +644,8 @@ class StreamingService:
               flow_history}
 
         ``book_imbalance`` is the current L2 OPTIONS-book bid/ask volume
-        ratio (aggregated from ``_books_options`` — see
+        ratio, aggregated across the ATM call/put OCC contracts subscribed
+        for the symbol (``_books_options`` — see
         ``_book_imbalance_for_symbol``); ``flow_speed`` /
         ``flow_acceleration`` are the first and second differences of that
         ratio over the trailing 60s window; ``liquidity_flow`` is the net

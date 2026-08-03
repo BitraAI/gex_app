@@ -223,32 +223,78 @@ def ensure_atm_streaming(stream_symbol: str):
         # Pre-fetch ETF proxy spots via REST only every ~10 s to avoid
         # blocking the Streamlit thread on every 2-second fragment tick.
         # Between fetches we feed whatever is already in spot_cache.
-        # Index symbols are excluded — their spot comes from the
-        # index quote ($SPX etc.), not the ETF proxy quote.
+        # Equity tickers get their spot from this proxy quote; index
+        # symbols (SPX/RUT/NDX) keep their index-level spot (fed by the
+        # index quote above) but ALSO get the ETF-proxy price pushed via
+        # set_ticker_proxy_spot so their Level-1 / OPTIONS_BOOK
+        # subscriptions use real proxy strikes (SPY ~570) instead of
+        # non-existent index-level strikes (SPX ~5700).
         _last_fetch_ts = s.get("_spot_fetch_ts", 0.0)
         if _time_mod.time() - _last_fetch_ts >= 10:
             s["_spot_fetch_ts"] = _time_mod.time()
-            _stream_symbols = [
-                _get_stream_symbol(t)
-                for t in _all_tickers
-                if _normalize_display_symbol(t) not in INDEX_QUOTE_MAP
-            ]
+            _stream_symbols = list(dict.fromkeys(
+                _get_stream_symbol(t) for t in _all_tickers
+            ))
             try:
                 quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                 for disp_sym in _all_tickers:
                     _disp_upper = _normalize_display_symbol(disp_sym)
-                    # Skip index symbols — their spot comes from the
-                    # index quote, not the ETF proxy quote.
-                    if _disp_upper in INDEX_QUOTE_MAP:
-                        continue
                     _sym = STREAM_SYMBOL_MAP.get(_disp_upper, _disp_upper)
                     qd = quote_resp.get(_sym, {}) or {}
                     quote = qd.get("quote", {}) or qd.get(_sym, {})
                     last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                    if last is not None and float(last) > 0:
+                    if last is None or float(last) <= 0:
+                        continue
+                    if _disp_upper in INDEX_QUOTE_MAP:
+                        atm_svc.set_ticker_proxy_spot(_disp_upper, float(last))
+                    else:
                         s.spot_cache[_disp_upper] = float(last)
             except Exception as e:
                 print(f"[ensure_atm_streaming] spot pre-fetch failed: {e}")
+
+        # Refresh the Call/Put Price marks for every tracked ticker every
+        # ~2 s.  The streamed L1 bids only cover ATM strikes, and the wall
+        # / ATM marks are otherwise pushed only by the throttled analytics
+        # recompute (30-180 s), which makes the columns look frozen.  Quote
+        # the ATM and wall-strike OCC symbols in one batched REST call.
+        _last_opt_ts = s.get("_opt_price_fetch_ts", 0.0)
+        if _time_mod.time() - _last_opt_ts >= 2:
+            s["_opt_price_fetch_ts"] = _time_mod.time()
+            _quote_map = {}
+            for _t in _all_tickers:
+                _t_upper = _normalize_display_symbol(_t)
+                for _label, _occ in atm_svc.get_ticker_quote_symbols(_t_upper).items():
+                    _quote_map.setdefault(_occ, (_t_upper, _label))
+            if _quote_map:
+                try:
+                    _resp = run_async(fetch_quotes(s.client, list(_quote_map.keys())))
+                    _per_ticker = {}
+                    for _occ, (_tk, _label) in _quote_map.items():
+                        _occ_clean = _occ.replace(" ", "")
+                        qd = _resp.get(_occ) or _resp.get(_occ_clean) or {}
+                        qq = (
+                            qd.get("quote")
+                            or qd.get(_occ)
+                            or qd.get(_occ_clean)
+                            or qd
+                        )
+                        if not isinstance(qq, dict):
+                            continue
+                        mark = qq.get("mark") or qq.get("lastPrice") or qq.get("closePrice")
+                        if mark is None or float(mark) <= 0:
+                            continue
+                        _per_ticker.setdefault(_tk, {})[_label] = float(mark)
+                    for _tk, _marks in _per_ticker.items():
+                        _wcall = _marks.get("call_wall")
+                        _wput = _marks.get("put_wall")
+                        if _wcall is not None or _wput is not None:
+                            atm_svc.set_ticker_wall_prices(_tk, _wcall, _wput)
+                        _acall = _marks.get("call_atm")
+                        _aput = _marks.get("put_atm")
+                        if _acall is not None or _aput is not None:
+                            atm_svc.set_ticker_option_prices(_tk, _acall, _aput)
+                except Exception as e:
+                    print(f"[ensure_atm_streaming] option quote refresh failed: {e}")
 
         _was_reconnect = getattr(atm_svc, "_needs_reconnect", False)
         _need_register = (
@@ -535,6 +581,29 @@ def _conviction_score(
     return score
 
 
+def _tracked_book_contracts(atm_svc, tickers):
+    """Build {stream_symbol: [ATM call OCC, ATM put OCC]} for the given
+    tickers from the ATM option service.
+
+    OPTIONS_BOOK subscriptions require full OCC option-contract symbols, not
+    underlyings, so this mapping (not the underlying) is what
+    ``StreamingService.set_book_contracts`` subscribes for the Level 2 book
+    imbalance feed.
+    """
+    contracts = {}
+    if atm_svc is None:
+        return contracts
+    for t in tickers:
+        t_upper = _normalize_display_symbol(t)
+        occ = [c for c in (
+            atm_svc.get_ticker_call_sym(t_upper),
+            atm_svc.get_ticker_put_sym(t_upper),
+        ) if c]
+        if occ:
+            contracts[_get_stream_symbol(t_upper)] = occ
+    return contracts
+
+
 def maybe_fire_wall_zone_alerts() -> None:
     """Inspect every tracked ticker's streaming spot vs its walls and push
     diff_alerts (wall zone, gamma flip, wall changes) to Telegram.
@@ -552,9 +621,10 @@ def maybe_fire_wall_zone_alerts() -> None:
     # L2-sourced trend below is populated (idempotent; diffs each call).
     _svc = s.get("streaming_service")
     if _svc is not None:
-        _svc.subscribe_book_symbols(
-            [_get_stream_symbol(t) for t in atm_svc.tracked_tickers()]
-        )
+        _tickers = atm_svc.tracked_tickers()
+        _svc.subscribe_book_symbols([_get_stream_symbol(t) for t in _tickers])
+        # OPTIONS_BOOK needs the ATM OCC contract symbols, not underlyings.
+        _svc.set_book_contracts(_tracked_book_contracts(atm_svc, _tickers))
 
     for t in atm_svc.tracked_tickers():
         t_upper = _normalize_display_symbol(t)
@@ -1179,6 +1249,8 @@ def render_atm_order_flow_grid():
     _svc = s.get("streaming_service")
     if _svc is not None:
         _svc.subscribe_book_symbols([_get_stream_symbol(t) for t in tickers])
+        # OPTIONS_BOOK needs the ATM OCC contract symbols, not underlyings.
+        _svc.set_book_contracts(_tracked_book_contracts(atm_svc, tickers))
     rows = []
     if tickers:
         for t in tickers:
