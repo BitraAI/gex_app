@@ -15,8 +15,8 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Trend** | **Level 2** (OPTIONS_BOOK) | Direction of L2 book-imbalance pressure over the last 60 s, sourced from `StreamingService.trend_data()`. Labels: **up** / **down** (plain direction), **UP** / **DOWN** (strong: `|book_imbalance| > 0.3` **and** matching sign on `flow_speed` **and** `flow_acceleration`), **bullish** / **bearish** (reversal: previous tick was `down→up` or `up→down` — the reversal label takes precedence and is always bolded in the grid), or **flat** (cold-start or no strong signal). |
 | **Call Price** | **Level 1** (option quotes) / REST chain marks | CALL option mark at the **put-wall (support) strike** — what the call is worth at the support level. Falls back to the ATM call mark until the wall prices are computed. For index symbols (SPX/RUT/NDX) only REST chain marks are used (the streamed bid/ask belong to the ETF proxy's options). |
 | **Put Price** | **Level 1** (option quotes) / REST chain marks | PUT option mark at the **call-wall (resistance) strike** — what the put is worth at the resistance level. Falls back to the ATM put mark until the wall prices are computed. Same index-symbol rule as Call Price. |
-| **Support** | REST option chain | Put wall value (support level from option-chain OI). |
-| **Resistance** | REST option chain | Call wall value (resistance level from option-chain OI). |
+| **Support** | REST option chain (GEX) | Put wall value — the strike below spot with the highest `put_gex` (dealer gamma exposure, OI × gamma; not raw OI). See **Wall (support/resistance) refresh cadence**. |
+| **Resistance** | REST option chain (GEX) | Call wall value — the strike above spot with the highest `call_gex` (dealer gamma exposure, OI × gamma; not raw OI). See **Wall (support/resistance) refresh cadence**. |
 | **Book Imbalance** | **Level 2** (OPTIONS_BOOK) | Live Level-2 order-book pressure (OPTIONS): Positive → bullish, Negative → bearish. Ratio `(Σ bid TOTAL_VOLUME − Σ ask TOTAL_VOLUME) / (Σ bid TOTAL_VOLUME + Σ ask TOTAL_VOLUME)`, range [-1, 1], refreshed on every book update. See **Book pressure (L2 OPTIONS book)** below. |
 | **Flow Speed** | **Level 2** (OPTIONS_BOOK, derived) | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
 | **Flow Acceleration** | **Level 2** (OPTIONS_BOOK, derived) | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, `mid = max(1, len(history) // 2)`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
@@ -228,7 +228,10 @@ are fed via a two-step process:
 ### Wall (support/resistance) refresh cadence
 
 The Support / Resistance columns come from the put/call walls computed by
-`compute_analytics` on a REST option chain. Walls are refreshed with a
+`compute_analytics` on a REST option chain. They are **GEX-derived** (not raw
+OI): `_find_put_wall` picks the strike below spot with the highest `put_gex`,
+and `_find_call_wall` picks the strike above spot with the highest `call_gex`
+(dealer gamma exposure = OI × gamma). Walls are refreshed with a
 **hybrid trigger** in `flow.maybe_fire_wall_zone_alerts` (checked every 2 s
 fragment tick), with two tiers:
 
