@@ -384,10 +384,16 @@ class AtmOptionVolumeService:
                     "put_mark": None,
                     "put_wall_call_price": None,
                     "call_wall_put_price": None,
+                    "call_wall_call_price": None,
+                    "put_wall_put_price": None,
                     "bullish": 0,
                     "bearish": 0,
                     "buy_vol": 0,
                     "sell_vol": 0,
+                    "call_delta": None,
+                    "put_delta": None,
+                    "delta_buy": 0.0,
+                    "delta_sell": 0.0,
                     "flow_history": [],
                     "vol_history": [],
                     "spot_history": [],
@@ -454,11 +460,11 @@ class AtmOptionVolumeService:
                 return None
             now = _time_mod.time()
             spot = ticker.get("spot", 0.0) or 0.0
+            sh = ticker.setdefault("spot_history", [])
             if spot > 0:
-                sh = ticker.setdefault("spot_history", [])
                 sh.append((now, spot))
-                while sh and sh[0][0] < now - 60:
-                    sh.pop(0)
+            while sh and sh[0][0] < now - 60:
+                sh.pop(0)
             vh = ticker.setdefault("vol_history", [])
             while vh and vh[0][0] < now - 60:
                 vh.pop(0)
@@ -474,8 +480,9 @@ class AtmOptionVolumeService:
         """Return (buy_vol, sell_vol, net_60) for a tracked ticker:
         session-cumulative delta-adjusted executed ATM volume (buying calls
         / selling puts -> buy; selling calls / buying puts -> sell), plus
-        the net (buy - sell) over the trailing 60 s window.  Any element is
-        None when the ticker is untracked or no data exists yet."""
+        the net_delta (delta_buy - delta_sell) over the trailing 60 s
+        window.  Any element is None when the ticker is untracked or no
+        data exists yet."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is None:
@@ -595,10 +602,12 @@ class AtmOptionVolumeService:
     def get_ticker_quote_symbols(self, display_symbol: str) -> dict:
         """Return {label: OCC symbol} for the option quotes that keep the
         Call/Put Price columns live:
-          'call_wall' -> CALL at the put-wall (support) strike
-          'put_wall'  -> PUT at the call-wall (resistance) strike
-          'call_atm'  -> CALL at the ATM strike
-          'put_atm'   -> PUT at the ATM strike
+          'put_wall_call' -> CALL at the put-wall (support) strike
+          'call_wall_put' -> PUT at the call-wall (resistance) strike
+          'call_wall_call' -> CALL at the call-wall (resistance) strike
+          'put_wall_put'  -> PUT at the put-wall (support) strike
+          'call_atm'      -> CALL at the ATM strike
+          'put_atm'       -> PUT at the ATM strike
         Empty dict when the ticker lacks usable strikes/expiration.  Index
         tickers (SPX/RUT/NDX) use their own index-option root so the quoted
         prices are index-level, not the ETF-proxy (SPY/IWM/QQQ) strikes."""
@@ -627,8 +636,10 @@ class AtmOptionVolumeService:
                 if strike and strike > 0:
                     out[label] = _make_option_symbol(root, yymmdd, call_put, strike)
 
-            _add("call_wall", "C", ticker.get("put_wall"))
-            _add("put_wall", "P", ticker.get("call_wall"))
+            _add("put_wall_call", "C", ticker.get("put_wall"))
+            _add("call_wall_put", "P", ticker.get("call_wall"))
+            _add("call_wall_call", "C", ticker.get("call_wall"))
+            _add("put_wall_put", "P", ticker.get("put_wall"))
             _add("call_atm", "C", ticker.get("atm_strike"))
             _add("put_atm", "P", ticker.get("atm_strike"))
             return out
@@ -714,6 +725,24 @@ class AtmOptionVolumeService:
                 # _maybe_invalidate_walls_on_strike_change takes effect.
                 self._wall_refresh_ts[norm] = _time_mod.monotonic()
 
+    def set_ticker_atm_deltas(self, display_symbol: str,
+                              call_delta: float | None,
+                              put_delta: float | None):
+        """Store the front-month ATM Call delta (>0) and Put delta (<0)
+        for a tracked ticker.  These are read from REST option-chain
+        analytics and used to delta-weight each executed trade so the Net
+        Flow column reports net_delta = delta_buy - delta_sell instead of
+        raw contract counts."""
+        if call_delta is None and put_delta is None:
+            return
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is not None:
+                if call_delta is not None:
+                    ticker["call_delta"] = call_delta
+                if put_delta is not None:
+                    ticker["put_delta"] = put_delta
+
     def set_ticker_option_prices(self, display_symbol: str,
                                   call_price: float | None,
                                   put_price: float | None):
@@ -746,15 +775,20 @@ class AtmOptionVolumeService:
 
     def set_ticker_wall_prices(self, display_symbol: str,
                                 put_wall_call_price: float | None,
-                                call_wall_put_price: float | None):
+                                call_wall_put_price: float | None,
+                                call_wall_call_price: float | None = None,
+                                put_wall_put_price: float | None = None):
         """Store the option marks at the key wall strikes for a tracked
-        ticker: the CALL mark at the put-wall (support) strike and the PUT
-        mark at the call-wall (resistance) strike.
+        ticker:
+          - put_wall_call_price: CALL mark at the put-wall (support) strike
+          - call_wall_put_price:  PUT mark at the call-wall (resistance) strike
+          - call_wall_call_price: CALL mark at the call-wall (resistance) strike
+          - put_wall_put_price:   PUT mark at the put-wall (support) strike
 
         Pushed alongside ``set_ticker_walls`` from the REST chain recompute
         (``_recompute_symbol`` / ``_refresh_walls_for_symbol``) so the grid
         can price the options at the levels rather than at-the-money."""
-        if put_wall_call_price is None and call_wall_put_price is None:
+        if put_wall_call_price is None and call_wall_put_price is None and call_wall_call_price is None and put_wall_put_price is None:
             return
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
@@ -764,11 +798,15 @@ class AtmOptionVolumeService:
                 ticker["put_wall_call_price"] = float(put_wall_call_price)
             if call_wall_put_price is not None:
                 ticker["call_wall_put_price"] = float(call_wall_put_price)
+            if call_wall_call_price is not None:
+                ticker["call_wall_call_price"] = float(call_wall_call_price)
+            if put_wall_put_price is not None:
+                ticker["put_wall_put_price"] = float(put_wall_put_price)
 
     def get_ticker_wall_prices(self, display_symbol: str) -> dict:
-        """Return {call_price, put_price} for a tracked ticker, where
-        call_price is the CALL mark at the put-wall (support) strike and
-        put_price is the PUT mark at the call-wall (resistance) strike.
+        """Return option marks at the key wall strikes for a tracked ticker.
+        Keys returned: put_wall_call_price, call_wall_put_price,
+        call_wall_call_price, put_wall_put_price.
         Returns {} if the ticker is untracked or the prices have not been
         computed yet."""
         with self._lock:
@@ -776,12 +814,18 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return {}
             result = {}
-            _c = ticker.get("put_wall_call_price")
-            if _c is not None:
-                result["call_price"] = round(_c, 2)
-            _p = ticker.get("call_wall_put_price")
-            if _p is not None:
-                result["put_price"] = round(_p, 2)
+            _put_wall_call = ticker.get("put_wall_call_price")
+            if _put_wall_call is not None:
+                result["put_wall_call_price"] = round(_put_wall_call, 2)
+            _call_wall_put = ticker.get("call_wall_put_price")
+            if _call_wall_put is not None:
+                result["call_wall_put_price"] = round(_call_wall_put, 2)
+            _call_wall_call = ticker.get("call_wall_call_price")
+            if _call_wall_call is not None:
+                result["call_wall_call_price"] = round(_call_wall_call, 2)
+            _put_wall_put = ticker.get("put_wall_put_price")
+            if _put_wall_put is not None:
+                result["put_wall_put_price"] = round(_put_wall_put, 2)
             return result
 
     def _recalc_atm_if_moved(self, display_symbol: str, ticker: dict,
@@ -1370,18 +1414,26 @@ class AtmOptionVolumeService:
 
     def _process_trade_ticker(self, ticker: dict | None, price: float, size: int, opt_type: str):
         """Accumulate a trade into a per-ticker flow total (cumulative,
-        not a rolling window).  Called with self._lock held."""
+        not a rolling window).  Called with self._lock held.
+
+        Raw ``buy_vol`` / ``sell_vol`` (and the bullish/bearish feel)
+        stay as delta-adjusted contract buckets for the Buy/Sell columns
+        (buying calls and selling puts -> buy; selling calls and buying
+        puts -> sell).  Separately, each trade is weighted by its
+        front-month ATM delta (call > 0, put < 0) into ``delta_buy`` /
+        ``delta_sell`` so the Net Flow column shows net_delta = delta_buy
+        - delta_sell."""
         if ticker is None:
             return
         if opt_type == "CALL":
             direction = self._infer_dir(price, ticker["call_bid"], ticker["call_ask"])
+            _d = ticker.get("call_delta")
+            _d = _d if isinstance(_d, (int, float)) and _d else 0.5
         else:
             direction = self._infer_dir(price, ticker["put_bid"], ticker["put_ask"])
+            _d = ticker.get("put_delta")
+            _d = _d if isinstance(_d, (int, float)) and _d else -0.5
 
-        # buy_vol / sell_vol are delta-adjusted at the ATM: buying calls and
-        # selling puts are bullish (buy) pressure; selling calls and buying
-        # puts are bearish (sell) pressure.  So buy_vol == bullish and
-        # sell_vol == bearish by construction.
         if direction == "buy":
             if opt_type == "CALL":
                 ticker["bullish"] += size
@@ -1389,6 +1441,7 @@ class AtmOptionVolumeService:
             else:
                 ticker["bearish"] += size
                 ticker["sell_vol"] = ticker.get("sell_vol", 0) + size
+            signed = _d * size
         elif direction == "sell":
             if opt_type == "CALL":
                 ticker["bearish"] += size
@@ -1396,6 +1449,7 @@ class AtmOptionVolumeService:
             else:
                 ticker["bullish"] += size
                 ticker["buy_vol"] = ticker.get("buy_vol", 0) + size
+            signed = -_d * size
         else:
             # Unknown direction — split evenly between bullish and bearish
             half = size // 2
@@ -1403,17 +1457,25 @@ class AtmOptionVolumeService:
             ticker["bearish"] += size - half
             ticker["buy_vol"] = ticker.get("buy_vol", 0) + half
             ticker["sell_vol"] = ticker.get("sell_vol", 0) + size - half
+            signed = _d * half - _d * (size - half)
+
+        # Delta-weighted net flow for the Net Flow column.
+        if signed > 0:
+            ticker["delta_buy"] = ticker.get("delta_buy", 0.0) + signed
+        elif signed < 0:
+            ticker["delta_sell"] = ticker.get("delta_sell", 0.0) - signed
 
         # Rolling 60 s window of cumulative ATM volume for order absorption
         # (delta over the window is the recent aggressive flow) and of the
-        # cumulative net executed flow (buy - sell) for the 60 s net line.
+        # cumulative net executed flow (delta_buy - delta_sell) for the 60 s
+        # net line.
         now = _time_mod.time()
         vh = ticker.setdefault("vol_history", [])
         vh.append((now, ticker["bullish"] + ticker["bearish"]))
         while vh and vh[0][0] < now - 60:
             vh.pop(0)
         eh = ticker.setdefault("exec_history", [])
-        eh.append((now, ticker.get("buy_vol", 0) - ticker.get("sell_vol", 0)))
+        eh.append((now, ticker.get("delta_buy", 0.0) - ticker.get("delta_sell", 0.0)))
         while eh and eh[0][0] < now - 60:
             eh.pop(0)
 
