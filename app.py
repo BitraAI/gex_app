@@ -14,7 +14,6 @@ from chart_component import render_chart
 from flow import (
     _ensure_async_loop,
     _ticker_analytics_cache,
-    _tte_from_dtes,
     _WALL_ZONE_ALERT_COOLDOWN,
     ensure_atm_streaming,
     render_flow_frag,
@@ -29,7 +28,7 @@ from calculations import (
     build_greeks_lookup,
 )
 from analytics import _filter_strikes_near_atm, compute_analytics
-from signals import generate_recommendations, assess_market_bias
+from signals import generate_recommendations, assess_market_bias, _tte_from_dtes
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import _get_style, _get_css
 
@@ -573,57 +572,16 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
 
 
 
-def _build_strategy_alerts(analytics: dict, spot: float, rv: float) -> list[str]:
-    data = st.session_state.get("data", [])
-    if not data or rv <= 0:
-        return []
-    aks = sorted(set(e["strike"] for e in data))
-    atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
-    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and (e.get("iv", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
-    sd2 = _filter_strikes_near_atm(sd, spot, n=20)
-    ssvi_surf = analytics.get("ssvi_surface")
-    dtes = [e.get("dte", 0) for e in st.session_state.get("by_exp_all", [])]
-    ir_tte = _tte_from_dtes(dtes) if ssvi_surf and dtes else None
-    bias, _ = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))
-    alerts = []
-    recs = generate_recommendations(sd2, spot, strategy="All", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias)
-    recs = [r for r in recs if "No strong" not in r and "skip" not in r]
-    if recs:
-        alerts.append("Trade Signals:")
-        for r in recs[:5]:
-            alerts.append(f"  • {r}")
-    return alerts
-
-
 def check_alerts(analytics: dict, spot: float):
     s = st.session_state
     prev = s.prev_alerts_state
-    
-    # Collect options book trend data for wall zone verification
-    atm_svc = s.get("atm_option_service")
-    options_book_check_data = None
-    if atm_svc is not None:
-        try:
-            current_sym = _normalize_display_symbol(s.get("symbol", ""))
-            _ssvc = s.get("streaming_service")
-            trend_data = _ssvc.get_ticker_trend_data(current_sym) if _ssvc else None
-            if trend_data:
-                options_book_check_data = {
-                    "book_imbalance": trend_data.get("book_imbalance"),
-                    "trend": trend_data.get("trend"),
-                    "flow_speed": trend_data.get("flow_speed"),
-                    "flow_acceleration": trend_data.get("flow_acceleration"),
-                }
-        except Exception:
-            pass  # Use existing alerts if options_book data unavailable
     
     new_alerts, next_state = diff_alerts(prev, analytics, spot)
     s.prev_alerts_state = next_state
 
     rv = s.get("underlying_20d_rv", 0.0)
-    strat_alerts = _build_strategy_alerts(analytics, spot, rv) if rv > 0 else []
 
-    all_alerts = new_alerts + strat_alerts
+    all_alerts = new_alerts
 
     _last_alert_ts = st.session_state.get("_last_check_alert_ts", 0.0)
     _now = time.time()
@@ -632,8 +590,6 @@ def check_alerts(analytics: dict, spot: float):
         st.session_state.alerts = all_alerts + st.session_state.alerts[:20]
         tg_alerts = [a for a in all_alerts if "Wall changed" not in a]
         if tg_alerts:
-            atm_iv = analytics.get("atm_iv")
-            vrp = (atm_iv - rv) * 100 if atm_iv is not None and rv > 0 else None
             _cw = analytics.get("call_wall")
             _pw = analytics.get("put_wall")
             _wall_zone = None
@@ -646,13 +602,10 @@ def check_alerts(analytics: dict, spot: float):
                 symbol=st.session_state.get("symbol"),
                 spot=spot,
                 gex=analytics.get("net_gex"),
-                vrp=vrp,
+                rv=rv if rv > 0 else None,
                 iv_rank=st.session_state.get("iv_rank"),
                 wall_zone=_wall_zone, pw=_pw, cw=_cw,
                 wall_mark=analytics.get("call_wall_mark") if _wall_zone == "Resistance" else analytics.get("put_wall_mark"),
-                book_imbalance=(options_book_check_data or {}).get("book_imbalance"),
-                flow_speed=(options_book_check_data or {}).get("flow_speed"),
-                flow_acceleration=(options_book_check_data or {}).get("flow_acceleration"),
             )
 
 
@@ -1847,7 +1800,7 @@ def render_trade_signals():
         if not s.get("strikes"):
             return
         with st.expander("How to read these signals", expanded=False):
-            st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+2% option expensive (sell premium). &lt;-2% option cheap (buy premium).\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where the latest daily return ranks in the trailing 52-week range of daily returns. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
+            st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+5% option expensive (sell premium). &lt;-2% option cheap (buy premium).\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where the latest daily return ranks in the trailing 52-week range of daily returns. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")
 
         scan_all = st.checkbox("Scan all tickers in ticker_history.json", value=False, key="scan_all_tickers")
 

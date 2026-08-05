@@ -1,4 +1,9 @@
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from analytics import _filter_strikes_near_atm
+from calculations import aggregate_by_expiration
 
 
 def assess_market_bias(
@@ -77,7 +82,7 @@ def generate_recommendations(
     ssvi_surface: Any = None,
     ssvi_tte: float | None = None,
     bias: str | None = None,
-    dte_min: int = 30,
+    dte_min: int = 1,
     dte_max: int = 45,
 ) -> list[str]:
     recs = []
@@ -99,11 +104,11 @@ def generate_recommendations(
             exp_strike[ep] = s["strike"]
 
     sell_candidates = sorted(
-        [s for s in scored if exp_vrp.get(s["expiration"], 0) >= 2],
+        [s for s in scored if exp_vrp.get(s["expiration"], 0) >= 5],
         key=lambda s: exp_vrp.get(s["expiration"], 0), reverse=True,
     )
     buy_candidates = sorted(
-        [s for s in scored if exp_vrp.get(s["expiration"], 0) < -2],
+        [s for s in scored if exp_vrp.get(s["expiration"], 0) < -5],
         key=lambda s: exp_vrp.get(s["expiration"], 0),
     )
 
@@ -150,8 +155,8 @@ def generate_recommendations(
                 best_exp = min(cand_exps, key=lambda e: exp_vrp.get(e, 0))
                 if iv_skew is None or iv_skew <= 0:
                     recs.append(f"IV Skew {f'{iv_skew:+.2%}' if iv_skew is not None else 'N/A'} — not bullish for calls; skip Long Calls.")
-                elif exp_vrp.get(best_exp, 0) >= -2:
-                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≥ -2 — option not cheap; skip Long Calls.")
+                elif exp_vrp.get(best_exp, 0) >= -5:
+                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≥ -5 — option not cheap; skip Long Calls.")
                 else:
                     best_exp_candidates = [
                         e for e in candidates if e["expiration"] == best_exp
@@ -161,13 +166,13 @@ def generate_recommendations(
                         recs.append(f"No OTM calls with delta 0.35-0.55 in {best_exp[-5:]}.")
                     else:
                         best = min(best_exp_candidates, key=_rich)
-                        if _rich(best) >= -0.015:
+                        if _rich(best) >= -0.03:
                             recs.append(
                                 f"IV (pp) {_rich(best) * 100:+.2f}% — not cheap enough; skip Long Calls."
                             )
                         else:
                             recs.append(
-                                f"**Buy CALL @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                                f"BUY CALL @ {best['strike']:g} ({best_exp[-5:]}, ${best['mark']:.2f}) — "
                                 f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
                                 f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
                             )
@@ -190,8 +195,8 @@ def generate_recommendations(
                 best_exp = min(cand_exps, key=lambda e: exp_vrp.get(e, 0))
                 if iv_skew is None or iv_skew >= 0:
                     recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bearish for puts; skip Long Puts.")
-                elif exp_vrp.get(best_exp, 0) >= -2:
-                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≥ -2 — option not cheap; skip Long Puts.")
+                elif exp_vrp.get(best_exp, 0) >= -5:
+                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≥ -5 — option not cheap; skip Long Puts.")
                 else:
                     best_exp_candidates = [
                         e for e in candidates if e["expiration"] == best_exp
@@ -201,13 +206,13 @@ def generate_recommendations(
                         recs.append(f"No OTM puts with delta 0.35-0.55 in {best_exp[-5:]}.")
                     else:
                         best = min(best_exp_candidates, key=_rich)
-                        if _rich(best) >= -0.015:
+                        if _rich(best) >= -0.03:
                             recs.append(
                                 f"IV (pp) {_rich(best) * 100:+.2f}% — not cheap enough; skip Long Puts."
                             )
                         else:
                             recs.append(
-                                f"**Buy PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                                f"BUY PUT @ {best['strike']:g} ({best_exp[-5:]}, ${best['mark']:.2f}) — "
                                 f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
                                 f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
                             )
@@ -230,8 +235,8 @@ def generate_recommendations(
                 best_exp = max(cand_exps, key=lambda e: exp_vrp.get(e, 0))
                 if iv_skew is None or iv_skew >= 0:
                     recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bearish for calls; skip Short Calls.")
-                elif exp_vrp.get(best_exp, 0) <= 2:
-                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≤ 2 — option not rich; skip Short Calls.")
+                elif exp_vrp.get(best_exp, 0) <= 5:
+                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≤ 5 — option not rich; skip Short Calls.")
                 else:
                     best_exp_candidates = [
                         e for e in candidates if e["expiration"] == best_exp
@@ -241,7 +246,7 @@ def generate_recommendations(
                         recs.append(f"No OTM calls with delta 0.15-0.20 in {best_exp[-5:]}.")
                     else:
                         best = max(best_exp_candidates, key=_rich)
-                        if _rich(best) <= 0.015:
+                        if _rich(best) <= 0.08:
                             recs.append(
                                 f"IV (pp) {_rich(best) * 100:+.2f}% — not rich enough; skip Short Calls."
                             )
@@ -270,8 +275,8 @@ def generate_recommendations(
                 best_exp = max(cand_exps, key=lambda e: exp_vrp.get(e, 0))
                 if iv_skew is None or iv_skew <= 0:
                     recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bullish for puts; skip Short Puts.")
-                elif exp_vrp.get(best_exp, 0) <= 2:
-                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≤ 2 — option not rich; skip Short Puts.")
+                elif exp_vrp.get(best_exp, 0) <= 5:
+                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≤ 5 — option not rich; skip Short Puts.")
                 else:
                     best_exp_candidates = [
                         e for e in candidates if e["expiration"] == best_exp
@@ -281,7 +286,7 @@ def generate_recommendations(
                         recs.append(f"No OTM puts with delta 0.15-0.20 in {best_exp[-5:]}.")
                     else:
                         best = max(best_exp_candidates, key=_rich)
-                        if _rich(best) <= 0.015:
+                        if _rich(best) <= 0.08:
                             recs.append(
                                 f"IV (pp) {_rich(best) * 100:+.2f}% — not rich enough; skip Short Puts."
                             )
@@ -646,4 +651,52 @@ def generate_recommendations(
         recs.append("No strong signals — VRP near zero, dealer gamma balanced.")
 
     return recs
+
+
+def _tte_from_dtes(dtes: list[int]) -> float | None:
+    """Time-to-expiration (years) for the nearest listed expiration."""
+    valid = [d for d in dtes if d > 0]
+    if not valid:
+        return None
+    now = datetime.now(ZoneInfo("America/New_York"))
+    secs_since_930 = now.hour * 3600 + now.minute * 60 + now.second - 34200
+    secs_since_930 = max(0, min(secs_since_930, 23400))
+    secs_left = 23400 - secs_since_930
+    return (min(valid) + secs_left / 23400) / 365.0
+
+
+def build_strategy_alerts(
+    data: list[dict], analytics: dict, spot: float, rv: float,
+) -> list[str]:
+    """Build the Buy Premium / Sell Premium alert blocks from the option
+    chain.  The pool is narrowed to near-ATM OTM/ATM options with open
+    interest and a valid mark, then every signal condition (delta, DTE,
+    VRP, SSVI richness, skew, bias) is enforced inside
+    ``generate_recommendations``.  Informational recs are dropped so an
+    empty block is never produced."""
+    alerts: list[str] = []
+    aks = sorted(set(e["strike"] for e in data))
+    atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
+    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
+    sd2 = _filter_strikes_near_atm(sd, spot, n=20)
+
+    ssvi_surf = analytics.get("ssvi_surface")
+    dtes = [e.get("dte", 0) for e in aggregate_by_expiration(data, spot=spot)]
+    ir_tte = _tte_from_dtes(dtes) if ssvi_surf else None
+
+    bias, _ = assess_market_bias(analytics, spot, iv_rank=analytics.get("iv_rank"))
+
+    buy_recs = [r for r in generate_recommendations(sd2, spot, strategy="Long Calls", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "No OTM" not in r and "skip" not in r and "GEX Bias" not in r]
+    if buy_recs:
+        alerts.append("Buy Premium:")
+        for r in buy_recs[:3]:
+            alerts.append(f"  \u2022 {r}")
+
+    sell_recs = [r for r in generate_recommendations(sd2, spot, strategy="Short Calls", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "No OTM" not in r and "skip" not in r and "GEX Bias" not in r]
+    if sell_recs:
+        alerts.append("Sell Premium:")
+        for r in sell_recs[:3]:
+            alerts.append(f"  \u2022 {r}")
+
+    return alerts
 

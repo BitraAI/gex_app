@@ -20,8 +20,8 @@ import logging
 import os
 from functools import partial
 
-from analytics import _filter_strikes_near_atm, compute_analytics
-from calculations import aggregate_by_expiration, build_greeks_lookup, parse_option_chain
+from analytics import compute_analytics
+from calculations import build_greeks_lookup, parse_option_chain
 from client import (
     compute_iv_rank,
     fetch_option_chain,
@@ -29,7 +29,7 @@ from client import (
     get_interest_rate,
     get_yield,
 )
-from signals import generate_recommendations, assess_market_bias
+from signals import build_strategy_alerts
 from telegram_notifier import diff_alerts, notify_alerts
 
 
@@ -42,6 +42,13 @@ _strike_inc: dict[str, float] = {}       # known strike increment per ticker
 logger = logging.getLogger(__name__)
 
 _FETCH_RETRIES = 3
+
+# Trend cell de-bounce: the displayed direction must persist for this many
+# consecutive samples before the Trend cell flips, so noisy streaming
+# thresholds (book imbalance / flow speed) can't make the column flicker.
+# "flat" (neutral) is shown immediately so a quiet book never sits on stale
+# up/down text.
+_TREND_CONFIRM_SAMPLES = 3
 
 # Wall recompute cadence (hybrid trigger):
 #   - recompute when spot moves >= half a strike, or when MAX interval elapses
@@ -285,10 +292,12 @@ def ensure_atm_streaming(stream_symbol: str):
                             continue
                         _per_ticker.setdefault(_tk, {})[_label] = float(mark)
                     for _tk, _marks in _per_ticker.items():
-                        _wcall = _marks.get("call_wall")
-                        _wput = _marks.get("put_wall")
-                        if _wcall is not None or _wput is not None:
-                            atm_svc.set_ticker_wall_prices(_tk, _wcall, _wput)
+                        _pwc = _marks.get("put_wall_call")
+                        _cwp = _marks.get("call_wall_put")
+                        _cwc = _marks.get("call_wall_call")
+                        _pwp = _marks.get("put_wall_put")
+                        if _pwc is not None or _cwp is not None or _cwc is not None or _pwp is not None:
+                            atm_svc.set_ticker_wall_prices(_tk, _pwc, _cwp, _cwc, _pwp)
                         _acall = _marks.get("call_atm")
                         _aput = _marks.get("put_atm")
                         if _acall is not None or _aput is not None:
@@ -525,14 +534,15 @@ _WALL_ZONE_ALERT_COOLDOWN = 600.0  # min seconds between consecutive alerts per 
 _ABSORPTION_HIGH = 1000.0  # heavy flow absorbed, price pinned
 _ABSORPTION_LOW = 300.0    # price drifting on thin flow
 
-# Min contracts absorbed at a wall before a "wall broke" alert fires.
-_WALL_BREAK_MIN_ABSORBED = 100.0
+# Number of consecutive samples spot must stay *past* a broken wall (beyond
+# the near-wall margin) before a "wall broke" alert fires.  Confirmation stops
+# jitter right at the level from being misreported as a break.
+_WALL_BREAK_CONFIRM = 2
 
-# Conviction gate for Telegram trend alerts: the plain up/down signal must
-# reach _ALERT_MIN_CONVICTION_PLAIN metric agreements (0-5) before it fires;
-# reversals (bullish/bearish) are a stronger event and need only
-# _ALERT_MIN_CONVICTION_REVERSAL.
-_ALERT_MIN_CONVICTION_PLAIN = 3
+# Conviction gate for Telegram trend alerts: only reversals (bullish/bearish)
+# are surfaced as alerts now; the plain up/down direction no longer fires a
+# Telegram alert. Reversals need _ALERT_MIN_CONVICTION_REVERSAL metric
+# agreements (0-5) before they send.
 _ALERT_MIN_CONVICTION_REVERSAL = 2
 
 
@@ -542,6 +552,73 @@ def _wall_buffer(wall: float | None) -> float:
     if wall is None:
         return 0.0
     return max(abs(wall) * _WALL_ZONE_BUFFER, _WALL_ZONE_MIN_BUFFER)
+
+
+def _wall_price_marks(
+    opt_prices: dict,
+    wall_prices: dict,
+    call_wall: float | None,
+    put_wall: float | None,
+    spot: float | None,
+) -> tuple[float | None, float | None]:
+    """Return (CALL, PUT) marks at whichever wall (resistance/support) is
+    nearest to spot, falling back to the ATM prices when a wall-level mark is
+    unavailable.  Used by both the alert path and the grid columns so the
+    wall-pricing logic exists in one place."""
+    _dist_cw = abs(spot - call_wall) if call_wall is not None else float("inf")
+    _dist_pw = abs(spot - put_wall) if put_wall is not None else float("inf")
+    if _dist_cw <= _dist_pw:
+        _call_p = wall_prices.get("call_wall_call_price") or opt_prices.get("call_price")
+        _put_p = wall_prices.get("call_wall_put_price") or opt_prices.get("put_price")
+    else:
+        _call_p = wall_prices.get("put_wall_call_price") or opt_prices.get("call_price")
+        _put_p = wall_prices.get("put_wall_put_price") or opt_prices.get("put_price")
+    return _call_p, _put_p
+
+
+def _opt_mark_at_wall(
+    buy_side: str,
+    wall_strike: float | None,
+    call_wall: float | None,
+    put_wall: float | None,
+    wall_prices: dict,
+) -> float | None:
+    """Return the CALL/PUT option mark at a specific wall strike."""
+    if buy_side == "CALL":
+        return (
+            wall_prices.get("call_wall_call_price")
+            if wall_strike == call_wall
+            else wall_prices.get("put_wall_call_price")
+        )
+    return (
+        wall_prices.get("call_wall_put_price")
+        if wall_strike == call_wall
+        else wall_prices.get("put_wall_put_price")
+    )
+
+
+def _front_exp_tag(front_exp: str | None) -> str:
+    """Format a 'YYYY-MM-DD' expiration as a ' mm/dd' suffix ('' if missing)."""
+    if front_exp and len(front_exp) >= 10 and front_exp[4] == "-":
+        return f" {front_exp[5:7]}/{front_exp[8:10]}"
+    return ""
+
+
+def _trade_line(
+    buy_side: str,
+    wall_strike: float | None,
+    call_wall: float | None,
+    put_wall: float | None,
+    wall_prices: dict,
+    front_exp: str | None,
+) -> str:
+    """Build a '🟢 BUY CALL @ $strike dd/mm $price' trade-suggestion line used
+    by both the wall-broke and wall-reversal alerts."""
+    _trade_emoji = "🟢" if buy_side == "CALL" else "🔴"
+    _strike_tag = f" @ ${wall_strike:,.2f}" if wall_strike is not None else ""
+    _opt_price = _opt_mark_at_wall(buy_side, wall_strike, call_wall, put_wall, wall_prices)
+    _price_tag = f" ${_opt_price:,.2f}" if _opt_price is not None else ""
+    return f"{_trade_emoji} BUY {buy_side}{_strike_tag}{_front_exp_tag(front_exp)}{_price_tag}"
 
 
 def _conviction_score(
@@ -674,22 +751,24 @@ def maybe_fire_wall_zone_alerts() -> None:
         else:
             _wall_stable = 0
 
-        _opt_prices = atm_svc.get_ticker_option_prices(t_upper) or {}
         analytics = {
             "gamma_flip": None,
             "call_wall": call_wall,
             "put_wall": put_wall,
             "dealer_position": None,
             "atm_strike": atm_svc.get_ticker_atm_strike(t_upper),
-            "call_wall_mark": put_wall,
-            "put_wall_mark": call_wall,
+            "call_wall_mark": call_wall,
+            "put_wall_mark": put_wall,
         }
-        _cp = _opt_prices.get("call_price")  # ATM call mark (grid Call Price column)
-        _pp = _opt_prices.get("put_price")   # ATM put mark  (grid Put Price column)
-        if _cp is not None:
-            analytics["put_wall_mark"] = _cp  # BUY CALL signal shows the call price
-        if _pp is not None:
-            analytics["call_wall_mark"] = _pp  # BUY PUT signal shows the put price
+        _opt_prices = atm_svc.get_ticker_option_prices(t_upper) or {}
+        _wall_prices = atm_svc.get_ticker_wall_prices(t_upper) or {}
+        _call_p, _put_p = _wall_price_marks(_opt_prices, _wall_prices, call_wall, put_wall, spot)
+        analytics["call_wall_mark"] = call_wall
+        analytics["put_wall_mark"] = put_wall
+        if _call_p is not None:
+            analytics["call_wall_mark"] = _call_p
+        if _put_p is not None:
+            analytics["put_wall_mark"] = _put_p
         _ssvc = s.get("streaming_service")
         ticker_data = _ssvc.get_ticker_trend_data(t_upper) if _ssvc else {}
         new_alerts, next_state = diff_alerts(prev, analytics, spot)
@@ -698,22 +777,19 @@ def maybe_fire_wall_zone_alerts() -> None:
             wall_zone = "Resistance"
         elif put_wall is not None and spot <= put_wall + _wall_buffer(put_wall):
             wall_zone = "Support"
-        # Trend signal sourced directly from StreamingService.trend_data: a
-        # reversal (bullish/bearish) takes precedence, otherwise a clean
-        # direction (up/down). flat is not surfaced as an alert. This replaces
-        # the previous wall-zone buy/sell classifier.
+        # Trend signal sourced directly from StreamingService.trend_data: only
+        # a reversal (bullish/bearish) is surfaced as an alert now — the plain
+        # up/down direction no longer triggers a Telegram alert. flat is not
+        # surfaced as an alert. This replaces the previous wall-zone buy/sell
+        # classifier.
         _trend_reversal = ticker_data.get("trend_reversal")
-        _trend_dir = ticker_data.get("trend")
-        _trend_signal: str | None = None
-        if _trend_reversal in ("bullish", "bearish"):
-            _trend_signal = _trend_reversal
-        elif _trend_dir in ("up", "down"):
-            _trend_signal = _trend_dir
+        _trend_signal = (
+            _trend_reversal if _trend_reversal in ("bullish", "bearish") else None
+        )
 
-        # Conviction gate: a plain up/down signal must be corroborated by
-        # enough metrics before it becomes an alert, so weak/flat-ish trends
-        # stay quiet. Reversals (bullish/bearish) are a stronger event and
-        # clear with a lower bar. Wall-broke alerts bypass the gate entirely.
+        # Conviction gate: a reversal must be corroborated by enough metrics
+        # before it becomes an alert, so weak/flat-ish trends stay quiet.
+        # Wall-broke alerts bypass the gate entirely.
         if _trend_signal is not None:
             _net_60 = atm_svc.get_ticker_executed_flow(t_upper)[2]
             _absorption_now = atm_svc.get_ticker_absorption(t_upper)
@@ -726,34 +802,24 @@ def maybe_fire_wall_zone_alerts() -> None:
                 _net_60,
                 _absorption_now,
             )
-            _min_conv = (_ALERT_MIN_CONVICTION_REVERSAL
-                         if _trend_signal in ("bullish", "bearish")
-                         else _ALERT_MIN_CONVICTION_PLAIN)
-            _fire_trend = _conviction >= _min_conv
+            _fire_trend = _conviction >= _ALERT_MIN_CONVICTION_REVERSAL
         else:
             _net_60 = None
             _absorption_now = None
             _conviction = 0
             _fire_trend = False
 
-        # ---- Wall absorption (order absorption at the wall) ------------- #
+        # ---- Wall zone entry bookkeeping (for reversal absorption) ------ #
         # Snapshot cumulative ATM volume when spot enters a wall zone; while
-        # inside, "absorbed" is the flow consumed since entry.  When spot
-        # leaves the zone after absorbing a heavy volume, the wall is treated
-        # as BROKEN and a dedicated alert fires (high-conviction move).
+        # inside, ``_absorbed_at_wall`` is the flow consumed since entry.  This
+        # is reported on reversal/break headers as context only — it no longer
+        # *drives* the break trigger (see below), because raw cumulative volume
+        # inflates with quiet time spent in the zone and produced wrong signals.
         _flow_b, _flow_br = atm_svc.get_ticker_flow(t_upper)
         _flow_vol = (_flow_b or 0) + (_flow_br or 0) if _flow_b is not None else None
         _prev_zone = (prev or {}).get("_wall_zone")
         if _prev_zone != wall_zone:
-            if wall_zone is not None:
-                next_state["_zone_entry_vol"] = _flow_vol
-            else:
-                _entry_vol = (prev or {}).get("_zone_entry_vol")
-                if _prev_zone in ("Resistance", "Support") and _entry_vol is not None and _flow_vol is not None:
-                    _absorbed_at_zone = _flow_vol - _entry_vol
-                    if _absorbed_at_zone >= _WALL_BREAK_MIN_ABSORBED:
-                        new_alerts = [f"💥 {_prev_zone} wall BROKE after absorbing {_absorbed_at_zone:,.0f} contracts"]
-                next_state["_zone_entry_vol"] = None
+            next_state["_zone_entry_vol"] = _flow_vol if wall_zone is not None else None
         else:
             next_state["_zone_entry_vol"] = (prev or {}).get("_zone_entry_vol")
         next_state["_wall_zone"] = wall_zone
@@ -761,47 +827,117 @@ def maybe_fire_wall_zone_alerts() -> None:
         if wall_zone is not None and _flow_vol is not None and next_state.get("_zone_entry_vol") is not None:
             _absorbed_at_wall = max(0.0, _flow_vol - next_state["_zone_entry_vol"])
 
+        # ---- Wall broke: directional pierce ---------------------------- #
+        # A wall only "breaks" when spot decisively pierces THROUGH it —
+        # Resistance = spot settles ABOVE the call wall, Support = spot settles
+        # BELOW the put wall.  A margin (the near-wall buffer) plus a
+        # confirmation streak filters jitter at the level, and we require a
+        # prior held reading (prev is not None) so a ticker that starts a
+        # session already past a wall doesn't fire a phantom break.  This
+        # replaces the old zone-exit logic, which fired when spot merely left
+        # a proximity buffer — even when it moved away from the wall (wrong
+        # direction) — producing wrong signals.
+        _res_margin = _wall_buffer(call_wall) if call_wall is not None else 0.0
+        _supp_margin = _wall_buffer(put_wall) if put_wall is not None else 0.0
+        _res_broken_now = call_wall is not None and spot > call_wall + _res_margin
+        _supp_broken_now = put_wall is not None and spot < put_wall - _supp_margin
+        # Consecutive-sample confirmation: a pierce only counts once spot has
+        # stayed past the wall for _WALL_BREAK_CONFIRM samples (filters jitter
+        # right at the level).
+        _res_streak = ((prev or {}).get("_res_break_streak", 0) + 1) if _res_broken_now else 0
+        _supp_streak = ((prev or {}).get("_supp_break_streak", 0) + 1) if _supp_broken_now else 0
+        # "Warmed" = the ticker has been observed holding the wall (spot NOT
+        # past it) at least once, so a session that starts already past a wall
+        # can never fire a phantom break.
+        _res_warmed = (prev or {}).get("_res_warmed", False) or not _res_broken_now
+        _supp_warmed = (prev or {}).get("_supp_warmed", False) or not _supp_broken_now
+        _res_confirmed = _res_broken_now and _res_streak >= _WALL_BREAK_CONFIRM
+        _supp_confirmed = _supp_broken_now and _supp_streak >= _WALL_BREAK_CONFIRM
+        _res_broken_prev = (prev or {}).get("_res_confirmed", False)
+        _supp_broken_prev = (prev or {}).get("_supp_confirmed", False)
+        next_state["_res_break_streak"] = _res_streak
+        next_state["_supp_break_streak"] = _supp_streak
+        next_state["_res_warmed"] = _res_warmed
+        next_state["_supp_warmed"] = _supp_warmed
+        next_state["_res_confirmed"] = _res_confirmed
+        next_state["_supp_confirmed"] = _supp_confirmed
+
+        if (not new_alerts and prev is not None and _res_warmed
+                and not _res_broken_prev and _res_confirmed):
+            # Resistance broke: decisive break above the call wall (upside).
+            _wall_strike = call_wall
+            _front_exp = atm_svc.get_ticker_expiration(t_upper) if atm_svc else None
+            _abs_broke = _absorbed_at_wall if _absorbed_at_wall is not None else 0
+            new_alerts = [
+                f"💥 Resistance wall BROKE after absorbing {_abs_broke:,.0f} contracts",
+                _trade_line("CALL", _wall_strike, call_wall, put_wall, _wall_prices, _front_exp),
+            ]
+            if not hasattr(s, "_wall_break_alerts"):
+                s._wall_break_alerts = {}
+            s._wall_break_alerts[t_upper] = {"type": "broke", "zone": "Resistance", "strike": _wall_strike, "ts": now}
+        elif (not new_alerts and prev is not None and _supp_warmed
+              and not _supp_broken_prev and _supp_confirmed):
+            # Support broke: decisive break below the put wall (downside).
+            _wall_strike = put_wall
+            _front_exp = atm_svc.get_ticker_expiration(t_upper) if atm_svc else None
+            _abs_broke = _absorbed_at_wall if _absorbed_at_wall is not None else 0
+            new_alerts = [
+                f"💥 Support wall BROKE after absorbing {_abs_broke:,.0f} contracts",
+                _trade_line("PUT", _wall_strike, call_wall, put_wall, _wall_prices, _front_exp),
+            ]
+            if not hasattr(s, "_wall_break_alerts"):
+                s._wall_break_alerts = {}
+            s._wall_break_alerts[t_upper] = {"type": "broke", "zone": "Support", "strike": _wall_strike, "ts": now}
+
+        # ---- Wall reversal alert handling ---------------------- #
+        if _fire_trend and wall_zone is not None and not new_alerts:
+            # Send reversal alert at the wall instead of filtering
+            direction = _trend_signal
+            absorbed = _absorbed_at_wall if _absorbed_at_wall is not None else 0
+            _wall_strike = call_wall if wall_zone == "Resistance" else put_wall
+            new_alerts.append(f"💥 {wall_zone} wall {direction.upper()} REVERSAL after absorbing {absorbed:,.0f} contracts")
+            # Reversal direction maps to the trade side: bullish -> BUY CALL,
+            # bearish -> BUY PUT, at the wall strike where the reversal fired.
+            _buy_side = "CALL" if direction == "bullish" else "PUT"
+            _front_exp = atm_svc.get_ticker_expiration(t_upper) if atm_svc else None
+            new_alerts.append(_trade_line(_buy_side, _wall_strike, call_wall, put_wall, _wall_prices, _front_exp))
+            # Store reversal alert in session state for UI highlighting
+            s = st.session_state
+            if not hasattr(s, "_wall_reversal_alerts"):
+                s._wall_reversal_alerts = {}
+            s._wall_reversal_alerts[t_upper] = {"type": "reversal", "zone": wall_zone, "strike": _wall_strike, "ts": now, "direction": direction}
+            _fire_trend = False
+
         last_ts = (prev or {}).get("last_alert_ts", 0.0)
         next_state["last_alert_ts"] = last_ts
         next_state["_prev_call_wall"] = call_wall
         next_state["_prev_put_wall"] = put_wall
         next_state["_wall_stable_count"] = _wall_stable
-        if (new_alerts or _fire_trend) and _wall_stable >= 2 and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
+        # Wall-broke / reversal alerts are high-confidence (directional pierce
+        # confirmed or reversal with conviction), so they fire regardless of
+        # wall stability.  Only plain trend alerts are gated behind
+        # _wall_stable >= 2 to filter jittery moving walls.
+        _break_alert = bool(new_alerts)
+        if _break_alert:
+            _send_gate = now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN
+        else:
+            _send_gate = _fire_trend and _wall_stable >= 2 and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN
+        if _send_gate:
             next_state["last_alert_ts"] = now
             next_state["_last_alert_texts"] = new_alerts
             state[t_upper] = next_state
-            _cache = _ticker_analytics_cache.get(t_upper.split(":")[0])
-            if _cache:
-                _atm_iv = _cache.get("atm_iv")
-                _rv = _cache.get("rv", 0.0)
-                _vrp = (_atm_iv - _rv) * 100 if _atm_iv is not None and _rv > 0 else None
-                notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
-                              gex=_cache.get("net_gex"), vrp=_vrp,
-                              iv_rank=_cache.get("iv_rank"),
-                              wall_zone=wall_zone, pw=put_wall, cw=call_wall,
-                              wall_mark=analytics.get("call_wall_mark") if wall_zone == "Resistance" else analytics.get("put_wall_mark"),
-                              trend_alert=_trend_signal,
-                              book_imbalance=ticker_data.get("book_imbalance"),
-                              flow_speed=ticker_data.get("flow_speed"),
-                              flow_acceleration=ticker_data.get("flow_acceleration"),
-                              liquidity_flow=ticker_data.get("liquidity_flow"),
-                              absorption=_absorption_now,
-                              absorbed_at_wall=_absorbed_at_wall,
-                              net_flow=_net_60,
-                              disable_notification=False)
-            else:
-                notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
-                              wall_zone=wall_zone, pw=put_wall, cw=call_wall,
-                              wall_mark=analytics.get("call_wall_mark") if wall_zone == "Resistance" else analytics.get("put_wall_mark"),
-                              trend_alert=_trend_signal,
-                              book_imbalance=ticker_data.get("book_imbalance"),
-                              flow_speed=ticker_data.get("flow_speed"),
-                              flow_acceleration=ticker_data.get("flow_acceleration"),
-                              liquidity_flow=ticker_data.get("liquidity_flow"),
-                              absorption=_absorption_now,
-                              absorbed_at_wall=_absorbed_at_wall,
-                              net_flow=_net_60,
-                              disable_notification=False)
+            _cache = _ticker_analytics_cache.get(t_upper.split(":")[0]) or {}
+            _rv = _cache.get("rv", 0.0)
+            notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
+                          gex=_cache.get("net_gex"), rv=_rv if _rv > 0 else None,
+                          iv_rank=_cache.get("iv_rank"),
+                          wall_zone=wall_zone, pw=put_wall, cw=call_wall,
+                          wall_mark=analytics.get("call_wall_mark") if wall_zone == "Resistance" else analytics.get("put_wall_mark"),
+                          trend_alert=_trend_signal,
+                          absorption=_absorption_now,
+                          absorbed_at_wall=_absorbed_at_wall,
+                          net_flow=_net_60,
+                          disable_notification=False)
         else:
             state[t_upper] = next_state
 
@@ -809,71 +945,6 @@ def maybe_fire_wall_zone_alerts() -> None:
 # ---------------------------------------------------------------------------
 # Periodic ticker poller (replaces standalone telegram_alerts.py cron job)
 # ---------------------------------------------------------------------------
-
-def _tte_from_dtes(dtes: list[int]) -> float | None:
-    from zoneinfo import ZoneInfo
-    valid = [d for d in dtes if d > 0]
-    if not valid:
-        return None
-    now = datetime.now(ZoneInfo("America/New_York"))
-    secs_since_930 = now.hour * 3600 + now.minute * 60 + now.second - 34200
-    secs_since_930 = max(0, min(secs_since_930, 23400))
-    secs_left = 23400 - secs_since_930
-    return (min(valid) + secs_left / 23400) / 365.0
-
-
-
-def _build_by_exp_all(data: list[dict], spot: float = 0.0) -> list[dict]:
-    return aggregate_by_expiration(data, spot=spot)
-
-
-def _build_strategy_alerts(
-    data: list[dict], analytics: dict, spot: float, rv: float,
-) -> list[str]:
-    alerts: list[str] = []
-    aks = sorted(set(e["strike"] for e in data))
-    atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
-    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
-    sd2 = _filter_strikes_near_atm(sd, spot, n=20)
-
-    ssvi_surf = analytics.get("ssvi_surface")
-    dtes = [e.get("dte", 0) for e in _build_by_exp_all(data, spot)]
-    ir_tte = _tte_from_dtes(dtes) if ssvi_surf else None
-
-    def _iv_dec(opt: dict) -> float:
-        raw = opt.get("iv", 0) or 0
-        return raw / 100.0 if raw > 3.0 else raw
-
-    buy_sd = [e for e in sd2 if 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55]
-    buy_sd = [e for e in buy_sd if _iv_dec(e) - rv < 0]
-    buy_sd = [e for e in buy_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
-    if ssvi_surf and ir_tte:
-        buy_sd = [e for e in buy_sd if _iv_dec(e) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) < 0]
-
-    sell_sd = [e for e in sd2 if 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20]
-    sell_sd = [e for e in sell_sd if _iv_dec(e) - rv > 0.05]
-    sell_sd = [e for e in sell_sd if 30 <= (e.get("days_to_exp", 0) or 0) <= 45]
-    if ssvi_surf and ir_tte:
-        sell_sd = [e for e in sell_sd if _iv_dec(e) - ssvi_surf.iv(float(e["strike"]), float(ir_tte)) > 0]
-
-    bias, _ = assess_market_bias(analytics, spot, iv_rank=analytics.get("iv_rank"))
-
-    if buy_sd:
-        buy_recs = [r for r in generate_recommendations(buy_sd, spot, strategy="Long Calls", all_data=buy_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "skip" not in r and "GEX Bias" not in r]
-        if buy_recs:
-            alerts.append("Buy Premium:")
-            for r in buy_recs[:3]:
-                alerts.append(f"  \u2022 {r}")
-
-    if sell_sd:
-        sell_recs = [r for r in generate_recommendations(sell_sd, spot, strategy="Short Calls", all_data=sell_sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "skip" not in r and "GEX Bias" not in r]
-        if sell_recs:
-            alerts.append("Sell Premium:")
-            for r in sell_recs[:3]:
-                alerts.append(f"  \u2022 {r}")
-
-    return alerts
-
 
 async def _compute_walls_for_symbol(client, symbol: str) -> dict | None:
     """Lightweight recompute: fetch chain + parse + compute analytics only.
@@ -971,6 +1042,27 @@ async def _compute_for_symbol(client, symbol: str) -> dict | None:
     return {"analytics": analytics, "spot": spot, "rv": rv, "data": data, "iv_rank": iv_rank}
 
 
+def _atm_deltas_for_symbol(data: list, atm_strike: float | None):
+    """Return the front-month ATM Call delta (>0) and Put delta (<0) from a
+    chain ``data`` list, or (None, None) if unavailable."""
+    if not data or not atm_strike:
+        return None, None
+    atm_exps = sorted({
+        e["expiration"] for e in data if abs(e["strike"] - atm_strike) < 1e-9
+    })
+    if not atm_exps:
+        return None, None
+    front = atm_exps[0]
+    call_delta = put_delta = None
+    for e in data:
+        if abs(e["strike"] - atm_strike) < 1e-9 and e["expiration"] == front:
+            if e["type"] == "CALL" and call_delta is None:
+                call_delta = e.get("delta")
+            elif e["type"] == "PUT" and put_delta is None:
+                put_delta = e.get("delta")
+    return call_delta, put_delta
+
+
 async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> None:
     """Event-driven: fetch chain, recompute analytics, check zones, send alerts."""
     try:
@@ -1018,13 +1110,19 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                             elif e["type"] == "PUT" and _put_mark is None:
                                 _put_mark = e.get("mark")
                 atm_svc.set_ticker_option_prices(display_key, _call_mark, _put_mark)
+            # Front ATM Call/Put deltas (weight trades -> Net Flow column).
+            _atm_d = _atm_deltas_for_symbol(data, _atm_k)
+            atm_svc.set_ticker_atm_deltas(display_key, _atm_d[0], _atm_d[1])
             # Option marks at the key wall strikes: CALL at the put wall
-            # (support) and PUT at the call wall (resistance).  These are
-            # what the grid shows in the Call/Put Price columns.
+            # (support), PUT at the call wall (resistance), CALL at the
+            # call wall (resistance), and PUT at the put wall (support).
+            # These populate the grid's Call/Put Price columns.
             atm_svc.set_ticker_wall_prices(
                 display_key,
                 analytics.get("put_wall_call_price"),
                 analytics.get("call_wall_put_price"),
+                analytics.get("call_wall_mark"),
+                analytics.get("put_wall_mark"),
             )
 
         strikes = sorted(set(e["strike"] for e in data))
@@ -1048,19 +1146,28 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         next_sym_state["last_alert_ts"] = last_ts
         now_ts = _time_mod.monotonic()
 
-        strat_alerts = _build_strategy_alerts(data, analytics, spot, rv)
+        strat_alerts = build_strategy_alerts(data, analytics, spot, rv)
         all_alerts = new_alerts + strat_alerts
+        # Filter out "Wall changed" alerts permanently — only wall-broke, wall-reversal,
+        # and strategy recommendation alerts are sent to Telegram.
+        tg_alerts = [a for a in all_alerts if "Wall changed" not in a]
 
-        if all_alerts and now_ts - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
+        if tg_alerts and now_ts - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
             next_sym_state["last_alert_ts"] = now_ts
-            atm_iv = analytics.get("atm_iv")
-            vrp = (atm_iv - rv) * 100 if atm_iv is not None and rv > 0 else None
+            _cw = analytics.get("call_wall")
+            _pw = analytics.get("put_wall")
+            _wall_zone = None
+            if _cw is not None and spot >= _cw - _wall_buffer(_cw):
+                _wall_zone = "Resistance"
+            elif _pw is not None and spot <= _pw + _wall_buffer(_pw):
+                _wall_zone = "Support"
             await loop.run_in_executor(
                 None, partial(
-                    notify_alerts, all_alerts,
-                    symbol=api_symbol, spot=spot,
-                    gex=analytics.get("net_gex"), vrp=vrp,
-                    iv_rank=iv_rank, disable_notification=False,
+                notify_alerts, tg_alerts,
+                symbol=api_symbol, spot=spot,
+                gex=analytics.get("net_gex"),
+                iv_rank=iv_rank, wall_zone=_wall_zone, pw=_pw, cw=_cw,
+                    disable_notification=False,
                 ),
             )
 
@@ -1119,11 +1226,16 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
                             elif e["type"] == "PUT" and _put_mark is None:
                                 _put_mark = e.get("mark")
                 atm_svc.set_ticker_option_prices(display_key, _call_mark, _put_mark)
+            # Front ATM Call/Put deltas (weight trades -> Net Flow column).
+            _atm_d2 = _atm_deltas_for_symbol(data, _atm_k)
+            atm_svc.set_ticker_atm_deltas(display_key, _atm_d2[0], _atm_d2[1])
             # Option marks at the key wall strikes (Call/Put Price columns).
             atm_svc.set_ticker_wall_prices(
                 display_key,
                 analytics.get("put_wall_call_price"),
                 analytics.get("call_wall_put_price"),
+                analytics.get("call_wall_mark"),
+                analytics.get("put_wall_mark"),
             )
 
         strikes = sorted(set(e["strike"] for e in data))
@@ -1260,21 +1372,6 @@ def render_atm_order_flow_grid():
             spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
             # Get book imbalance and trend from ticker data (L2-sourced via
             # StreamingService.trend_data: trend is up/down/flat, reversal is
-            # bullish/bearish when the direction flips down->up / up->down).
-            book_imbalance = None
-            flow_speed = 0
-            flow_acceleration = 0
-            trend_display = "flat"
-            if _svc is not None:
-                ticker_data = _svc.get_ticker_trend_data(t_upper)
-                book_imbalance = ticker_data.get("book_imbalance")
-                flow_speed = ticker_data.get("flow_speed", 0)
-                flow_acceleration = ticker_data.get("flow_acceleration", 0)
-                # Reversal (bullish/bearish) takes precedence over the bare
-                # direction so the Trend column surfaces the flip the moment
-                # it is detected; otherwise show the current direction.
-                trend_display = ticker_data.get("trend_reversal") or ticker_data.get("trend") or "flat"
-            
             # Support (Put Wall) / Resistance (Call Wall): prefer per-ticker value
             # set by fetch_data, fall back to session-state analytics for the
             # current chart symbol so the columns are never empty without a manual
@@ -1289,14 +1386,62 @@ def render_atm_order_flow_grid():
             _net_60 = (
                 atm_svc.get_ticker_executed_flow(t_upper)[2] if atm_svc else None
             )
+            _call_p, _put_p = _wall_price_marks(opt_prices, wall_prices, call_wall_val, put_wall_val, spot)
+            
+            # Trend from streaming (bullish/bearish reversal or bare direction)
+            if _svc is not None:
+                ticker_data = _svc.get_ticker_trend_data(t_upper)
+                book_imbalance = ticker_data.get("book_imbalance")
+                flow_speed = ticker_data.get("flow_speed", 0)
+                flow_acceleration = ticker_data.get("flow_acceleration", 0)
+                # Reversal (bullish/bearish) takes precedence over the bare
+                # direction so the Trend column surfaces the flip the moment
+                # it is detected; otherwise show the current direction.
+                _candidate = ticker_data.get("trend_reversal") or ticker_data.get("trend") or "flat"
+            else:
+                ticker_data = {}
+                book_imbalance = None
+                flow_speed = 0
+                flow_acceleration = 0
+                _candidate = "flat"
+
+            # De-bounce / stickiness: the raw streaming direction oscillates
+            # around its thresholds, so a naive pass-through flickers.  Treat
+            # up/down as needing confirmation over several consecutive samples
+            # before the cell flips, and reset the streak on any change so the
+            # old display persists instead of flapping.
+            #
+            # Genuine reversals (bullish/bearish) are meaningful, rare flips and
+            # surface immediately (not debounced); "flat" (neutral) also applies
+            # right away so a quiet book never sits on stale up/down.
+            _trend_state = s.setdefault("_flow_trend_state", {})
+            if _candidate in ("bullish", "bearish"):
+                trend_display = _candidate
+                _trend_state[t_upper] = {"candidate": _candidate, "streak": 0, "display": _candidate}
+            elif _candidate == "flat" or not _candidate:
+                trend_display = "flat"
+                _trend_state[t_upper] = {"candidate": _candidate or "flat", "streak": 0, "display": "flat"}
+            else:
+                _prev = _trend_state.get(t_upper)
+                if _prev is None or _prev.get("candidate") != _candidate or _prev.get("streak", 0) == 0:
+                    _streak = 1
+                    _display = "flat"
+                else:
+                    _streak = _prev.get("streak", 0) + 1
+                    _display = _prev.get("display", "flat")
+                if _streak >= _TREND_CONFIRM_SAMPLES:
+                    _display = _candidate
+                _trend_state[t_upper] = {"candidate": _candidate, "streak": _streak, "display": _display}
+                trend_display = _display
+
             rows.append({
                 "Ticker": t_upper,
                 "Spot": spot,
                 "Expiration": atm_svc.get_ticker_expiration(t_upper) if atm_svc else None,
                 "Support": put_wall_val,
                 "Resistance": call_wall_val,
-                "Call Price": wall_prices.get("call_price") if wall_prices.get("call_price") is not None else opt_prices.get("call_price"),
-                "Put Price": wall_prices.get("put_price") if wall_prices.get("put_price") is not None else opt_prices.get("put_price"),
+                "Call Price": _call_p,
+                "Put Price": _put_p,
                 "Trend": trend_display,
                 "Book Imbalance": book_imbalance,
                 "Flow Speed": flow_speed,
@@ -1339,18 +1484,21 @@ def render_atm_order_flow_grid():
     # evenly across the columns and the headers wrap onto multiple lines
     # (see render_flow_legend_and_style for the `.flow-grid` CSS).
     def _trend_color(val):
-        """Color the Trend label (up/down/flat/bullish/bearish) by direction.
+        """Color the Trend label (up/down/flat/bullish/bearish/EMA 50 UP/DOWN) by direction.
 
         Reversal labels (bullish/bearish) are bolded to surface the flip;
         up/down are green/red; flat is amber.
+        EMA 50 UP/DOWN use the same colors as up/down.
         """
         if val is None:
             return ""
         val_l = val.lower()
         if val_l in ("bearish", "down"):
             return "color: #ef5350; font-weight: bold;"
-        if val_l in ("bullish", "up"):
+        if val_l in ("bullish", "up", "ema 50 up"):
             return "color: #00cc96; font-weight: bold;"
+        if val_l == "ema 50 down":
+            return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
     def _book_imbalance_color(val):
@@ -1414,89 +1562,85 @@ def render_atm_order_flow_grid():
         return "color: #ff9800; font-weight: bold;"
 
     def _spot_bg(row):
-        """Background color for the Spot cell based on near-wall pressure."""
-        spot = row["Spot"]
-        support = row["Support"]
-        resistance = row["Resistance"]
-        score = 0
-        _near_wall = False
-        if spot is not None and support is not None:
-            pw_buf = _wall_buffer(support)
-            if spot <= support + pw_buf:
-                score += 1
-                _near_wall = True
-        if spot is not None and resistance is not None:
-            cw_buf = _wall_buffer(resistance)
-            if spot >= resistance - cw_buf:
-                score -= 1
-                _near_wall = True
-        if _near_wall:
-            bi = row.get("Book Imbalance")
-            if bi is not None:
-                if bi > 0.3:
-                    score += 1
-                elif bi < -0.3:
-                    score -= 1
-            fs = row.get("Flow Speed")
-            if fs is not None:
-                if fs > 0:
-                    score += 1
-                elif fs < 0:
-                    score -= 1
-            fa = row.get("Flow Acceleration")
-            if fa is not None:
-                if fa > 0:
-                    score += 1
-                elif fa < 0:
-                    score -= 1
-        if score >= 2:
-            return "background-color: #a5d6a7;"
-        if score == 1:
-            return "background-color: #ccffcc;"
-        if score <= -2:
-            return "background-color: #ef9a9a;"
-        if score == -1:
-            return "background-color: #ffcccc;"
+        """Background color for the Spot cell based on wall break/reversal alerts."""
+        s = st.session_state
+        # Check for wall break alerts first
+        if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
+            alert = s._wall_break_alerts[row["Ticker"]]
+            if alert.get("zone") == "Support":
+                return "background-color: #b71c1c; color: #ffffff; font-weight: bold;"  # DARK RED for Support wall broke
+            if alert.get("zone") == "Resistance":
+                return "background-color: #1b5e20; color: #ffffff; font-weight: bold;"  # DARK GREEN for Resistance wall broke
+        # Check for wall reversal alerts
+        if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
+            alert = s._wall_reversal_alerts[row["Ticker"]]
+            if alert.get("zone") == "Support":
+                return "background-color: #ccffcc;"  # GREEN for Support wall reversal
+            if alert.get("zone") == "Resistance":
+                return "background-color: #ffcccc;"  # RED for Resistance wall reversal
         return ""
 
     def _support_bg(row):
-        """Background for the Support cell: green when spot is trading near
-        the support (put wall) level."""
+        """Background for the Support cell: RED when Support wall broke, GREEN when Support wall reversal occurred."""
         spot = row["Spot"]
         support = row["Support"]
+        # RED if Support wall broke in this ticker
         if spot is not None and support is not None:
             if spot <= support + _wall_buffer(support):
-                return "background-color: #ccffcc;"
+                # Check if this is a wall break event
+                s = st.session_state
+                if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
+                    alert = s._wall_break_alerts[row["Ticker"]]
+                    if alert.get("zone") == "Support":
+                        return "background-color: #ffcccc;"  # RED for Support wall broke
+                # GREEN if this is a reversal event
+                if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
+                    alert = s._wall_reversal_alerts[row["Ticker"]]
+                    if alert.get("zone") == "Support":
+                        return "background-color: #ccffcc;"  # GREEN for Support wall reversal
         return ""
 
     def _resistance_bg(row):
-        """Background for the Resistance cell: red when spot is trading near
-        the resistance (call wall) level."""
+        """Background for the Resistance cell: GREEN when Resistance wall broke, RED when Resistance wall reversal occurred."""
         spot = row["Spot"]
         resistance = row["Resistance"]
+        # GREEN if Resistance wall broke, RED if Resistance wall reversal in this ticker
         if spot is not None and resistance is not None:
             if spot >= resistance - _wall_buffer(resistance):
-                return "background-color: #ffcccc;"
+                s = st.session_state
+                # Check for Resistance wall break event
+                if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
+                    alert = s._wall_break_alerts[row["Ticker"]]
+                    if alert.get("zone") == "Resistance":
+                        return "background-color: #ccffcc;"  # GREEN for Resistance wall broke
+                # Check for Resistance wall reversal event
+                if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
+                    alert = s._wall_reversal_alerts[row["Ticker"]]
+                    if alert.get("zone") == "Resistance":
+                        return "background-color: #ffcccc;"  # RED for Resistance wall reversal
         return ""
 
     def _call_price_bg(row):
-        """Background for the Call Price cell (CALL mark at the put-wall /
-        support strike): green when spot is trading near the support level."""
-        spot = row["Spot"]
-        support = row["Support"]
-        if spot is not None and support is not None:
-            if spot <= support + _wall_buffer(support):
+        """Background for the Call Price cell: GREEN for Resistance wall broke
+        or reversal at Support wall."""
+        s = st.session_state
+        if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
+            if s._wall_break_alerts[row["Ticker"]].get("zone") == "Resistance":
+                return "background-color: #ccffcc;"
+        if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
+            if s._wall_reversal_alerts[row["Ticker"]].get("zone") == "Support":
                 return "background-color: #ccffcc;"
         return ""
 
     def _put_price_bg(row):
-        """Background for the Put Price cell (PUT mark at the call-wall /
-        resistance strike): green when spot is trading near the resistance
-        level."""
-        spot = row["Spot"]
-        resistance = row["Resistance"]
-        if spot is not None and resistance is not None:
-            if spot >= resistance - _wall_buffer(resistance):
+        """Background for the Put Price cell: GREEN for Support wall broke
+        or reversal at Resistance wall."""
+        s = st.session_state
+        if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
+            if s._wall_break_alerts[row["Ticker"]].get("zone") == "Support":
+                return "background-color: #ccffcc;"
+        if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
+            if s._wall_reversal_alerts[row["Ticker"]].get("zone") == "Resistance":
                 return "background-color: #ccffcc;"
         return ""
 

@@ -4,6 +4,7 @@ import time as _time_mod
 
 import pandas as pd
 from schwab.streaming import StreamClient
+from websockets.exceptions import ConnectionClosed
 
 from _constants import MAX_BAR_ROWS
 from option_streaming_service import _get_stream_symbol
@@ -480,6 +481,13 @@ class StreamingService:
                 await sc.options_book_subs(subscribe)
             if unsubscribe:
                 await sc.options_book_unsubs(unsubscribe)
+        except ConnectionClosed:
+            # Expected race: the websocket was torn down (e.g. re-login or a
+            # normal server-side close) between scheduling this send and it
+            # running — "received 1000 (OK); then sent 1000 (OK)".  The
+            # stream loop re-subscribes all contracts after the next login
+            # via _subscribe_books, so nothing is lost.
+            pass
         except Exception as e:
             # Don't wedge silently: if a SUBS is rejected (bad symbol, budget,
             # socket race) the next refresh's full SUBS retries it.  Surface
@@ -588,10 +596,11 @@ class StreamingService:
         ``flow_speed`` is the first difference of the ratio over the trailing
         60 s window (``history[-1] - history[0]``).  ``flow_acceleration`` is
         the second difference: the change over the recent half of the window
-        minus the change over the older half, split at the exact midpoint so
-        every sample contributes.  Sign semantics match the legacy
-        option-flow momentum math so the same >0.3 thresholds apply
-        downstream.
+        minus the change over the older half.  The halves are split at the
+        exact **time** midpoint of the window (``mid_ts``), so older/recent
+        cover equal wall-clock spans even when book updates arrive in bursts
+        rather than uniformly.  Sign semantics match the legacy option-flow
+        momentum math so the same >0.3 thresholds apply downstream.
 
         Assumes *self._lock* is held.
         """
@@ -606,8 +615,16 @@ class StreamingService:
         # first difference of the ratio over the trailing 60 s window
         flow_speed = history[-1][1] - history[0][1]
         # second difference: (change over recent half) - (change over older
-        # half), split at the exact midpoint so every sample is used.
-        mid = max(1, len(history) // 2)
+        # half).  Split at the window's midpoint by timestamp so the halves
+        # are time-balanced regardless of sampling cadence.  `mid` is the
+        # first sample at/after mid_ts, clamped to keep both halves non-empty.
+        mid_ts = history[0][0] + (history[-1][0] - history[0][0]) / 2.0
+        mid = len(history) - 1
+        for i in range(1, len(history)):
+            if history[i][0] >= mid_ts:
+                mid = i
+                break
+        mid = max(1, min(len(history) - 1, mid))
         previous_flow = history[mid - 1][1] - history[0][1]
         recent_flow = history[-1][1] - history[mid][1]
         flow_acceleration = recent_flow - previous_flow

@@ -33,7 +33,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Dealer Position (Long/Short Gamma)
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
    - IV Rank — Where the latest daily return sits in the trailing 52-week range of daily returns. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
-    - **Order Flow** — Real-time ATM option flow for every tracked ticker, shown in the **Order Flow** tab. Subscribes to front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming (with L2 options book support). Each ticker uses its own per-ticker expiration (fetched lazily), so non-primary tickers subscribe to the correct option contracts. The grid shows per-ticker Spot, ATM Strike, Support (Put Wall) / Resistance (Call Wall), ATM Call/Put prices, a **Trend** label (`up` / `down` / `UP` / `DOWN` / `bullish` / `bearish` / `flat`), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed**, and **Flow Acceleration** (first / second differences of the L2 book-imbalance series), all sourced from `StreamingService.trend_data()`, plus **Absorption** (ATM option volume per $1 of spot move over 60 s — how much flow the book soaked up without moving price), **Liquidity Flow** (net change in L2 resting depth over 60 s — liquidity added/drained), **Buy/Sell** (session-cumulative executed flow split by aggressor side), and **Net Flow** (60 s buy − sell). Streaming starts when you Refresh a ticker on the main page.
+    - **Order Flow** — Real-time ATM option flow for every tracked ticker, shown in the **Order Flow** tab. Subscribes to front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming (with L2 options book support). Index symbols (`$SPX`/`$RUT`/`$NDX`) stream their ETF proxy's options (`SPY`/`IWM`/`QQQ`) at the proxy's ATM strike, so Book Imbalance works for indices too. Each ticker uses its own per-ticker expiration (fetched lazily), so non-primary tickers subscribe to the correct option contracts. The grid shows per-ticker Spot, ATM Strike, Support (Put Wall) / Resistance (Call Wall), ATM Call/Put prices (refreshed every ~2 s from REST option marks — index-option root for indices), a **Trend** label (`up` / `down` / `UP` / `DOWN` / `bullish` / `bearish` / `flat`), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed**, and **Flow Acceleration** (first / second differences of the L2 book-imbalance series), all sourced from `StreamingService.trend_data()`, plus **Absorption** (ATM option volume per $1 of spot move over 60 s — how much flow the book soaked up without moving price), **Liquidity Flow** (net change in L2 resting depth over 60 s — liquidity added/drained), **Buy/Sell** (session-cumulative executed flow split by aggressor side), and **Net Flow** (60 s buy − sell; each trade print updates every tracked ticker sharing that option root, so tracking both `$SPX` and `SPY` updates both rows). Streaming starts when you Refresh a ticker on the main page.
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
@@ -44,13 +44,13 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Buy Premium includes Calendar Spread, Long LEAPS
   - **Multi-ticker scan** — Tick the "Scan all tickers in ticker_history.json" box to run the same signal pipeline (Buy/Sell Premium with the selected strategy) across every ticker listed in `~/.local/share/gex_app/ticker_history.json`; results are shown grouped per ticker.
     - **Per-strategy filters** (applied before scoring):
-      - **Buy Premium:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 30–45
-        - **Long Calls:** gate `iv_skew > 0` & selected-expiration VRP `< 0`; strike CALL `> spot`, lowest SSVI richness (pp) `< 0`
-        - **Long Puts:** gate `iv_skew < 0` & selected-expiration VRP `< 0`; strike PUT `< spot`, highest SSVI richness (pp) `< 0`
-      - **Long LEAPS:** delta 0.35–0.55, VRP < 0, IV Richness < 0, DTE 90–365
-      - **Sell Premium:** delta 0.15–0.20, VRP > 0.05, IV Richness > 0, DTE 30–45
-        - **Short Calls:** gate `iv_skew < 0` & selected-expiration VRP `> 0`; strike CALL `> spot`, highest SSVI richness (pp) `> 0`
-        - **Short Puts:** gate `iv_skew > 0` & selected-expiration VRP `> 0`; strike PUT `< spot`, lowest SSVI richness (pp) `> 0`
+      - **Buy Premium:** delta 0.35–0.55, VRP < −5, IV Richness < −3pp, DTE 1–45
+        - **Long Calls:** gate `iv_skew > 0` & selected-expiration VRP `< −5`; strike CALL `> spot`, lowest SSVI richness (pp) `< −3`
+        - **Long Puts:** gate `iv_skew < 0` & selected-expiration VRP `< −5`; strike PUT `< spot`, highest SSVI richness (pp) `< −3`
+      - **Long LEAPS:** delta 0.35–0.55, VRP < −5, IV Richness < −3pp, DTE 90–365
+      - **Sell Premium:** delta 0.15–0.20, VRP ≥ 5% (0.05), IV Richness > +8pp, DTE 1–45
+        - **Short Calls:** gate `iv_skew < 0` & selected-expiration VRP `> 0`; strike CALL `> spot`, highest SSVI richness (pp) `> 8`
+        - **Short Puts:** gate `iv_skew > 0` & selected-expiration VRP `> 0`; strike PUT `< spot`, lowest SSVI richness (pp) `> 8`
       - Single-ticker view restricts scoring to the **selected expiration** so displayed VRP is the selected expiration's VRP and the strike is from that expiration.
 - **Automatic Data Filtering:**
   - **±20 strikes around ATM** applied across all heatmaps (OI, Volume, IV Richness, VRP), positioning charts (OI, Volume), dealer curve (GEX, VEX, CEX), and volatility charts (IV, IV Richness, VRP)
@@ -68,8 +68,8 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 - **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
   - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
   - **Trend alerts:** `bullish` / `bearish` (reversals) and `up` / `down` directional signals (sourced from `StreamingService.trend_data()` L2 book-imbalance momentum near a wall) sent with a trade suggestion (`BUY CALL` / `BUY PUT`)
-  - **Order absorption:** `Absorption` (vol/$1) and `Wall absorbed` headers on trend/wall alerts, plus a 💥 "wall BROKE after absorbing N contracts" alert when a wall that soaked up heavy flow finally breaks
-  - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
+   - **Order absorption:** `Absorption` (vol/$1) and `Wall absorbed` headers on trend/wall alerts, plus a 💥 "wall BROKE after absorbing N contracts" alert when a wall finally breaks
+  - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" and "No OTM ..." informational messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
   Two delivery paths:
   - **In-app (single-ticker):** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
   - **In-app (multi-ticker):** `flow.maybe_fire_wall_zone_alerts()` runs on every Order Flow grid refresh and diffs every tracked ticker in `ticker_history.json` against the persisted per-symbol baseline — no cron / standalone runner required.
@@ -212,7 +212,7 @@ You can then open the app in your local browser.
    - **Drag the price-scale labels** (right edge) to zoom the Y-axis, or the **time-scale labels** (bottom) to zoom the X-axis.
    - **Scroll the mouse wheel** to zoom the X-axis (bar spacing).
    - The Y zoom persists across the live 1-second streaming updates — drag it to where you want and the chart stays there.
- 8. **Order Flow** — open the **Order Flow** tab to see the real-time ATM order-flow grid for every ticker in `ticker_history.json`. Columns: Ticker, Spot, ATM Strike, Expiration, Support (Put Wall), Resistance (Call Wall), Call Price, Put Price, **Trend** (`up` / `down` / `UP` / `DOWN` / `bullish` / `bearish` / `flat` — see `StreamingService.trend_data()`), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed**, and **Flow Acceleration** (first / second differences of the L2 book-imbalance series), plus a market status indicator (green `●` when market is open, amber `●` when closed). Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
+ 8. **Order Flow** — open the **Order Flow** tab to see the real-time ATM order-flow grid for every ticker in `ticker_history.json`. Columns: Ticker, Spot, ATM Strike, Expiration, Support (Put Wall), Resistance (Call Wall), Call Price, Put Price, **Trend** (`up` / `down` / `UP` / `DOWN` / `bullish` / `bearish` / `flat` — see `StreamingService.trend_data()`), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed**, and **Flow Acceleration** (first / second differences of the L2 book-imbalance series), plus a market status indicator (green `●` when market is open, amber `●` when closed). Call/Put prices refresh every ~2 s; index symbols (`$SPX`/`$RUT`/`$NDX`) stream via their ETF proxy at proxy strikes and quote index-option roots. Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
 
 ## Architecture
 
