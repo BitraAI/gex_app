@@ -124,7 +124,6 @@ client_id = "YOUR_CLIENT_ID"
 client_secret = "YOUR_CLIENT_SECRET"
 callback_url = "https://127.0.0.1:8182/"
 token_file = "~/.local/share/gex_app/schwab_token.json"
-base_url = "https://api.schwabapi.com"
 max_token_age_days = 7
 ```
 
@@ -218,29 +217,39 @@ You can then open the app in your local browser.
 
 ```
 gex_app/
-├── app.py                 # Main Streamlit application
-├── flow.py               # Shared ATM Order Flow rendering (grid, market status indicator, session defaults, market-hours check)
-├── analytics.py           # Analytical calculations (walls, flip, skew, etc.)
-├── calculations.py        # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
-├── charts.py              # Plotly chart generators
-├── chart_component.py     # Lightweight Charts HTML/JS component (custom indicators, dual-axis pan/zoom, VPVR overlay, Y-range persistence across streaming re-renders)
-├── client.py              # Schwab API client wrapper
-├── option_streaming_service.py  # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, per-ticker expiration, 1s aggregation with buy/sell split — shares the equity StreamClient)
-├── streaming_service.py   # Schwab WebSocket streaming (Level 1 + Level 2 options books, 1s OHLCV aggregation with tick-direction buy/sell volume split)
-├── config.py              # Application configuration (single-parse of config.toml)
-├── config.toml            # Schwab credentials and settings
-├── config.toml.example    # Example configuration template
-├── schwab_auth.py         # OAuth authentication script
-├── signals.py             # Strategy signals engine (scoring, recommendations, bias)
-├── telegram_notifier.py   # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
-├── svi.py                 # SSVI volatility surface (Raw SVI + SSVI surface calibration)
-├── test_calculations.py   # Unit tests for calculations
-├── test_streaming.py      # Unit tests for streaming service
-├── requirements.txt       # Python dependencies
-├── run.sh                 # Convenience run script
-├── assets/                # Screenshots of charts and dashboard panels
-├── LICENSE                # License file
-└── README.md              # This file
+├── app.py                              # Main Streamlit application
+├── flow.py                             # Shared ATM Order Flow rendering (grid, market status indicator, session defaults, market-hours check)
+├── analytics.py                        # Analytical calculations (walls, flip, skew, etc.)
+├── calculations.py                     # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
+├── charts.py                           # Plotly chart generators
+├── chart_component.py                  # Lightweight Charts HTML/JS component (custom indicators, dual-axis pan/zoom, VPVR overlay, Y-range persistence across streaming re-renders)
+├── client.py                           # Schwab API client wrapper (auth, quotes, chains, candles, rate-limit retries)
+├── config.py                           # Application configuration (single-parse of config.toml)
+├── config.toml                         # Schwab credentials and settings (NOT committed — see .gitignore)
+├── config.toml.example                 # Example configuration template
+├── schwab_auth.py                      # OAuth authentication script
+├── _constants.py                       # Static symbol maps (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS, MAX_BAR_ROWS)
+├── index_spot_poller.py               # Background poller for index symbol REST quotes ($SPX/$RUT/$NDX → proxy ETF spots)
+├── news_service.py                    # RSS news fetching + sentiment tagging
+├── option_streaming_service.py        # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, per-ticker expiration, 1s aggregation with buy/sell split — shares the equity StreamClient)
+├── streaming_service.py               # Schwab WebSocket streaming (Level 1 + Level 2 options books, 1s OHLCV aggregation with tick-direction buy/sell volume split)
+├── signals.py                         # Strategy signals engine (scoring, recommendations, bias)
+├── svi.py                             # SSVI volatility surface (Raw SVI + SSVI surface calibration)
+├── telegram_notifier.py               # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
+├── run.sh                             # Convenience run script
+├── requirements.txt                   # Python dependencies
+├── pyproject.toml                     # Project metadata + pytest config (pythonpath=., testpaths=tests)
+├── assets/                            # Screenshots of charts and dashboard panels
+├── tests/                             # Unit tests
+│   ├── conftest.py                    # Shared pytest fixtures (svc, ticker, fixed_now)
+│   ├── test_calculations.py           # Unit tests for calculations
+│   ├── test_option_streaming.py       # Unit tests for option streaming service
+│   └── test_flow_alerts.py            # Unit tests for wall-buffer, conviction, and alert helpers in flow.py
+├── CANDLESTICS.md                     # Candlestick chart internals (indicators, dual-axis pan/zoom, Y-range persistence)
+├── FLOW.md                            # ATM order-flow architecture (streaming, absorption, liquidity, net flow)
+├── SIGNALS.md                         # Strategy-signal logic (scoring, filters, market bias)
+├── LICENSE                            # License file
+└── README.md                          # This file
 ```
 
 ### Calculation Details

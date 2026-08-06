@@ -15,6 +15,7 @@ from flow import (
     _ensure_async_loop,
     _ticker_analytics_cache,
     _WALL_ZONE_ALERT_COOLDOWN,
+    _strike_inc,
     ensure_atm_streaming,
     render_flow_frag,
     run_async,
@@ -31,9 +32,16 @@ from analytics import _filter_strikes_near_atm, compute_analytics
 from signals import generate_recommendations, assess_market_bias, _tte_from_dtes
 from telegram_notifier import notify_alerts, diff_alerts
 from charts import _get_style, _get_css
+from config import validate_config
 
 
 from zoneinfo import ZoneInfo
+
+# Fail fast with a clear, actionable message if config.toml / env vars are
+# missing required credentials — otherwise the user hits a cryptic traceback
+# only after clicking Refresh.  Done at module scope (before main) so the
+# banner always renders.
+_CONFIG_ERRORS = validate_config()
 
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
 # imported by another module — calling it twice raises StreamlitAPIException.
@@ -116,6 +124,18 @@ if not st.session_state.ticker_history:
 st.markdown(_get_css(), unsafe_allow_html=True)
 
 
+def sync_index_poller() -> None:
+    """Re-sync the IndexSpotPoller's ticker set with the current ticker_history.
+
+    Called whenever a ticker is added or removed so the poller stops polling
+    symbols the user no longer tracks (prevents phantom _ticker_flows entries
+    that produce spurious alerts) and starts polling newly-added index symbols.
+    """
+    poller = st.session_state.get("index_spot_poller")
+    if poller:
+        poller.update_tickers(list(st.session_state.get("ticker_history", [])))
+
+
 def init_client():
     loop = _ensure_async_loop()
     loop_changed = st.session_state.get("_async_loop_id") is not None and st.session_state._async_loop_id is not loop
@@ -144,7 +164,7 @@ def init_client():
         poller = IndexSpotPoller(st.session_state.client, loop)
         st.session_state.index_spot_poller = poller
     if not poller.is_running and st.session_state.get("atm_option_service"):
-        poller.update_tickers(list(st.session_state.get("ticker_history", [])))
+        sync_index_poller()
         poller.start(st.session_state.atm_option_service)
 
     # News service (Yahoo Finance RSS polling)
@@ -313,6 +333,7 @@ def fetch_data(symbol: str) -> bool:
         st.session_state.ticker_history.insert(0, symbol)
         st.session_state.ticker_history = st.session_state.ticker_history[:20]
         _save_ticker_history(st.session_state.ticker_history)
+        sync_index_poller()
     st.session_state.last_refresh = datetime.now()
     st.session_state.underlying_20d_rv = run_async(get_20d_rv(st.session_state.client, symbol))
     st.session_state.next_earnings_date = run_async(get_next_earnings_date(st.session_state.client, symbol))
@@ -331,6 +352,17 @@ def fetch_data(symbol: str) -> bool:
     if atm_svc:
         _ana = st.session_state.get("analytics") or {}
         atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"))
+    # Populate the per-ticker strike increment (used by
+    # maybe_fire_wall_zone_alerts to size the wall-refresh / big-move
+    # thresholds).  Without this, the default 1.0 is used until the first
+    # REST wall recompute for a non-primary ticker, which can make the
+    # half-strike threshold too large (lazy walls for SPY, NDX etc.) or
+    # too small (noisy refreshes for SPX).
+    _strikes = sorted(set(e["strike"] for e in data))
+    if len(_strikes) >= 2:
+        _strike_inc[_normalize_display_symbol(_sym)] = min(
+            _strikes[i + 1] - _strikes[i] for i in range(len(_strikes) - 1)
+        )
     st.session_state.etf_analytics = etf_analytics
     if etf_analytics and st.session_state.analytics.get("net_gex", 0) == 0:
         for key in ("net_gex", "total_call_gex", "total_put_gex",
@@ -713,6 +745,7 @@ def render_sidebar():
                     ticker_history.remove(to_remove)
                     st.session_state.ticker_history = ticker_history
                     _save_ticker_history(ticker_history)
+                    sync_index_poller()
                     st.rerun()
             symbol = st.session_state.get("symbol", "")
         else:
@@ -722,7 +755,7 @@ def render_sidebar():
         if refresh and symbol:
             with st.spinner(f"Loading {symbol} option chain..."):
                 fetch_data(symbol)
-            # Signal render_candlesticks to force a refresh on next tick
+            # Signal render_candlesticks_frag to force a refresh on next tick
             st.session_state["_force_candle_refresh"] = symbol
 
         st.markdown("### Expiration")
@@ -2156,6 +2189,17 @@ def render_tabs_frag():
 
 
 def main():
+    if _CONFIG_ERRORS:
+        st.error("## Configuration Required")
+        for _err in _CONFIG_ERRORS:
+            st.markdown(f"- {_err}")
+        st.markdown("")
+        st.markdown(
+            "Copy `config.toml.example` to `config.toml` (or set the environment "
+            "variables) and re-run. See the **Setup** section of the README."
+        )
+        return
+
     render_sidebar()
 
     main_section = st.container()
@@ -2176,7 +2220,7 @@ def main():
             3. Explore GEX visualizations and analytics
             """)
             st.markdown("### Note")
-            st.caption("Candlestick chart fragment was removed. Indicator code is available in charts.py and can be reused in other chart components.")
+            st.caption("The Candlesticks tab renders interactive OHLCV charts with streaming live ticks — it activates once you Refresh a ticker on the main page (see charts.py and chart_component.py for the indicator implementations).")
 
 
 if __name__ == "__main__":

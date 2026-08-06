@@ -89,6 +89,20 @@ def _normalize_display_symbol(symbol: str) -> str:
     return (symbol or "").upper().lstrip("$")
 
 
+def _is_index_in_history(norm_symbol: str, all_tickers: list[str]) -> bool:
+    """Check whether an index symbol (e.g. 'NDX') is legitimately tracked by
+    the user, by consulting both the in-memory ticker list and a fresh read
+    of the ticker_history file.  This avoids phantom _ticker_flows entries
+    being auto-created for index symbols the user never added."""
+    if any(_normalize_display_symbol(t) == norm_symbol for t in all_tickers):
+        return True
+    try:
+        _fresh = _load_ticker_history()
+    except Exception:
+        _fresh = []
+    return any(_normalize_display_symbol(t) == norm_symbol for t in _fresh)
+
+
 def _find_flow_for_display(spots: dict, display_symbol: str) -> dict | None:
     """Return the matching _ticker_flows entry for a display symbol.
     Looks up by direct key first, then by normalized (uppercase, no $)
@@ -216,6 +230,33 @@ class AtmOptionVolumeService:
         subscription symbol, not for the flow-key)."""
         with self._lock:
             return [_normalize_display_symbol(sym) for sym in self._ticker_flows.keys()]
+
+    def prune_untracked_index_entries(self, user_tickers: set[str]) -> int:
+        """Remove phantom index entries from ``_ticker_flows`` that aren't in
+        the user's ticker history.
+
+        Index symbols (SPX/RUT/NDX and variants) may have been auto-created
+        in a prior session by the IndexSpotPoller (which used to poll all
+        base index symbols) or by other code paths before the guard in
+        ``set_ticker_spot`` was tightened.  Left unchecked, these phantom
+        entries appear in ``tracked_tickers()`` and generate spurious alerts.
+
+        ``user_tickers`` should be the set of normalized display symbols the
+        user is actively tracking (from ``ticker_history`` + current chart
+        symbol).  Only index symbols (keys of ``INDEX_QUOTE_MAP``) not
+        present in that set are removed.
+
+        Returns the count of purged entries.  All mutations happen under
+        ``self._lock``.
+        """
+        pruned = 0
+        with self._lock:
+            for key in list(self._ticker_flows.keys()):
+                norm = _normalize_display_symbol(key)
+                if norm in INDEX_QUOTE_MAP and norm not in user_tickers:
+                    del self._ticker_flows[key]
+                    pruned += 1
+        return pruned
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -461,22 +502,28 @@ class AtmOptionVolumeService:
             now = _time_mod.time()
             spot = ticker.get("spot", 0.0) or 0.0
             sh = ticker.setdefault("spot_history", [])
-            if spot > 0:
-                sh.append((now, spot))
+            vh = ticker.setdefault("vol_history", [])
             while sh and sh[0][0] < now - 60:
                 sh.pop(0)
-            vh = ticker.setdefault("vol_history", [])
             while vh and vh[0][0] < now - 60:
                 vh.pop(0)
+            # Cold-start guard: need at least 2 samples in BOTH windows
+            # BEFORE we add a new spot sample.  Checking after the append
+            # would always grow spot_history to >= 2, defeating the guard
+            # on the first few calls.
             if len(vh) < 2 or len(sh) < 2:
                 return None
+            if spot > 0:
+                sh.append((now, spot))
+                while sh and sh[0][0] < now - 60:
+                    sh.pop(0)
             vol_60 = vh[-1][1] - vh[0][1]
             if vol_60 < _ABSORPTION_MIN_VOL:
                 return None
             spot_move = abs(sh[-1][1] - sh[0][1])
             return vol_60 / max(spot_move, _ABSORPTION_MIN_SPOT_MOVE)
 
-    def get_ticker_executed_flow(self, display_symbol: str) -> tuple:
+    def get_ticker_executed_net60(self, display_symbol: str) -> float | None:
         """Return (buy_vol, sell_vol, net_60) for a tracked ticker:
         session-cumulative delta-adjusted executed ATM volume (buying calls
         / selling puts -> buy; selling calls / buying puts -> sell), plus
@@ -714,11 +761,8 @@ class AtmOptionVolumeService:
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is not None:
-                # Only update if new values are provided (non-None) to preserve existing walls
-                if put_wall is not None:
-                    ticker["put_wall"] = put_wall
-                if call_wall is not None:
-                    ticker["call_wall"] = call_wall
+                ticker["put_wall"] = put_wall
+                ticker["call_wall"] = call_wall
                 norm = _normalize_display_symbol(display_symbol)
                 self._walls_verified.add(norm)
                 # Stamp the refresh time so the throttle in
@@ -847,7 +891,7 @@ class AtmOptionVolumeService:
         self._maybe_invalidate_walls_on_strike_change(display_symbol, old_atm, new_atm)
         return True
 
-    def set_ticker_spot(self, display_symbol: str, spot: float):
+    def set_ticker_spot(self, display_symbol: str, spot: float, allow_auto_create: bool = True):
         """Set the spot price for a tracked ticker and recalculate its ATM
         strike.  Used for index symbols (SPX, RUT, NDX) whose actual spot
         differs from the ETF proxy (SPY, IWM, QQQ) used for streaming.
@@ -864,7 +908,16 @@ class AtmOptionVolumeService:
         If the ticker has no entry in _ticker_flows yet (e.g. the
         IndexSpotPoller runs before ensure_atm_streaming has initialised
         it), a new entry is created automatically so the spot update is
-        never silently dropped."""
+        never silently dropped — unless ``allow_auto_create`` is False, in
+        which case the call is a no-op for untracked symbols.  Callers that
+        should never create entries for non-tracked symbols (e.g. the
+        IndexSpotPoller polling *all* index symbols) should pass
+        ``allow_auto_create=False``.
+
+        For index symbols the guard against phantom creation checks both the
+        in-memory ``self._all_tickers`` (populated by ``register``) and the
+        live ticker_history file (so entries are created even when
+        ``register`` has not run yet or the file was edited externally)."""
         if not spot or spot <= 0:
             return
         sc = None
@@ -872,6 +925,18 @@ class AtmOptionVolumeService:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is None:
                 norm = _normalize_display_symbol(display_symbol)
+                # Guard: don't auto-create entries for index symbols the user
+                # hasn't added to their ticker_history.  The IndexSpotPoller
+                # calls set_ticker_spot for all index symbols (when it was
+                # always including the base set), and auto-creating here
+                # would surface phantom tickers in tracked_tickers() and
+                # trigger spurious alerts.  If the symbol is genuinely in the
+                # user's history it will already have an entry (via
+                # _init_all_tickers / ensure_atm_streaming).  Fall back to a
+                # fresh file read so the guard is correct even when register()
+                # hasn't refreshed self._all_tickers yet.
+                if allow_auto_create and norm in INDEX_QUOTE_MAP and not _is_index_in_history(norm, self._all_tickers):
+                    return
                 stream_sym = _get_stream_symbol(norm)
                 self._ticker_flows[norm] = {
                     "stream_symbol": stream_sym,

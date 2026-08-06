@@ -292,7 +292,7 @@ def generate_recommendations(
                             )
                         else:
                             recs.append(
-                                f"**Sell PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                                f"**SELL PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
                                 f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
                                 f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
                             )
@@ -667,6 +667,10 @@ def _tte_from_dtes(dtes: list[int]) -> float | None:
 
 def build_strategy_alerts(
     data: list[dict], analytics: dict, spot: float, rv: float,
+    enable_long_calls: bool = True,
+    enable_long_puts: bool = True,
+    enable_short_calls: bool = True,
+    enable_short_puts: bool = True,
 ) -> list[str]:
     """Build the Buy Premium / Sell Premium alert blocks from the option
     chain.  The pool is narrowed to near-ATM OTM/ATM options with open
@@ -686,17 +690,34 @@ def build_strategy_alerts(
 
     bias, _ = assess_market_bias(analytics, spot, iv_rank=analytics.get("iv_rank"))
 
-    buy_recs = [r for r in generate_recommendations(sd2, spot, strategy="Long Calls", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "No OTM" not in r and "skip" not in r and "GEX Bias" not in r]
-    if buy_recs:
-        alerts.append("Buy Premium:")
-        for r in buy_recs[:3]:
-            alerts.append(f"  \u2022 {r}")
+    # Build alerts based on enabled strategies
+    if enable_long_calls:
+        buy_recs = [r for r in generate_recommendations(sd2, spot, strategy="Long Calls", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "No OTM" not in r and "skip" not in r and "GEX Bias" not in r]
+        if buy_recs:
+            alerts.append("Long Calls:")
+            for r in buy_recs[:3]:
+                alerts.append(f"  {r}")
 
-    sell_recs = [r for r in generate_recommendations(sd2, spot, strategy="Short Calls", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "No OTM" not in r and "skip" not in r and "GEX Bias" not in r]
-    if sell_recs:
-        alerts.append("Sell Premium:")
-        for r in sell_recs[:3]:
-            alerts.append(f"  \u2022 {r}")
+    if enable_long_puts:
+        buy_recs = [r for r in generate_recommendations(sd2, spot, strategy="Long Puts", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "No OTM" not in r and "skip" not in r and "GEX Bias" not in r]
+        if buy_recs:
+            alerts.append("Long Puts:")
+            for r in buy_recs[:3]:
+                alerts.append(f"  {r}")
+
+    if enable_short_calls:
+        sell_recs = [r for r in generate_recommendations(sd2, spot, strategy="Short Calls", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "No OTM" not in r and "skip" not in r and "GEX Bias" not in r]
+        if sell_recs:
+            alerts.append("Short Calls:")
+            for r in sell_recs[:3]:
+                alerts.append(f"  {r}")
+
+    if enable_short_puts:
+        sell_recs = [r for r in generate_recommendations(sd2, spot, strategy="Short Puts", all_data=sd2, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=ssvi_surf, ssvi_tte=ir_tte, bias=bias) if "No strong" not in r and "No OTM" not in r and "skip" not in r and "GEX Bias" not in r]
+        if sell_recs:
+            alerts.append("Short Puts:")
+            for r in sell_recs[:3]:
+                alerts.append(f"  {r}")
 
     return alerts
 

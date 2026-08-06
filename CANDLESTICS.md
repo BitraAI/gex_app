@@ -6,14 +6,14 @@ indicators and a real-time WebSocket stream merged into the latest bar.
 ## Access
 
 The chart lives in the **Candlesticks** tab of the main app (`app.py` →
-`render_candlesticks`), which is one of the tabs in the main tab row (alongside
+`render_candlesticks_frag`), which is one of the tabs in the main tab row (alongside
 Market Structure, Positioning, Volatility, Heatmaps, Trade Signals, and the
 Order Flow tab). It is shown after a ticker is loaded (Refresh on the main
 page).
 
 Refreshing a ticker here is also what **starts the WebSocket streaming** for
 the whole app — equity `StreamingService` and the ATM option
-`AtmOptionVolumeService` are both kicked off inside `render_candlesticks` via
+`AtmOptionVolumeService` are both kicked off inside `render_candlesticks_frag` via
 `ensure_atm_streaming`.
 
 ## Controls
@@ -83,7 +83,7 @@ load_candle_cache (parquet)                    ▼
 
 ### Spot / ATM option service
 
-- Every 10s, `render_candlesticks` refreshes spots for all `ticker_history`
+- Every ~2s (on each `run_every=2` fragment tick), `render_candlesticks_frag` refreshes spots for all `ticker_history`
   tickers via `fetch_quotes` and pushes them to `atm_svc.update_ticker_spot`,
   which keeps the ATM option subscription aligned to the live underlying.
 - The same `StreamClient` connection is shared between the equity stream and
@@ -93,7 +93,7 @@ load_candle_cache (parquet)                    ▼
 
 | File | Role |
 | --- | --- |
-| `app.py` | `render_candlesticks`, `ensure_atm_streaming`, `TIMEFRAMES`, candle merge logic. |
+| `app.py` | `render_candlesticks_frag`, `ensure_atm_streaming`, `TIMEFRAMES`, candle merge logic. |
 | `chart_component.py` | `render_chart` — Lightweight Charts HTML/JS component + indicators. |
 | `streaming_service.py` | `StreamingService` — equity WebSocket, 1s OHLCV aggregation, buy/sell split. |
 | `option_streaming_service.py` | `AtmOptionVolumeService` — ATM option flow (shares the StreamClient). |

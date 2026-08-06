@@ -234,17 +234,29 @@ def compute_analytics(
 
 
 def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    above = [s for s in strikes if s["strike"] > spot and s["call_gex"] != 0]
+    above = [s for s in strikes if s["strike"] > spot]
     if not above:
         return None
-    return max(above, key=lambda s: s["call_gex"])["strike"]
+    with_gex = [s for s in above if s["call_gex"] != 0]
+    if with_gex:
+        return max(with_gex, key=lambda s: s["call_gex"])["strike"]
+    with_oi = [s for s in above if s.get("call_oi", 0) > 0]
+    if with_oi:
+        return max(with_oi, key=lambda s: s.get("call_oi", 0))["strike"]
+    return max(above, key=lambda s: s["strike"])["strike"]
 
 
 def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    below = [s for s in strikes if s["strike"] < spot and s["put_gex"] != 0]
+    below = [s for s in strikes if s["strike"] < spot]
     if not below:
         return None
-    return max(below, key=lambda s: s["put_gex"])["strike"]
+    with_gex = [s for s in below if s["put_gex"] != 0]
+    if with_gex:
+        return max(with_gex, key=lambda s: s["put_gex"])["strike"]
+    with_oi = [s for s in below if s.get("put_oi", 0) > 0]
+    if with_oi:
+        return max(with_oi, key=lambda s: s.get("put_oi", 0))["strike"]
+    return max(below, key=lambda s: s["strike"])["strike"]
 
 
 def _find_gamma_flip(strikes: list[dict[str, Any]]) -> Optional[float]:
