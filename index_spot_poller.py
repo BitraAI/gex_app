@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 # Polling interval for index spot updates (2 seconds)
 POLL_INTERVAL = 2.0
 
+# Max REST fetch attempts on transient errors (timeouts, 5xx, etc.)
+MAX_RETRIES = 3
+
 
 
 
@@ -31,7 +34,7 @@ class IndexSpotPoller:
     spot prices. This ensures index symbols ($SPX, $RUT, $NDX) display
     real-time prices in both the Order Flow grid and candlestick charts.
     
-    The poller avoids hammer-the-gate by using rate limiting and efficient
+    The poller avoids hammering the API by using rate limiting and efficient
     batching of API requests, while maintaining a robust fallback mechanism
     if API calls fail.
     """
@@ -56,15 +59,17 @@ class IndexSpotPoller:
             tickers: List of ticker symbols to monitor.
                     Only SPX, RUT, NDX (and variants) are polled.
         """
-        # Only include index symbols, always preserve base symbols
-        base = set(INDEX_QUOTE_MAP.keys())
-        extra = {
-            t.upper().lstrip("$") 
-            for t in tickers 
+        # Only include index symbols that appear in the user's ticker history.
+        # Polling symbols the user never added (e.g. NDX when only SPX is
+        # tracked) would auto-create phantom _ticker_flows entries via
+        # set_ticker_spot, which then surface as spurious wall-break /
+        # trend alerts in maybe_fire_wall_zone_alerts.
+        self._tickers = {
+            t.upper().lstrip("$")
+            for t in tickers
             if t.upper().lstrip("$") in INDEX_QUOTE_MAP
         }
-        self._tickers = base | extra
-        logger.info(f"Index poller monitoring tickers: {self._tickers}")
+        logger.info("Index poller monitoring tickers: %s", self._tickers)
         
     def start(self, atm_service):
         """Start the background polling service.
@@ -130,7 +135,6 @@ class IndexSpotPoller:
                     continue
                     
                 try:
-                    MAX_RETRIES = 3
                     for attempt in range(MAX_RETRIES):
                         try:
                             idx_resp = await fetch_quotes(self._client, index_syms_to_fetch)
@@ -162,15 +166,19 @@ class IndexSpotPoller:
                         if last_price is not None and float(last_price) > 0:
                             spot_price = float(last_price)
                             
-                            # Update ATM service with live spot
-                            logger.debug(f"Updating index {ticker_upper} spot: ${spot_price:.2f}")
-                            self._atm_service.set_ticker_spot(ticker_upper, spot_price)
+                            # Update ATM service with live spot.  Use
+                            # allow_auto_create=False so the poller never
+                            # creates phantom _ticker_flows entries for
+                            # index symbols the user hasn't added to their
+                            # ticker_history (prevents spurious alerts).
+                            logger.debug("Updating index %s spot: $%.2f", ticker_upper, spot_price)
+                            self._atm_service.set_ticker_spot(ticker_upper, spot_price, allow_auto_create=False)
                         else:
-                            logger.debug(f"Index {ticker_upper} quote returned no valid price: {quote}")
+                            logger.debug("Index %s quote returned no valid price: %s", ticker_upper, quote)
                             
                 except Exception as e:
                     # Log the error but continue running
-                    logger.warning(f"Failed to fetch index quotes: {str(e)}")
+                    logger.warning("Failed to fetch index quotes: %s", e)
                     # Continue running even if this fails
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
@@ -182,7 +190,7 @@ class IndexSpotPoller:
                 logger.info("Index poller loop cancelled")
                 break
             except Exception as e:
-                logger.error(f"Unexpected error in index poller loop: {str(e)}")
+                logger.error("Unexpected error in index poller loop: %s", e)
                 await asyncio.sleep(POLL_INTERVAL * 5)  # Wait longer on unexpected errors
                 
         self._task = None

@@ -37,3 +37,36 @@ CLIENT_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", CLIENT_SECRET)
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", BOT_TOKEN)
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", CHAT_ID)
 
+
+def validate_config() -> list[str]:
+    """Return a list of human-readable error strings for any missing required
+    configuration.  An empty list means everything is healthy.
+
+    Never raises — used by the Streamlit app at startup so a misconfigured
+    environment shows a clear setup page instead of a cryptic traceback when
+    the user clicks Refresh.
+    """
+    errors: list[str] = []
+    if not CLIENT_ID:
+        errors.append(
+            "[schwab] client_id missing — set it in config.toml or via the "
+            "SCHWAB_CLIENT_ID environment variable."
+        )
+    if not CLIENT_SECRET:
+        errors.append(
+            "[schwab] client_secret missing — set it in config.toml or via the "
+            "SCHWAB_CLIENT_SECRET environment variable."
+        )
+    if TELEGRAM_ENABLED:
+        if not BOT_TOKEN:
+            errors.append(
+                "[telegram] BOT_TOKEN missing — set it in config.toml or via the "
+                "TELEGRAM_BOT_TOKEN environment variable."
+            )
+        if not CHAT_ID:
+            errors.append(
+                "[telegram] CHAT_ID missing — set it in config.toml or via the "
+                "TELEGRAM_CHAT_ID environment variable."
+            )
+    return errors
+

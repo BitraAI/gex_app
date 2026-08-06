@@ -539,6 +539,10 @@ _ABSORPTION_LOW = 300.0    # price drifting on thin flow
 # jitter right at the level from being misreported as a break.
 _WALL_BREAK_CONFIRM = 2
 
+# Minimum contracts absorbed for a meaningful wall break (avoids noise from
+# insignificant breaks with negligible flow).
+_MIN_WALL_BREAK_CONTRACTS = 100
+
 # Conviction gate for Telegram trend alerts: only reversals (bullish/bearish)
 # are surfaced as alerts now; the plain up/down direction no longer fires a
 # Telegram alert. Reversals need _ALERT_MIN_CONVICTION_REVERSAL metric
@@ -689,8 +693,6 @@ def maybe_fire_wall_zone_alerts() -> None:
     atm_svc = s.get("atm_option_service")
     if atm_svc is None:
         return
-    if not is_market_open():
-        return
     now = _time_mod.monotonic()
     state = s.setdefault("atm_alert_state", {})
 
@@ -791,7 +793,7 @@ def maybe_fire_wall_zone_alerts() -> None:
         # before it becomes an alert, so weak/flat-ish trends stay quiet.
         # Wall-broke alerts bypass the gate entirely.
         if _trend_signal is not None:
-            _net_60 = atm_svc.get_ticker_executed_flow(t_upper)[2]
+            _net_60 = atm_svc.get_ticker_executed_net60(t_upper)[2]
             _absorption_now = atm_svc.get_ticker_absorption(t_upper)
             _conviction = _conviction_score(
                 _trend_signal,
@@ -1091,11 +1093,10 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         if atm_svc:
             _pw = analytics.get("put_wall")
             _cw = analytics.get("call_wall")
-            if _pw is not None or _cw is not None:
-                atm_svc.set_ticker_walls(display_key, _pw, _cw)
-                _exps = sorted(set(e["expiration"] for e in data))
-                if _exps:
-                    atm_svc.set_ticker_expiration(display_key, _exps[0])
+            atm_svc.set_ticker_walls(display_key, _pw, _cw)
+            _exps = sorted(set(e["expiration"] for e in data))
+            if _exps:
+                atm_svc.set_ticker_expiration(display_key, _exps[0])
             # Call/put marks at the ATM strike (populates Call/Put Price columns)
             _atm_k = analytics.get("atm_strike")
             if _atm_k:
@@ -1207,11 +1208,10 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
         if atm_svc:
             _pw = analytics.get("put_wall")
             _cw = analytics.get("call_wall")
-            if _pw is not None or _cw is not None:
-                atm_svc.set_ticker_walls(display_key, _pw, _cw)
-                _exps = sorted(set(e["expiration"] for e in data))
-                if _exps:
-                    atm_svc.set_ticker_expiration(display_key, _exps[0])
+            atm_svc.set_ticker_walls(display_key, _pw, _cw)
+            _exps = sorted(set(e["expiration"] for e in data))
+            if _exps:
+                atm_svc.set_ticker_expiration(display_key, _exps[0])
             # Call/put marks at the ATM strike (populates Call/Put Price columns)
             _atm_k = analytics.get("atm_strike")
             if _atm_k:
@@ -1372,19 +1372,13 @@ def render_atm_order_flow_grid():
             spot = atm_svc.get_ticker_spot(t_upper) if atm_svc else None
             # Get book imbalance and trend from ticker data (L2-sourced via
             # StreamingService.trend_data: trend is up/down/flat, reversal is
-            # Support (Put Wall) / Resistance (Call Wall): prefer per-ticker value
-            # set by fetch_data, fall back to session-state analytics for the
-            # current chart symbol so the columns are never empty without a manual
-            # Refresh.
+            # Support (Put Wall) / Resistance (Call Wall): prefer preserved ticker
+            # walls from ATM option service, which retain last valid values.
             put_wall_val = atm_svc.get_ticker_put_wall(t_upper) if atm_svc else None
             call_wall_val = atm_svc.get_ticker_call_wall(t_upper) if atm_svc else None
-            if put_wall_val is None and t_upper == current_sym:
-                put_wall_val = (s.get("analytics") or {}).get("put_wall")
-            if call_wall_val is None and t_upper == current_sym:
-                call_wall_val = (s.get("analytics") or {}).get("call_wall")
 
             _net_60 = (
-                atm_svc.get_ticker_executed_flow(t_upper)[2] if atm_svc else None
+                atm_svc.get_ticker_executed_net60(t_upper)[2] if atm_svc else None
             )
             _call_p, _put_p = _wall_price_marks(opt_prices, wall_prices, call_wall_val, put_wall_val, spot)
             
