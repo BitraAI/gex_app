@@ -507,16 +507,12 @@ class AtmOptionVolumeService:
                 sh.pop(0)
             while vh and vh[0][0] < now - 60:
                 vh.pop(0)
-            # Cold-start guard: need at least 2 samples in BOTH windows
-            # BEFORE we add a new spot sample.  Checking after the append
-            # would always grow spot_history to >= 2, defeating the guard
-            # on the first few calls.
-            if len(vh) < 2 or len(sh) < 2:
-                return None
             if spot > 0:
                 sh.append((now, spot))
                 while sh and sh[0][0] < now - 60:
                     sh.pop(0)
+            if len(vh) < 2 or len(sh) < 2:
+                return None
             vol_60 = vh[-1][1] - vh[0][1]
             if vol_60 < _ABSORPTION_MIN_VOL:
                 return None

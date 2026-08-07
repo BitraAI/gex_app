@@ -775,9 +775,9 @@ def maybe_fire_wall_zone_alerts() -> None:
         ticker_data = _ssvc.get_ticker_trend_data(t_upper) if _ssvc else {}
         new_alerts, next_state = diff_alerts(prev, analytics, spot)
         wall_zone = None
-        if call_wall is not None and spot >= call_wall - _wall_buffer(call_wall):
+        if call_wall is not None and call_wall - _wall_buffer(call_wall) <= spot <= call_wall + _wall_buffer(call_wall):
             wall_zone = "Resistance"
-        elif put_wall is not None and spot <= put_wall + _wall_buffer(put_wall):
+        elif put_wall is not None and put_wall + _wall_buffer(put_wall) >= spot >= put_wall - _wall_buffer(put_wall):
             wall_zone = "Support"
         # Trend signal sourced directly from StreamingService.trend_data: only
         # a reversal (bullish/bearish) is surfaced as an alert now — the plain
@@ -829,86 +829,7 @@ def maybe_fire_wall_zone_alerts() -> None:
         if wall_zone is not None and _flow_vol is not None and next_state.get("_zone_entry_vol") is not None:
             _absorbed_at_wall = max(0.0, _flow_vol - next_state["_zone_entry_vol"])
 
-        # ---- Wall broke: directional pierce ---------------------------- #
-        # A wall only "breaks" when spot decisively pierces THROUGH it —
-        # Resistance = spot settles ABOVE the call wall, Support = spot settles
-        # BELOW the put wall.  A margin (the near-wall buffer) plus a
-        # confirmation streak filters jitter at the level, and we require a
-        # prior held reading (prev is not None) so a ticker that starts a
-        # session already past a wall doesn't fire a phantom break.  This
-        # replaces the old zone-exit logic, which fired when spot merely left
-        # a proximity buffer — even when it moved away from the wall (wrong
-        # direction) — producing wrong signals.
-        _res_margin = _wall_buffer(call_wall) if call_wall is not None else 0.0
-        _supp_margin = _wall_buffer(put_wall) if put_wall is not None else 0.0
-        _res_broken_now = call_wall is not None and spot > call_wall + _res_margin
-        _supp_broken_now = put_wall is not None and spot < put_wall - _supp_margin
-        # Consecutive-sample confirmation: a pierce only counts once spot has
-        # stayed past the wall for _WALL_BREAK_CONFIRM samples (filters jitter
-        # right at the level).
-        _res_streak = ((prev or {}).get("_res_break_streak", 0) + 1) if _res_broken_now else 0
-        _supp_streak = ((prev or {}).get("_supp_break_streak", 0) + 1) if _supp_broken_now else 0
-        # "Warmed" = the ticker has been observed holding the wall (spot NOT
-        # past it) at least once, so a session that starts already past a wall
-        # can never fire a phantom break.
-        _res_warmed = (prev or {}).get("_res_warmed", False) or not _res_broken_now
-        _supp_warmed = (prev or {}).get("_supp_warmed", False) or not _supp_broken_now
-        _res_confirmed = _res_broken_now and _res_streak >= _WALL_BREAK_CONFIRM
-        _supp_confirmed = _supp_broken_now and _supp_streak >= _WALL_BREAK_CONFIRM
-        _res_broken_prev = (prev or {}).get("_res_confirmed", False)
-        _supp_broken_prev = (prev or {}).get("_supp_confirmed", False)
-        next_state["_res_break_streak"] = _res_streak
-        next_state["_supp_break_streak"] = _supp_streak
-        next_state["_res_warmed"] = _res_warmed
-        next_state["_supp_warmed"] = _supp_warmed
-        next_state["_res_confirmed"] = _res_confirmed
-        next_state["_supp_confirmed"] = _supp_confirmed
-
-        if (not new_alerts and prev is not None and _res_warmed
-                and not _res_broken_prev and _res_confirmed):
-            # Resistance broke: decisive break above the call wall (upside).
-            _wall_strike = call_wall
-            _front_exp = atm_svc.get_ticker_expiration(t_upper) if atm_svc else None
-            _abs_broke = _absorbed_at_wall if _absorbed_at_wall is not None else 0
-            new_alerts = [
-                f"💥 Resistance wall BROKE after absorbing {_abs_broke:,.0f} contracts",
-                _trade_line("CALL", _wall_strike, call_wall, put_wall, _wall_prices, _front_exp),
-            ]
-            if not hasattr(s, "_wall_break_alerts"):
-                s._wall_break_alerts = {}
-            s._wall_break_alerts[t_upper] = {"type": "broke", "zone": "Resistance", "strike": _wall_strike, "ts": now}
-        elif (not new_alerts and prev is not None and _supp_warmed
-              and not _supp_broken_prev and _supp_confirmed):
-            # Support broke: decisive break below the put wall (downside).
-            _wall_strike = put_wall
-            _front_exp = atm_svc.get_ticker_expiration(t_upper) if atm_svc else None
-            _abs_broke = _absorbed_at_wall if _absorbed_at_wall is not None else 0
-            new_alerts = [
-                f"💥 Support wall BROKE after absorbing {_abs_broke:,.0f} contracts",
-                _trade_line("PUT", _wall_strike, call_wall, put_wall, _wall_prices, _front_exp),
-            ]
-            if not hasattr(s, "_wall_break_alerts"):
-                s._wall_break_alerts = {}
-            s._wall_break_alerts[t_upper] = {"type": "broke", "zone": "Support", "strike": _wall_strike, "ts": now}
-
-        # ---- Wall reversal alert handling ---------------------- #
-        if _fire_trend and wall_zone is not None and not new_alerts:
-            # Send reversal alert at the wall instead of filtering
-            direction = _trend_signal
-            absorbed = _absorbed_at_wall if _absorbed_at_wall is not None else 0
-            _wall_strike = call_wall if wall_zone == "Resistance" else put_wall
-            new_alerts.append(f"💥 {wall_zone} wall {direction.upper()} REVERSAL after absorbing {absorbed:,.0f} contracts")
-            # Reversal direction maps to the trade side: bullish -> BUY CALL,
-            # bearish -> BUY PUT, at the wall strike where the reversal fired.
-            _buy_side = "CALL" if direction == "bullish" else "PUT"
-            _front_exp = atm_svc.get_ticker_expiration(t_upper) if atm_svc else None
-            new_alerts.append(_trade_line(_buy_side, _wall_strike, call_wall, put_wall, _wall_prices, _front_exp))
-            # Store reversal alert in session state for UI highlighting
-            s = st.session_state
-            if not hasattr(s, "_wall_reversal_alerts"):
-                s._wall_reversal_alerts = {}
-            s._wall_reversal_alerts[t_upper] = {"type": "reversal", "zone": wall_zone, "strike": _wall_strike, "ts": now, "direction": direction}
-            _fire_trend = False
+        pass
 
         last_ts = (prev or {}).get("last_alert_ts", 0.0)
         next_state["last_alert_ts"] = last_ts
@@ -1149,18 +1070,22 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
 
         strat_alerts = build_strategy_alerts(data, analytics, spot, rv)
         all_alerts = new_alerts + strat_alerts
-        # Filter out "Wall changed" alerts permanently — only wall-broke, wall-reversal,
-        # and strategy recommendation alerts are sent to Telegram.
-        tg_alerts = [a for a in all_alerts if "Wall changed" not in a]
+        # Filter out "Wall changed" and all wall-broke/absorbed alerts permanently
+        # — only wall-reversal and strategy recommendation alerts are sent to Telegram.
+        tg_alerts = [a for a in all_alerts if not (
+            "Wall changed" in a or
+            "wall BROKE" in a or
+            "wall REVERSAL" in a
+        )]
 
         if tg_alerts and now_ts - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
             next_sym_state["last_alert_ts"] = now_ts
             _cw = analytics.get("call_wall")
             _pw = analytics.get("put_wall")
             _wall_zone = None
-            if _cw is not None and spot >= _cw - _wall_buffer(_cw):
+            if _cw is not None and _cw - _wall_buffer(_cw) <= spot <= _cw + _wall_buffer(_cw):
                 _wall_zone = "Resistance"
-            elif _pw is not None and spot <= _pw + _wall_buffer(_pw):
+            elif _pw is not None and _pw - _wall_buffer(_pw) <= spot <= _pw + _wall_buffer(_pw):
                 _wall_zone = "Support"
             await loop.run_in_executor(
                 None, partial(
@@ -1477,22 +1402,52 @@ def render_atm_order_flow_grid():
     # HTML table instead: `table-layout: fixed` distributes the tab width
     # evenly across the columns and the headers wrap onto multiple lines
     # (see render_flow_legend_and_style for the `.flow-grid` CSS).
-    def _trend_color(val):
-        """Color the Trend label (up/down/flat/bullish/bearish/EMA 50 UP/DOWN) by direction.
+    def _trend_color(row):
+        """Color the Trend label (up/down/bullish/bearish) by direction.
 
         Reversal labels (bullish/bearish) are bolded to surface the flip;
         up/down are green/red; flat is amber.
-        EMA 50 UP/DOWN use the same colors as up/down.
+
+        When spot leaves the support zone (upwards), trend shows UP in GREEN.
+        Within support zone, trend shows BULLISH.
+        When spot leaves the resistance zone (downwards), trend shows DOWN in RED.
+        Within resistance zone, trend shows BEARISH.
         """
+        val = row["Trend"]
+        spot = row["Spot"]
+        support = row["Support"]
+        resistance = row["Resistance"]
+        
         if val is None:
             return ""
+        
+        # When spot leaves support zone (moves away from support wall), show UP in GREEN
+        # This indicates bullish sentiment as spot moves away from support
+        if spot is not None and support is not None:
+            if spot > support + _wall_buffer(support):  # Spot has left support zone upwards
+                return "color: #00cc96; font-weight: bold;"
+        
+        # Within support zone, show BULLISH
+        if spot is not None and support is not None:
+            if support - _wall_buffer(support) <= spot <= support + _wall_buffer(support):
+                return "color: #00cc96; font-weight: bold;"
+        
+        # When spot leaves resistance zone (moves away from resistance wall), show DOWN in RED
+        # This indicates bearish sentiment as spot moves away from resistance
+        if spot is not None and resistance is not None:
+            if spot < resistance - _wall_buffer(resistance):  # Spot has left resistance zone downwards
+                return "color: #ef5350; font-weight: bold;"
+        
+        # Within resistance zone, show BEARISH
+        if spot is not None and resistance is not None:
+            if resistance - _wall_buffer(resistance) <= spot <= resistance + _wall_buffer(resistance):
+                return "color: #ef5350; font-weight: bold;"
+        
         val_l = val.lower()
         if val_l in ("bearish", "down"):
             return "color: #ef5350; font-weight: bold;"
-        if val_l in ("bullish", "up", "ema 50 up"):
+        if val_l in ("bullish", "up"):
             return "color: #00cc96; font-weight: bold;"
-        if val_l == "ema 50 down":
-            return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
     def _book_imbalance_color(val):
@@ -1556,22 +1511,38 @@ def render_atm_order_flow_grid():
         return "color: #ff9800; font-weight: bold;"
 
     def _spot_bg(row):
-        """Background color for the Spot cell based on wall break/reversal alerts."""
+        """Background color for the Spot cell based on wall break/reversal alerts and zone membership."""
         s = st.session_state
-        # Check for wall break alerts first
+        spot = row["Spot"]
+        support = row["Support"]
+        resistance = row["Resistance"]
+        
+        # GREEN if spot is in support zone (between support - buffer and support + buffer)
+        if support is not None and spot is not None:
+            if support - _wall_buffer(support) <= spot <= support + _wall_buffer(support):
+                return "background-color: #ccffcc; font-weight: bold;"  # GREEN for support zone
+        
+        # RED if spot is in resistance zone (between resistance - buffer and resistance + buffer)
+        if resistance is not None and spot is not None:
+            if resistance - _wall_buffer(resistance) <= spot <= resistance + _wall_buffer(resistance):
+                return "background-color: #ffcccc; font-weight: bold;"  # RED for resistance zone
+        
+        # Check for wall break alerts (overrides zone-based colors)
         if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
             alert = s._wall_break_alerts[row["Ticker"]]
             if alert.get("zone") == "Support":
                 return "background-color: #b71c1c; color: #ffffff; font-weight: bold;"  # DARK RED for Support wall broke
             if alert.get("zone") == "Resistance":
                 return "background-color: #1b5e20; color: #ffffff; font-weight: bold;"  # DARK GREEN for Resistance wall broke
-        # Check for wall reversal alerts
+        
+        # Check for wall reversal alerts (lower priority)
         if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
             alert = s._wall_reversal_alerts[row["Ticker"]]
             if alert.get("zone") == "Support":
                 return "background-color: #ccffcc;"  # GREEN for Support wall reversal
             if alert.get("zone") == "Resistance":
                 return "background-color: #ffcccc;"  # RED for Resistance wall reversal
+        
         return ""
 
     def _support_bg(row):
@@ -1647,6 +1618,37 @@ def render_atm_order_flow_grid():
     def _fmt_commas(v):
         return f"{v:,.0f}" if v is not None else ""
 
+    def _trend_color(row):
+        """Color the Trend label (up/down/flat/bullish/bearish/EMA 50 UP/DOWN) by direction.
+
+        Reversal labels (bullish/bearish) are bolded to surface the flip;
+        up/down are green/red; flat is amber.
+        EMA 50 UP/DOWN use the same colors as up/down.
+
+        When spot leaves the support zone (upwards), trend shows UP in GREEN.
+        """
+        val = row["Trend"]
+        spot = row["Spot"]
+        support = row["Support"]
+        
+        if val is None:
+            return ""
+        
+        # When spot leaves support zone (moves away from support wall), show UP in GREEN
+        # This indicates bullish sentiment as spot moves away from support
+        if spot is not None and support is not None:
+            if spot > support + _wall_buffer(support):  # Spot has left support zone upwards
+                return "color: #00cc96; font-weight: bold;"
+        
+        val_l = val.lower()
+        if val_l in ("bearish", "down"):
+            return "color: #ef5350; font-weight: bold;"
+        if val_l in ("bullish", "up", "ema 50 up"):
+            return "color: #00cc96; font-weight: bold;"
+        if val_l == "ema 50 down":
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+
     def _mk_color(col_name, color_fn):
         def _c(row):
             return color_fn(row[col_name])
@@ -1660,7 +1662,7 @@ def render_atm_order_flow_grid():
         ("Resistance", "right", _fmt_money, _resistance_bg),
         ("Call Price", "right", _fmt_money, _call_price_bg),
         ("Put Price", "right", _fmt_money, _put_price_bg),
-        ("Trend", "center", lambda v: html.escape(str(v)) if v is not None else "", _mk_color("Trend", _trend_color)),
+        ("Trend", "center", lambda v: html.escape(str(v)) if v is not None else "", _trend_color),
         ("Book Imbalance", "right", lambda v: _fmt_signed(v, 2), _mk_color("Book Imbalance", _book_imbalance_color)),
         ("Flow Speed", "right", lambda v: _fmt_signed(v, 0), _mk_color("Flow Speed", _flow_speed_color)),
         ("Flow Acceleration", "right", lambda v: _fmt_signed(v, 2), _mk_color("Flow Acceleration", _flow_acceleration_color)),

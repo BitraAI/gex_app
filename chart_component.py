@@ -603,7 +603,6 @@ _HTML_TEMPLATE = """
     // lost once they touch the x-axis). savePosition() will still save
     // the current y range of panes already in manual mode (autoScale off).
     ts.subscribeVisibleTimeRangeChange(function(timeRange) {
-        if (!timeRange) return;
         if (window[RENDER_KEY] !== RENDER_VERSION) return;
         savePosition(false);
     });
