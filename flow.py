@@ -1068,7 +1068,45 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         next_sym_state["last_alert_ts"] = last_ts
         now_ts = _time_mod.monotonic()
 
-        strat_alerts = build_strategy_alerts(data, analytics, spot, rv)
+        # Resolve the wall zone up-front so the Support-zone strategy scan
+        # below can re-use it (matches the zone classifier used at notify time).
+        _cw = analytics.get("call_wall")
+        _pw = analytics.get("put_wall")
+        _wall_zone = None
+        if _cw is not None and _cw - _wall_buffer(_cw) <= spot <= _cw + _wall_buffer(_cw):
+            _wall_zone = "Resistance"
+        elif _pw is not None and _pw - _wall_buffer(_pw) <= spot <= _pw + _wall_buffer(_pw):
+            _wall_zone = "Support"
+
+        # Wall-zone-biased strategy alerts.  When spot is sitting at a wall,
+        # the directional bias is set by the wall's role and we only surface
+        # the matching-direction premium recommendations instead of the full
+        # strategy set — this avoids signalling against the dealer bias (e.g.
+        # Long Puts / Short Calls at a put-wall support that's likely to
+        # bounce).  This is the same ``generate_recommendations`` pipeline
+        # used by the Trade Signals tab (signals.py), gated with the default
+        # DTE 1-45 (generate_recommendations' default args) and the per-
+        # strategy enable flags on ``build_strategy_alerts``.
+        if _wall_zone == "Support":
+            # Bullish bias (bounce off support) -> Long Calls / Short Puts.
+            strat_alerts = build_strategy_alerts(
+                data, analytics, spot, rv,
+                enable_long_calls=True,
+                enable_long_puts=False,
+                enable_short_calls=False,
+                enable_short_puts=True,
+            )
+        elif _wall_zone == "Resistance":
+            # Bearish bias (rejection at resistance) -> Long Puts / Short Calls.
+            strat_alerts = build_strategy_alerts(
+                data, analytics, spot, rv,
+                enable_long_calls=False,
+                enable_long_puts=True,
+                enable_short_calls=True,
+                enable_short_puts=False,
+            )
+        else:
+            strat_alerts = build_strategy_alerts(data, analytics, spot, rv)
         all_alerts = new_alerts + strat_alerts
         # Filter out "Wall changed" and all wall-broke/absorbed alerts permanently
         # — only wall-reversal and strategy recommendation alerts are sent to Telegram.
@@ -1080,13 +1118,6 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
 
         if tg_alerts and now_ts - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
             next_sym_state["last_alert_ts"] = now_ts
-            _cw = analytics.get("call_wall")
-            _pw = analytics.get("put_wall")
-            _wall_zone = None
-            if _cw is not None and _cw - _wall_buffer(_cw) <= spot <= _cw + _wall_buffer(_cw):
-                _wall_zone = "Resistance"
-            elif _pw is not None and _pw - _wall_buffer(_pw) <= spot <= _pw + _wall_buffer(_pw):
-                _wall_zone = "Support"
             await loop.run_in_executor(
                 None, partial(
                 notify_alerts, tg_alerts,
