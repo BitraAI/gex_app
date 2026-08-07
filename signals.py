@@ -138,164 +138,152 @@ def generate_recommendations(
         return (exp_vrp.get(opt["expiration"], 0), _ssvi_iv(opt))
 
     if strategy in ("Long Calls",):
-        if not bias or bias != "Bullish":
-            recs.append(f"GEX Bias is {bias or 'N/A'}; skip Long Calls.")
+        src = all_data if all_data else scored
+        candidates = [
+            e for e in src
+            if e.get("type") == "CALL" and (e.get("strike", 0) or 0) > spot
+            and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
+            and (e.get("open_interest", 0) or 0) > 500
+        ]
+        if not candidates:
+            recs.append(f"No OTM calls in DTE {dte_min}-{dte_max} range with OI > 500.")
         else:
-            src = all_data if all_data else scored
-            candidates = [
-                e for e in src
-                if e.get("type") == "CALL" and (e.get("strike", 0) or 0) > spot
-                and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
-                and (e.get("open_interest", 0) or 0) > 500
-            ]
-            if not candidates:
-                recs.append(f"No OTM calls in DTE {dte_min}-{dte_max} range with OI > 500.")
+            cand_exps = {e["expiration"] for e in candidates}
+            best_exp = min(cand_exps, key=lambda e: exp_vrp.get(e, 0))
+            if iv_skew is None or iv_skew <= 0:
+                recs.append(f"IV Skew {f'{iv_skew:+.2%}' if iv_skew is not None else 'N/A'} — not bullish for calls; skip Long Calls.")
+            elif exp_vrp.get(best_exp, 0) >= -5:
+                recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≥ -5 — option not cheap; skip Long Calls.")
             else:
-                cand_exps = {e["expiration"] for e in candidates}
-                best_exp = min(cand_exps, key=lambda e: exp_vrp.get(e, 0))
-                if iv_skew is None or iv_skew <= 0:
-                    recs.append(f"IV Skew {f'{iv_skew:+.2%}' if iv_skew is not None else 'N/A'} — not bullish for calls; skip Long Calls.")
-                elif exp_vrp.get(best_exp, 0) >= -5:
-                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≥ -5 — option not cheap; skip Long Calls.")
+                best_exp_candidates = [
+                    e for e in candidates if e["expiration"] == best_exp
+                    and 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55
+                ]
+                if not best_exp_candidates:
+                    recs.append(f"No OTM calls with delta 0.35-0.55 in {best_exp[-5:]}.")
                 else:
-                    best_exp_candidates = [
-                        e for e in candidates if e["expiration"] == best_exp
-                        and 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55
-                    ]
-                    if not best_exp_candidates:
-                        recs.append(f"No OTM calls with delta 0.35-0.55 in {best_exp[-5:]}.")
+                    best = min(best_exp_candidates, key=_rich)
+                    if _rich(best) >= -0.03:
+                        recs.append(
+                            f"IV (pp) {_rich(best) * 100:+.2f}% — not cheap enough; skip Long Calls."
+                        )
                     else:
-                        best = min(best_exp_candidates, key=_rich)
-                        if _rich(best) >= -0.03:
-                            recs.append(
-                                f"IV (pp) {_rich(best) * 100:+.2f}% — not cheap enough; skip Long Calls."
-                            )
-                        else:
-                            recs.append(
-                                f"BUY CALL @ {best['strike']:g} ({best_exp[-5:]}, ${best['mark']:.2f}) — "
-                                f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
-                                f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
-                            )
+                        recs.append(
+                            f"BUY CALL @ {best['strike']:g} ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                            f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
+                            f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
+                        )
 
     if strategy in ("Long Puts",):
-        if not bias or bias != "Bearish":
-            recs.append(f"GEX Bias is {bias or 'N/A'}; skip Long Puts.")
+        src = all_data if all_data else scored
+        candidates = [
+            e for e in src
+            if e.get("type") == "PUT" and (e.get("strike", 0) or 0) < spot
+            and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
+            and (e.get("open_interest", 0) or 0) > 500
+        ]
+        if not candidates:
+            recs.append(f"No OTM puts in DTE {dte_min}-{dte_max} range with OI > 500.")
         else:
-            src = all_data if all_data else scored
-            candidates = [
-                e for e in src
-                if e.get("type") == "PUT" and (e.get("strike", 0) or 0) < spot
-                and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
-                and (e.get("open_interest", 0) or 0) > 500
-            ]
-            if not candidates:
-                recs.append(f"No OTM puts in DTE {dte_min}-{dte_max} range with OI > 500.")
+            cand_exps = {e["expiration"] for e in candidates}
+            best_exp = min(cand_exps, key=lambda e: exp_vrp.get(e, 0))
+            if iv_skew is None or iv_skew >= 0:
+                recs.append(f"IV Skew {f'{iv_skew:+.2%}' if iv_skew is not None else 'N/A'} — not bearish for puts; skip Long Puts.")
+            elif exp_vrp.get(best_exp, 0) >= -5:
+                recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≥ -5 — option not cheap; skip Long Puts.")
             else:
-                cand_exps = {e["expiration"] for e in candidates}
-                best_exp = min(cand_exps, key=lambda e: exp_vrp.get(e, 0))
-                if iv_skew is None or iv_skew >= 0:
-                    recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bearish for puts; skip Long Puts.")
-                elif exp_vrp.get(best_exp, 0) >= -5:
-                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≥ -5 — option not cheap; skip Long Puts.")
+                best_exp_candidates = [
+                    e for e in candidates if e["expiration"] == best_exp
+                    and 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55
+                ]
+                if not best_exp_candidates:
+                    recs.append(f"No OTM puts with delta 0.35-0.55 in {best_exp[-5:]}.")
                 else:
-                    best_exp_candidates = [
-                        e for e in candidates if e["expiration"] == best_exp
-                        and 0.35 <= abs(e.get("delta", 0) or 0) <= 0.55
-                    ]
-                    if not best_exp_candidates:
-                        recs.append(f"No OTM puts with delta 0.35-0.55 in {best_exp[-5:]}.")
+                    best = min(best_exp_candidates, key=_rich)
+                    if _rich(best) >= -0.03:
+                        recs.append(
+                            f"IV (pp) {_rich(best) * 100:+.2f}% — not cheap enough; skip Long Puts."
+                        )
                     else:
-                        best = min(best_exp_candidates, key=_rich)
-                        if _rich(best) >= -0.03:
-                            recs.append(
-                                f"IV (pp) {_rich(best) * 100:+.2f}% — not cheap enough; skip Long Puts."
-                            )
-                        else:
-                            recs.append(
-                                f"BUY PUT @ {best['strike']:g} ({best_exp[-5:]}, ${best['mark']:.2f}) — "
-                                f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
-                                f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
-                            )
+                        recs.append(
+                            f"BUY PUT @ {best['strike']:g} ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                            f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
+                            f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
+                        )
 
     if strategy in ("Short Calls",):
-        if not bias or bias != "Bearish":
-            recs.append(f"GEX Bias is {bias or 'N/A'}; skip Short Calls.")
+        src = all_data if all_data else scored
+        candidates = [
+            e for e in src
+            if e.get("type") == "CALL" and (e.get("strike", 0) or 0) > spot
+            and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
+            and (e.get("open_interest", 0) or 0) > 1000
+        ]
+        if not candidates:
+            recs.append(f"No OTM calls in DTE {dte_min}-{dte_max} range with OI > 1000.")
         else:
-            src = all_data if all_data else scored
-            candidates = [
-                e for e in src
-                if e.get("type") == "CALL" and (e.get("strike", 0) or 0) > spot
-                and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
-                and (e.get("open_interest", 0) or 0) > 1000
-            ]
-            if not candidates:
-                recs.append(f"No OTM calls in DTE {dte_min}-{dte_max} range with OI > 1000.")
+            cand_exps = {e["expiration"] for e in candidates}
+            best_exp = max(cand_exps, key=lambda e: exp_vrp.get(e, 0))
+            if iv_skew is None or iv_skew >= 0:
+                recs.append(f"IV Skew {f'{iv_skew:+.2%}' if iv_skew is not None else 'N/A'} — not bearish for calls; skip Short Calls.")
+            elif exp_vrp.get(best_exp, 0) <= 5:
+                recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≤ 5 — option not rich; skip Short Calls.")
             else:
-                cand_exps = {e["expiration"] for e in candidates}
-                best_exp = max(cand_exps, key=lambda e: exp_vrp.get(e, 0))
-                if iv_skew is None or iv_skew >= 0:
-                    recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bearish for calls; skip Short Calls.")
-                elif exp_vrp.get(best_exp, 0) <= 5:
-                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≤ 5 — option not rich; skip Short Calls.")
+                best_exp_candidates = [
+                    e for e in candidates if e["expiration"] == best_exp
+                    and 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20
+                ]
+                if not best_exp_candidates:
+                    recs.append(f"No OTM calls with delta 0.15-0.20 in {best_exp[-5:]}.")
                 else:
-                    best_exp_candidates = [
-                        e for e in candidates if e["expiration"] == best_exp
-                        and 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20
-                    ]
-                    if not best_exp_candidates:
-                        recs.append(f"No OTM calls with delta 0.15-0.20 in {best_exp[-5:]}.")
+                    best = max(best_exp_candidates, key=_rich)
+                    if _rich(best) <= 0.08:
+                        recs.append(
+                            f"IV (pp) {_rich(best) * 100:+.2f}% — not rich enough; skip Short Calls."
+                        )
                     else:
-                        best = max(best_exp_candidates, key=_rich)
-                        if _rich(best) <= 0.08:
-                            recs.append(
-                                f"IV (pp) {_rich(best) * 100:+.2f}% — not rich enough; skip Short Calls."
-                            )
-                        else:
-                            recs.append(
-                                f"**Sell CALL @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
-                                f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
-                                f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
-                            )
+                        recs.append(
+                            f"SELL CALL @ {best['strike']:g} ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                            f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
+                            f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
+                        )
 
     if strategy in ("Short Puts",):
-        if not bias or bias != "Bullish":
-            recs.append(f"GEX Bias is {bias or 'N/A'}; skip Short Puts.")
+        src = all_data if all_data else scored
+        candidates = [
+            e for e in src
+            if e.get("type") == "PUT" and (e.get("strike", 0) or 0) < spot
+            and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
+            and (e.get("open_interest", 0) or 0) > 1000
+        ]
+        if not candidates:
+            recs.append(f"No OTM puts in DTE {dte_min}-{dte_max} range with OI > 1000.")
         else:
-            src = all_data if all_data else scored
-            candidates = [
-                e for e in src
-                if e.get("type") == "PUT" and (e.get("strike", 0) or 0) < spot
-                and dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max
-                and (e.get("open_interest", 0) or 0) > 1000
-            ]
-            if not candidates:
-                recs.append(f"No OTM puts in DTE {dte_min}-{dte_max} range with OI > 1000.")
+            cand_exps = {e["expiration"] for e in candidates}
+            best_exp = max(cand_exps, key=lambda e: exp_vrp.get(e, 0))
+            if iv_skew is None or iv_skew <= 0:
+                recs.append(f"IV Skew {f'{iv_skew:+.2%}' if iv_skew is not None else 'N/A'} — not bullish for puts; skip Short Puts.")
+            elif exp_vrp.get(best_exp, 0) <= 5:
+                recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≤ 5 — option not rich; skip Short Puts.")
             else:
-                cand_exps = {e["expiration"] for e in candidates}
-                best_exp = max(cand_exps, key=lambda e: exp_vrp.get(e, 0))
-                if iv_skew is None or iv_skew <= 0:
-                    recs.append(f"IV Skew {iv_skew:+.2% if iv_skew is not None else 'N/A'} — not bullish for puts; skip Short Puts.")
-                elif exp_vrp.get(best_exp, 0) <= 5:
-                    recs.append(f"VRP {exp_vrp.get(best_exp, 0):.1f}% ≤ 5 — option not rich; skip Short Puts.")
+                best_exp_candidates = [
+                    e for e in candidates if e["expiration"] == best_exp
+                    and 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20
+                ]
+                if not best_exp_candidates:
+                    recs.append(f"No OTM puts with delta 0.15-0.20 in {best_exp[-5:]}.")
                 else:
-                    best_exp_candidates = [
-                        e for e in candidates if e["expiration"] == best_exp
-                        and 0.15 <= abs(e.get("delta", 0) or 0) <= 0.20
-                    ]
-                    if not best_exp_candidates:
-                        recs.append(f"No OTM puts with delta 0.15-0.20 in {best_exp[-5:]}.")
+                    best = max(best_exp_candidates, key=_rich)
+                    if _rich(best) <= 0.08:
+                        recs.append(
+                            f"IV (pp) {_rich(best) * 100:+.2f}% — not rich enough; skip Short Puts."
+                        )
                     else:
-                        best = max(best_exp_candidates, key=_rich)
-                        if _rich(best) <= 0.08:
-                            recs.append(
-                                f"IV (pp) {_rich(best) * 100:+.2f}% — not rich enough; skip Short Puts."
-                            )
-                        else:
-                            recs.append(
-                                f"**SELL PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
-                                f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
-                                f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
-                            )
+                        recs.append(
+                            f"**SELL PUT @ {best['strike']:g}** ({best_exp[-5:]}, ${best['mark']:.2f}) — "
+                            f"VRP {exp_vrp[best_exp]:.1f}%, IV (pp) {_rich(best) * 100:+.2f}%, "
+                            f"25Δ Skew {iv_skew:+.2%}, OI {best['open_interest']:,.0f}."
+                        )
 
     if strategy in ("Call Debit Spread",):
         calls = sorted(

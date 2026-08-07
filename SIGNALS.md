@@ -35,31 +35,39 @@ The **IV Skew (25Δ)** metric itself is computed for the **selected expiration**
 
 Options must have positive open interest and positive mark price. The strike range is limited by the sidebar's "Strikes around ATM" setting (default ±20 strikes). All recommendations use same-expiration legs where applicable.
 
+### Spot Zone Filtering
+
+**Critical filtering layer**: Strategy signals are calculated ONLY when spot is in the appropriate wall zone for each strategy type:
+
+- **Long Calls / Short Puts / Call Debit Spreads / Put Credit Spreads**: Calculated **ONLY when spot is IN SUPPORT ZONE**
+- **Long Puts / Short Calls / Put Debit Spreads / Call Credit Spreads**: Calculated **ONLY when spot is IN RESISTANCE ZONE**
+
+Tickers whose spot is not in the required zone for a strategy are automatically skipped (no signals generated). This ensures each strategy type trades only when spot is aligned with the market's structural support or resistance.
+
 ### Selection logic (Long / Short Calls / Puts)
 
 Each directional strategy follows a multi-step pipeline. All criteria are checked inside the strategy logic.
 
-| Strategy | GEX Bias | Strike filter | DTE range | Best expiration | IV Skew gate | Delta filter | Strike pick | Display |
-|---|---|---|---|---|---|---|---|---|
-| **Long Calls** | Bullish | `CALL strike > spot` (OTM) | 1–45 | lowest `exp_vrp` among candidate expirations | `> 0` | `\|Δ\| 0.35–0.55` | lowest SSVI richness (pp) | `Buy Call @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
-| **Long Puts** | Bearish | `PUT strike < spot` (OTM) | 1–45 | lowest `exp_vrp` among candidate expirations | `< 0` | `\|Δ\| 0.35–0.55` | lowest SSVI richness (pp) | `Buy Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
-| **Short Calls** | Bearish | `CALL strike > spot` (OTM) | 1–45 | highest `exp_vrp` among candidate expirations | `< 0` | `\|Δ\| 0.15–0.20` | highest SSVI richness (pp) | `Sell Call @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
-| **Short Puts** | Bullish | `PUT strike < spot` (OTM) | 1–45 | highest `exp_vrp` among candidate expirations | `> 0` | `\|Δ\| 0.15–0.20` | highest SSVI richness (pp) | `Sell Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
+| Strategy | Strike filter | DTE range | Best expiration | IV Skew gate | Delta filter | Strike pick | Display |
+|---|---|---|---|---|---|---|---|
+| **Long Calls** | `CALL strike > spot` (OTM) | 1–45 | lowest `exp_vrp` among candidate expirations | `> 0` | `\|Δ\| 0.35–0.55` | lowest SSVI richness (pp) | `Buy Call @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
+| **Long Puts** | `PUT strike < spot` (OTM) | 1–45 | lowest `exp_vrp` among candidate expirations | `< 0` | `\|Δ\| 0.35–0.55` | lowest SSVI richness (pp) | `Buy Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
+| **Short Calls** | `CALL strike > spot` (OTM) | 1–45 | highest `exp_vrp` among candidate expirations | `< 0` | `\|Δ\| 0.15–0.20` | highest SSVI richness (pp) | `Sell Call @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
+| **Short Puts** | `PUT strike < spot` (OTM) | 1–45 | highest `exp_vrp` among candidate expirations | `> 0` | `\|Δ\| 0.15–0.20` | highest SSVI richness (pp) | `Sell Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
 
 **Pipeline (all four):**
-1. Check GEX Bias matches the strategy direction (skip with message if mismatch)
-2. Filter to candidate options matching the strike filter (`strike` vs `spot`) with DTE 1–45
-3. Collect candidate expirations; pick the one with the **lowest** `exp_vrp` (long) or **highest** `exp_vrp` (short) — always ATM IV − RV, never per-strike. Final VRP gate: long needs `exp_vrp < −5%`, short needs `exp_vrp ≥ 5%` (skip with message otherwise)
-4. Check IV Skew gate (skip with message if not satisfied)
-5. Within that expiration, filter to the delta range using absolute delta `|Δ|`
-6. Pick the strike with the **lowest** (long) or **highest** (short) **SSVI richness pp** (IV − SSVI IV, both as decimals). Final richness gate: long needs richness `< −3pp`, short needs richness `> +8pp` (skip with message otherwise)
+1. Filter to candidate options matching the strike filter (`strike` vs `spot`) with DTE 1–45
+2. Collect candidate expirations; pick the one with the **lowest** `exp_vrp` (long) or **highest** `exp_vrp` (short) — always ATM IV − RV, never per-strike. Final VRP gate: long needs `exp_vrp < −5%`, short needs `exp_vrp ≥ 5%` (skip with message otherwise)
+3. Check IV Skew gate (skip with message if not satisfied)
+4. Within that expiration, filter to the delta range using absolute delta `|Δ|`
+5. Pick the strike with the **lowest** (long) or **highest** (short) **SSVI richness pp** (IV − SSVI IV, both as decimals). Final richness gate: long needs richness `< −3pp`, short needs richness `> +8pp` (skip with message otherwise)
 
 ### Buy Premium strategies
 
 | Strategy | Logic |
 |---|---|
-| **Long Calls** | GEX Bullish → OTM calls (`strike > spot`) DTE 1–45 → lowest-VRP expiration → IV skew `> 0` → `\|Δ\|` 0.35–0.55 → lowest SSVI richness (pp) → `Buy Call @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
-| **Long Puts** | GEX Bearish → OTM puts (`strike < spot`) DTE 1–45 → lowest-VRP expiration → IV skew `< 0` → `\|Δ\|` 0.35–0.55 → lowest SSVI richness (pp) → `Buy Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
+| **Long Calls** | OTM calls (`strike > spot`) DTE 1–45 → lowest-VRP expiration → IV skew `> 0` → `\|Δ\|` 0.35–0.55 → lowest SSVI richness (pp) → `Buy Call @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
+| **Long Puts** | OTM puts (`strike < spot`) DTE 1–45 → lowest-VRP expiration → IV skew `< 0` → `\|Δ\|` 0.35–0.55 → lowest SSVI richness (pp) → `Buy Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
 | **Long LEAPS** | Same as Long Calls, but DTE 90–365 (DTE filter applied in `_build_signals`) |
 | **Call Debit Spread** | Buy lowest-strike call / Sell highest-strike call, same expiration; both legs must have `exp_vrp ≤ 0` |
 | **Put Debit Spread** | Buy highest-strike put / Sell lowest-strike put, same expiration; both legs must have `exp_vrp ≤ 0` |
@@ -71,8 +79,8 @@ Each directional strategy follows a multi-step pipeline. All criteria are checke
 
 | Strategy | Logic |
 |---|---|
-| **Short Calls** | GEX Bearish → OTM calls (`strike > spot`) DTE 1–45 → highest-VRP expiration → IV skew `< 0` → `\|Δ\|` 0.15–0.20 → highest SSVI richness (pp) → `Sell Call @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
-| **Short Puts** | GEX Bullish → OTM puts (`strike < spot`) DTE 1–45 → highest-VRP expiration → IV skew `> 0` → `\|Δ\|` 0.15–0.20 → highest SSVI richness (pp) → `Sell Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
+| **Short Calls** | OTM calls (`strike > spot`) DTE 1–45 → highest-VRP expiration → IV skew `< 0` → `\|Δ\|` 0.15–0.20 → highest SSVI richness (pp) → `Sell Call @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
+| **Short Puts** | OTM puts (`strike < spot`) DTE 1–45 → highest-VRP expiration → IV skew `> 0` → `\|Δ\|` 0.15–0.20 → highest SSVI richness (pp) → `Sell Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
 | **Call Credit Spread** | Sell lowest OTM call / Buy higher OTM call, same expiration; picks the pair where the expiration has the highest `exp_vrp` |
 | **Put Credit Spread** | Sell highest OTM put / Buy lower OTM put, same expiration; picks the pair where the expiration has the highest `exp_vrp` |
 | **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes, with long protection legs at the richest OTM strikes beyond them. Falls back to symmetric wings if walls unavailable. Display shows expiration ATM VRP for each leg |

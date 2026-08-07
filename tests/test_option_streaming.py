@@ -102,9 +102,15 @@ class TestAbsorption:
         ticker["vol_history"] = [(fixed_now - 60, 0.0), (fixed_now, 10.0)]  # < 20
         assert svc.get_ticker_absorption("TEST") is None
 
-    def test_none_too_few_samples(self, svc, ticker, fixed_now):
+    def test_none_too_few_vol_samples(self, svc, ticker, fixed_now):
         ticker["spot"] = 570.0
-        ticker["spot_history"] = [(fixed_now, 570.0)]          # only 1 sample
+        ticker["spot_history"] = []  # fresh, will get sample added
+        ticker["vol_history"] = [(fixed_now, 1000.0)]        # only 1 vol sample
+        assert svc.get_ticker_absorption("TEST") is None
+
+    def test_none_zero_spot(self, svc, ticker, fixed_now):
+        ticker["spot"] = 0.0                                    # spot=0, won't add to spot_history
+        ticker["spot_history"] = [(fixed_now - 60, 569.95)]      # only 1 valid spot sample
         ticker["vol_history"] = [(fixed_now - 60, 0.0), (fixed_now, 1000.0)]
         assert svc.get_ticker_absorption("TEST") is None
 

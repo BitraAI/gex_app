@@ -1766,19 +1766,54 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym, "earnings_date": earnings_date}
 
 
+_BIAS_EMOJI = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}
+
+
+def _by_exp_all_from(chain: list[dict], spot: float) -> list[dict]:
+    """Aggregate option chain by expiration, keeping only expirations with a
+    positive ATM IV.  Shared by the single-ticker view and multi-ticker scan
+    so both paths build ``by_exp_all`` identically."""
+    return [e for e in aggregate_by_expiration(chain, spot=spot)
+            if e.get("atm_iv", 0) > 0]
+
 def _build_signals(
     data: list[dict], spot: float, analytics: dict, rv: float,
     pt: str, stg: str, atm_range: int = 20, by_exp_all: list | None = None,
     selected_expirations: list[str] | None = None,
     dte_min: int = 30, dte_max: int = 45,
+    compute_bias: bool = True,
 ) -> list[str]:
     """Build trade-signal recommendations for a single ticker's option data.
 
     Shared by the single-ticker Trade Signals view and the multi-ticker scan.
+    ``compute_bias`` only controls whether ``assess_market_bias`` is called
+    here (the result is passed to ``generate_recommendations``, which
+    currently ignores it); the multi-ticker scan computes its own per-ticker
+    bias for display separately, so it passes ``False`` to avoid the wasted
+    call.
     """
-    aks = sorted(set(e["strike"] for e in data))
+    # Calculate wall zones
+    call_wall = analytics.get("call_wall")
+    put_wall = analytics.get("put_wall")
+    
+    # Early return if no wall data
+    if not call_wall and not put_wall:
+        return []
+
+    # Filter data based on strategy type (single-side strategies only share the
+    # same CALL/PUT rule, so collapse the two equivalent branches).
+    if stg in ("Long Calls", "Long Puts", "Short Calls", "Short Puts",
+               "Call Debit Spread", "Put Debit Spread",
+               "Call Credit Spread", "Put Credit Spread"):
+        sd2 = [e for e in data if e["type"] == ("CALL" if "Call" in stg else "PUT")]
+    else:
+        sd2 = data
+
+    # Continue with the rest of the original function
+    aks = sorted(set(e["strike"] for e in sd2))
     atm_k = min(aks, key=lambda k: abs(k - spot)) if aks else spot
-    sd = [e for e in data if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and (e.get("iv", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
+    sd = [e for e in sd2 if e.get("open_interest", 0) > 0 and (e.get("mark", 0) or 0) > 0 and (e.get("iv", 0) or 0) > 0 and ((e["strike"] == atm_k) or (e["type"] == "CALL" and e["strike"] > spot) or (e["type"] == "PUT" and e["strike"] < spot))]
+    
     if atm_range > 0 and sd and spot > 0:
         sk = sorted(set(e["strike"] for e in sd)); ak = min(sk, key=lambda k: abs(k - spot)); ai = sk.index(ak)
         nb = min(atm_range, ai); na = min(atm_range, len(sk) - 1 - ai)
@@ -1791,21 +1826,17 @@ def _build_signals(
 
     _rec_stg = stg
     if stg == "Long LEAPS":
-        sd2 = [e for e in sd2 if dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max]
         _rec_stg = "Long Calls"
+    sd2 = [e for e in sd2 if dte_min <= (e.get("days_to_exp", 0) or 0) <= dte_max]
 
     _ssvi_surf = analytics.get("ssvi_surface")
-    _ir_tte = _tte_from_dtes([e.get("dte", 0) for e in by_exp_all]) if (_ssvi_surf is not None and by_exp_all) else None
+    if _ssvi_surf is not None and by_exp_all:
+        _ir_tte = _tte_from_dtes([e.get("dte", 0) for e in by_exp_all])
+    else:
+        _ir_tte = None
 
-    if stg in ("Long Calls", "Long Puts", "Call Debit Spread", "Put Debit Spread"):
-        sd2 = [e for e in sd2 if e["type"] == "CALL"] if "Call" in stg else [e for e in sd2 if e["type"] == "PUT"]
-    if stg in ("Short Calls", "Call Credit Spread"):
-        sd2 = [e for e in sd2 if e["type"] == "CALL"]
-    if stg in ("Short Puts", "Put Credit Spread"):
-        sd2 = [e for e in sd2 if e["type"] == "PUT"]
-
-    bias, _ = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))
-    rc = generate_recommendations(sd2, spot, strategy=_rec_stg, all_data=sd, rv=rv, call_wall=analytics.get("call_wall"), put_wall=analytics.get("put_wall"), iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte, bias=bias, dte_min=dte_min, dte_max=dte_max)
+    bias = assess_market_bias(analytics, spot, iv_rank=st.session_state.get("iv_rank"))[0] if compute_bias else None
+    rc = generate_recommendations(sd2, spot, strategy=_rec_stg, all_data=sd2, rv=rv, call_wall=call_wall, put_wall=put_wall, iv_skew=analytics.get("iv_skew"), ssvi_surface=_ssvi_surf, ssvi_tte=_ir_tte, bias=bias, dte_min=dte_min, dte_max=dte_max)
     return rc
 
 
@@ -1817,6 +1848,23 @@ def _strategy_side(stg: str) -> str | None:
     if "put" in name:
         return "put"
     return None
+
+
+def _skew_blocks_strategy(pt: str, stg: str, iv_skew: float | None) -> bool:
+    """Whether the IV-skew/strategy-side prefilter should drop a ticker.
+
+    A single-side strategy is skipped when the skew sign disagrees with the
+    premium direction (e.g. long calls need positive skew, long puts need
+    negative skew).  Returns True when the ticker should be skipped.
+    """
+    if iv_skew is None:
+        return False
+    side = _strategy_side(stg)
+    if side is None:
+        return False
+    if pt == "Buy Premium":
+        return (side == "call" and iv_skew <= 0) or (side == "put" and iv_skew >= 0)
+    return (side == "call" and iv_skew >= 0) or (side == "put" and iv_skew <= 0)
 
 
 def render_trade_signals():
@@ -1844,15 +1892,15 @@ def render_trade_signals():
             _dte_col1, _dte_col2 = st.columns(2)
             _leaps = stg == "Long LEAPS"
             with _dte_col1:
-                dte_min = st.number_input("DTE Min", min_value=1, max_value=365, value=90 if _leaps else 30, step=1, key="dte_min")
+                dte_min = st.number_input("DTE Min", min_value=1, max_value=365, value=90 if _leaps else 1, step=1, key="dte_min")
             with _dte_col2:
                 dte_max = st.number_input("DTE Max", min_value=1, max_value=365, value=365 if _leaps else 45, step=1, key="dte_max")
+            run = st.button("Run scan", key="run_ticker_scan")
 
         with c2:
             if not scan_all:
                 b, br = assess_market_bias(s.analytics, s.spot, iv_rank=s.get("iv_rank"))
-                e = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "🟡"}
-                st.markdown(f"**Market Bias:** {e.get(b, '')} {b} - {br}")
+                st.markdown(f"**Market Bias:** {_BIAS_EMOJI.get(b, '')} {b} - {br}")
                 # Lazily fetch earnings date if not already in session state
                 _sym_earn = _normalize_display_symbol(s.get("symbol", ""))
                 _ed = s.get("next_earnings_date")
@@ -1863,49 +1911,46 @@ def render_trade_signals():
                     except Exception:
                         pass
                 st.markdown(f"**Next Earnings:** {_ed or 'N/A'}")
-                # Use same data for walls as charts: 20 strikes below/above ATM (41 total)
-                chart_sweeps_data = s.filtered_data
-                rc = _build_signals(
-                    chart_sweeps_data, s.spot, s.analytics, _rv, pt, stg,
-                    atm_range=s.get("strikes_atm_range", 20), by_exp_all=s.get("by_exp_all"),
-                    selected_expirations=[e for e in s.get("selected_expiration", []) if isinstance(e, str)] or None,
-                    dte_min=dte_min, dte_max=dte_max,
-                )
+                if run:
+                    # Full raw chain with all expirations — matches the multi-ticker scan input
+                    full_chain = s.get("data") or []
+                    rc = _build_signals(
+                        full_chain, s.spot, s.analytics, _rv, pt, stg,
+                        atm_range=s.get("strikes_atm_range", 20),
+                        by_exp_all=_by_exp_all_from(full_chain, s.spot) or s.get("by_exp_all"),
+                        selected_expirations=None,
+                        dte_min=dte_min, dte_max=dte_max,
+                    )
+                    st.session_state.single_ticker_signals = rc
+                rc = st.session_state.get("single_ticker_signals")
                 if rc:
                     for r in rc:
                         st.markdown(f"- {r}")
                 else:
-                    st.info("No strong signals")
+                    st.info("Click 'Run scan' to see strategy signals")
             else:
                 tickers = list(s.get("ticker_history", []))
                 if not tickers:
                     st.info("No tickers in ticker_history.json")
                 else:
-                    run = st.button("Run scan", key="run_ticker_scan")
                     if run:
                         st.session_state.ticker_scan_empty = False
                         results = {}
+                        scan_analytics = {}
                         for sym in tickers:
                             with st.spinner(f"Analyzing {sym}..."):
                                 res = _run_ticker_signals(sym)
                             if res is None:
                                 continue
-                            _sk = res["analytics"].get("iv_skew")
-                            _side = _strategy_side(stg)
-                            if _sk is not None and _side is not None:
-                                if pt == "Buy Premium" and _side == "call" and _sk <= 0:
-                                    continue
-                                if pt == "Buy Premium" and _side == "put" and _sk >= 0:
-                                    continue
-                                if pt == "Sell Premium" and _side == "call" and _sk >= 0:
-                                    continue
-                                if pt == "Sell Premium" and _side == "put" and _sk <= 0:
-                                    continue
+                            scan_analytics[sym] = res
+                            if _skew_blocks_strategy(pt, stg, res["analytics"].get("iv_skew")):
+                                continue
                             rc = _build_signals(
                                 res["data"], res["spot"], res["analytics"], res["rv"], pt, stg,
                                 atm_range=s.get("strikes_atm_range", 20),
-                                by_exp_all=[e for e in aggregate_by_expiration(res["data"], spot=res["spot"]) if e.get("atm_iv", 0) > 0],
+                                by_exp_all=_by_exp_all_from(res["data"], res["spot"]),
                                 dte_min=dte_min, dte_max=dte_max,
+                                compute_bias=False,
                             )
                             _no_sig = "No strong signals" in " ".join(rc)
                             if rc and not _no_sig:
@@ -1919,6 +1964,18 @@ def render_trade_signals():
                         st.session_state.ticker_scan_pt = pt
                         st.session_state.ticker_scan_stg = stg
                         st.session_state.ticker_scan_empty = (len(results) == 0)
+                        st.session_state.ticker_scan_analytics = scan_analytics
+
+                    # Display per-ticker Market Bias for the latest multi-ticker scan
+                    _scan_analytics = st.session_state.get("ticker_scan_analytics")
+                    if _scan_analytics:
+                        _bias_lines = []
+                        for _sym, _res in _scan_analytics.items():
+                            _b, _ = assess_market_bias(_res["analytics"], _res["spot"], iv_rank=_res["analytics"].get("iv_rank"))
+                            _bias_lines.append(f"{_sym}: {_BIAS_EMOJI.get(_b, '')} {_b}")
+                        if _bias_lines:
+                            st.markdown("**Market Bias:** " + " | ".join(_bias_lines))
+                            st.markdown("")
 
                     results = st.session_state.get("ticker_scan_results")
                     if results:
