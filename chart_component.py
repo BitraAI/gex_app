@@ -22,6 +22,28 @@ _HTML_TEMPLATE = """
     const RENDER_VERSION = (window[RENDER_KEY] || 0) + 1;
     window[RENDER_KEY] = RENDER_VERSION;
 
+    // ---- Skip full chart rebuild when the payload is identical --------- //
+    // The candlestick fragment runs every 2s; without this guard it wipes
+    // and recreates the lightweight-chart even when nothing changed (no
+    // streaming ticks, no indicator toggle), causing visible flicker.
+    // We hash the init payload (candles, indicators, walls, status) and
+    // short-circuit only when it matches the previously rendered one —
+    // genuine updates (new live bar, indicator toggle, symbol switch)
+    // get a fresh chart as before.
+    const PAYLOAD_HASH_KEY = '__lwc_payload_hash_' + ROOT_ID;
+    const PAYLOAD_VERSION_KEY = '__lwc_payload_version_' + ROOT_ID;
+    let _payloadHash = '';
+    try { _payloadHash = JSON.stringify(DATA.init); } catch (e) { _payloadHash = ''; }
+    if (window[PAYLOAD_HASH_KEY] === _payloadHash && container && container.firstChild && (window[PAYLOAD_VERSION_KEY] || 0) > 0) {
+        // Identical payload — keep the existing chart mounted and just bump
+        // the render version so any future stale callbacks see the same
+        // RENDER_VERSION they were created with.
+        window[RENDER_KEY] = window[PAYLOAD_VERSION_KEY];
+        return;
+    }
+    window[PAYLOAD_HASH_KEY] = _payloadHash;
+    window[PAYLOAD_VERSION_KEY] = RENDER_VERSION;
+
     // ---- Preserve visible range across Streamlit re-renders ---------- //
     const SAVED_KEY = '__lwc_saved_' + ROOT_ID;
     const prevSaved = window[SAVED_KEY];
