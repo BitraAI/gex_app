@@ -200,7 +200,7 @@ You can then open the app in your local browser.
 
 ## Configure Local User Service
 
-Systemd user service for GammaEx GEX Analytics Streamlit App in ~/.config/systemd/user/gex-app.service
+Systemd user service for GammaEx GEX Analytics Streamlit App in ~/.local/share/systemd/user/gex-app.service
 
 ## Service File
 
@@ -211,7 +211,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=/home/spark_admin/gex_app
-ExecStart=/home/spark_admin/gex_venv/bin/streamlit run app.py --server.port 8501
+ExecStart=/path/to/gex_venv/bin/streamlit run app.py --server.port 8501
 Restart=always
 RestartSec=10
 
