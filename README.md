@@ -219,8 +219,6 @@ RestartSec=10
 WantedBy=default.target
 ```
 
-## Usage
-
 ### Start the service
 ```bash
 systemctl --user start gex-app.service
