@@ -1108,10 +1108,26 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         else:
             strat_alerts = build_strategy_alerts(data, analytics, spot, rv)
         all_alerts = new_alerts + strat_alerts
-        # Filter out "Wall changed" and all wall-broke/absorbed alerts permanently
-        # — only wall-reversal and strategy recommendation alerts are sent to Telegram.
+        # Diagnostic: trace why strategy recommendation blocks may be empty for
+        # a given symbol (equities often lack SSVI/iv_skew enrichment from the
+        # ETF fallback path that index symbols get).
+        if not strat_alerts:
+            logger.info(
+                "[%s] empty strat_alerts — iv_skew=%s ssvi_surface=%s atm_iv=%s "
+                "near_atm_pool=%d spot=%s wall_zone=%s",
+                display_key,
+                analytics.get("iv_skew"),
+                "yes" if analytics.get("ssvi_surface") is not None else "no",
+                analytics.get("atm_iv"),
+                len(data),
+                spot,
+                _wall_zone,
+            )
+        # Filter out wall-broke and wall-reversal alerts from the periodic
+        # poller path — those are surfaced by the streaming
+        # ``maybe_fire_wall_zone_alerts`` path with full L2 context instead.
+        # "Wall changed" alerts are intentionally passed through.
         tg_alerts = [a for a in all_alerts if not (
-            "Wall changed" in a or
             "wall BROKE" in a or
             "wall REVERSAL" in a
         )]

@@ -234,6 +234,16 @@ def _extract_option_fields(
             mark = 0
         mark = float(mark)
 
+        bid = opt.get("bid", 0)
+        if bid is None:
+            bid = 0
+        bid = float(bid)
+
+        ask = opt.get("ask", 0)
+        if ask is None:
+            ask = 0
+        ask = float(ask)
+
         if not expiration:
             return None
 
@@ -263,6 +273,8 @@ def _extract_option_fields(
             "open_interest": oi,
             "volume": volume,
             "mark": mark,
+            "bid": bid,
+            "ask": ask,
             "gex": gex,
             "vex": vex,
             "cex": cex,

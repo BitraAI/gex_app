@@ -309,13 +309,11 @@ page (`fetch_data`) and by the Trade Signals tab scan.
 ### Trend alerts (Telegram)
 
 The `maybe_fire_wall_zone_alerts` function sends **wall-reversal trend alerts**,
-**wall-broke alerts**, and **strategy recommendation blocks** to Telegram.
-"Wall changed" alerts (gamma flip / wall zone change transitions) are
-**permanently removed** from Telegram — they are filtered out at the
-`tg_alerts` collection step before `notify_alerts`. Front expiration VRP
-is no longer passed as a header parameter to `notify_alerts`; it is excluded
-from the Telegram header but remains in the underlying strategy recommendation
-text.
+**wall-broke alerts**, **wall-change diff alerts** (Call/Put Wall / Gamma Flip /
+Dealer flip changed, plus wall price-crossings), and **strategy recommendation
+blocks** to Telegram. Front expiration VRP is no longer passed as a header
+parameter to `notify_alerts`; it is excluded from the Telegram header but
+remains in the underlying strategy recommendation text.
 
 When the trend reversal fires inside a wall zone, it is emitted as a dedicated
 wall-reversal alert:
@@ -367,9 +365,9 @@ This replaces the previous behavior where trend alerts were *filtered*
   signals at key levels surface.
 
 All diff-based alerts (wall zone, gamma flip, wall change, wall-broke)
-except "Wall changed" alerts, wall-reversal trend alerts, and strategy
+except wall-broke alerts, wall-reversal trend alerts, and strategy
 recommendation blocks are sent to Telegram. "Wall changed" alerts are
-permanently filtered out. Front expiration VRP is removed from the
+passed through unchanged. Front expiration VRP is removed from the
 Telegram header (not passed to `notify_alerts`) but remains in strategy
 recommendation text.
 

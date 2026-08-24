@@ -18,10 +18,10 @@ def assess_market_bias(
     if gamma_flip and spot > 0:
         if spot > gamma_flip:
             score -= 1
-            reasons.append(f"Spot above gamma flip (${gamma_flip:g}) — dealers short gamma")
+            reasons.append(f"Spot above gamma flip ${gamma_flip:.2f} - dealers short gamma")
         else:
             score += 1
-            reasons.append(f"Spot below gamma flip (${gamma_flip:g}) — dealers long gamma")
+            reasons.append(f"Spot below gamma flip ${gamma_flip:.2f} - dealers long gamma")
 
     net_gex = analytics.get("net_gex", 0)
     if net_gex > 0:
@@ -35,18 +35,18 @@ def assess_market_bias(
     if iv_skew is not None:
         if iv_skew > 0:
             score += 1
-            reasons.append(f"IV Skew (25Δ) positive ({iv_skew:+.2%}) — calls cheap (bullish)")
+            reasons.append(f"IV Skew (25Δ) positive {iv_skew:+.2%} - calls cheap (bullish)")
         elif iv_skew < 0:
             score -= 1
-            reasons.append(f"IV Skew (25Δ) negative ({iv_skew:+.2%}) — puts cheap (bearish)")
+            reasons.append(f"IV Skew (25Δ) negative {iv_skew:+.2%} - puts cheap (bearish)")
 
     if iv_rank is not None:
         if iv_rank > 70:
             score -= 1
-            reasons.append(f"IV Rank high ({iv_rank:.0f}%) — options expensive, favor selling")
+            reasons.append(f"IV Rank high {iv_rank:.0f}% - options expensive, favor selling")
         elif iv_rank < 30:
             score += 1
-            reasons.append(f"IV Rank low ({iv_rank:.0f}%) — options cheap, favor buying")
+            reasons.append(f"IV Rank low {iv_rank:.0f}% - options cheap, favor buying")
 
     call_wall = analytics.get("call_wall")
     put_wall = analytics.get("put_wall")
@@ -55,10 +55,10 @@ def assess_market_bias(
         dist_below = spot - put_wall
         if dist_above < dist_below:
             score -= 0.5
-            reasons.append(f"Call wall closer than put wall (${call_wall:g}) — resistance near")
+            reasons.append(f"Call wall closer than put wall ${call_wall:.2f} - near resistance")
         elif dist_below < dist_above:
             score += 0.5
-            reasons.append(f"Put wall closer than call wall (${put_wall:g}) — support near")
+            reasons.append(f"Put wall closer than call wall ${put_wall:.2f} - near support")
 
     if score >= 1:
         bias = "Bullish"
