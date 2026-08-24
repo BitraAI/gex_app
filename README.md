@@ -198,6 +198,68 @@ When running on a remote host via VS Code, the editor automatically detects the 
 
 You can then open the app in your local browser.
 
+## Configure Local User Service
+
+Systemd user service for GammaEx GEX Analytics Streamlit App.
+
+## Service File
+
+```
+[Unit]
+Description=GammaEx GEX Analytics Streamlit App
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/spark_admin/gex_app
+ExecStart=/home/spark_admin/gex_venv/bin/streamlit run app.py --server.port 8501
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+## Usage
+
+### Start the service
+```bash
+systemctl --user start gex-app.service
+```
+
+### Stop the service
+```bash
+systemctl --user stop gex-app.service
+```
+
+### Restart the service
+```bash
+systemctl --user restart gex-app.service
+```
+
+### Enable service to start on login
+```bash
+systemctl --user enable gex-app.service
+```
+
+### Disable service from starting on login
+```bash
+systemctl --user disable gex-app.service
+```
+
+### Check service status
+```bash
+systemctl --user status gex-app.service
+```
+
+### View logs (journalctl)
+```bash
+journalctl --user -u gex-app.service
+```
+
+### Follow logs in real-time
+```bash
+journalctl --user -u gex-app.service -f
+
 ## Usage
 
 1. Enter a ticker symbol (e.g., SPY, AAPL, TSLA, $SPX) in the sidebar
