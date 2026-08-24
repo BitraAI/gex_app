@@ -200,7 +200,7 @@ You can then open the app in your local browser.
 
 ## Configure Local User Service
 
-Systemd user service for GammaEx GEX Analytics Streamlit App.
+Systemd user service for GammaEx GEX Analytics Streamlit App in ~/.config/systemd/user/gex-app.service
 
 ## Service File
 
