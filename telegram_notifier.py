@@ -124,6 +124,18 @@ def notify_alerts(
     alerts = list(alerts)
     if not alerts:
         return False
+    # Suppress alerts outside US regular trading hours (09:30-16:00 ET,
+    # Mon-Fri, excluding major holidays) — option flow signals are not
+    # actionable when the market is closed, and stale quotes would only
+    # re-fire dupes overnight.
+    try:
+        from flow import is_market_open
+        if not is_market_open():
+            logger.debug("market closed — suppressing Telegram alerts for %s",
+                         symbol or "?")
+            return False
+    except Exception as exc:  # noqa: BLE001 — never block alerts on import error
+        logger.warning("is_market_open check failed: %s", exc)
     text = _format(alerts, symbol=symbol, spot=spot, gex=gex, iv_rank=iv_rank,
                    wall_zone=wall_zone, pw=pw, cw=cw, wall_mark=wall_mark, trend_alert=trend_alert,
                    absorption=absorption, absorbed_at_wall=absorbed_at_wall,
@@ -136,11 +148,18 @@ def diff_alerts(
     analytics: dict[str, Any],
     spot: float,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Track per-symbol alert state across polls.
+    """Pure diff of the previous per-symbol state vs the current analytics.
 
-    Returns ``(new_alerts, next_state)``. The caller stores *next_state* as
-    the new baseline; *new_alerts* is always empty — live alert generation is
-    handled by ``maybe_fire_wall_zone_alerts``.
+    Returns ``(new_alerts, next_state)``. If ``prev`` is None or empty this is
+    treated as a first-seen baseline: it returns ``([], <baseline>)`` so the
+    first poll after a ticker is added does not fire a storm of spurious
+    "changed" alerts.
+
+    The set of events detected:
+        - Gamma Flip change
+        - Call Wall / Put Wall change
+        - Dealer gamma flip (Long ↔ Short)
+        - Spot crossing above/below Call Wall or Put Wall
     """
     cur = {
         "gamma_flip": analytics.get("gamma_flip"),
@@ -152,7 +171,47 @@ def diff_alerts(
         "atm_strike": analytics.get("atm_strike"),
     }
 
-    return [], cur
+    if not prev:
+        return [], cur
+
+    new_alerts: list[str] = []
+
+    gf = cur["gamma_flip"]
+    prev_gf = prev.get("gamma_flip")
+    if gf != prev_gf and prev_gf is not None and gf is not None:
+        new_alerts.append(f"Gamma Flip changed: ${prev_gf:.2f} \u2192 ${gf:.2f}")
+
+    cw = cur["call_wall"]
+    prev_cw = prev.get("call_wall")
+    if cw != prev_cw and prev_cw is not None and cw is not None:
+        new_alerts.append(f"Call Wall changed: ${prev_cw:.2f} \u2192 ${cw:.2f}")
+
+    pw = cur["put_wall"]
+    prev_pw = prev.get("put_wall")
+    if pw != prev_pw and prev_pw is not None and pw is not None:
+        new_alerts.append(f"Put Wall changed: ${prev_pw:.2f} \u2192 ${pw:.2f}")
+
+    dp = cur["dealer_position"]
+    prev_dp = prev.get("dealer_position")
+    if prev_dp == "Long Gamma" and dp == "Short Gamma":
+        new_alerts.append("Dealer flipped from Long Gamma to Short Gamma")
+    elif prev_dp == "Short Gamma" and dp == "Long Gamma":
+        new_alerts.append("Dealer flipped from Short Gamma to Long Gamma")
+
+    prev_spot = prev.get("spot")
+    if prev_spot is not None:
+        if cw is not None:
+            if prev_spot <= cw and spot > cw:
+                new_alerts.append(f"Price crossed above Call Wall (${cw:.2f})")
+            elif prev_spot >= cw and spot < cw:
+                new_alerts.append(f"Price crossed below Call Wall (${cw:.2f})")
+        if pw is not None:
+            if prev_spot <= pw and spot > pw:
+                new_alerts.append(f"Price crossed above Put Wall (${pw:.2f})")
+            elif prev_spot >= pw and spot < pw:
+                new_alerts.append(f"Price crossed below Put Wall (${pw:.2f})")
+
+    return new_alerts, cur
 
 
 def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None, rv: Optional[float] = None) -> str:

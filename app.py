@@ -620,7 +620,7 @@ def check_alerts(analytics: dict, spot: float):
     if all_alerts and _now - _last_alert_ts >= _WALL_ZONE_ALERT_COOLDOWN:
         st.session_state._last_check_alert_ts = _now
         st.session_state.alerts = all_alerts + st.session_state.alerts[:20]
-        tg_alerts = [a for a in all_alerts if "Wall changed" not in a]
+        tg_alerts = all_alerts
         if tg_alerts:
             _cw = analytics.get("call_wall")
             _pw = analytics.get("put_wall")
@@ -2209,11 +2209,222 @@ def render_news_frag():
         )
 
 
+def _format_uw_exp(exp: str | None) -> str:
+    """Format an expiration date as 'MM-DD (Nd)' for the scanner table."""
+    if not exp:
+        return ""
+    try:
+        exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+        dte = (exp_date - datetime.now().date()).days
+        return f"{exp[5:10]} ({max(dte, 0)}d)"
+    except (ValueError, TypeError):
+        return exp or ""
+
+
+def _infer_uw_side(bid: float, ask: float, mark: float) -> str:
+    """Infer the aggressor side (ASK/BID/MID) from the mark's position
+    within the bid-ask spread.
+
+    Trading at/near the ask means a buyer lifted the offer (demand);
+    at/near the bid means a seller hit the bid (supply); a mark sitting
+    on the midpoint (or a missing bid/ask) is uninformative -> MID.
+    """
+    if bid <= 0 or ask <= 0 or ask <= bid:
+        return "MID"
+    mid = (bid + ask) / 2
+    half = (ask - bid) / 2
+    frac = (mark - mid) / half if half > 0 else 0.0
+    if frac >= 0.3:
+        return "ASK"
+    if frac <= -0.3:
+        return "BID"
+    return "MID"
+
+
+def render_unusual_whales():
+    """Unusual Whales scanner tab.
+
+    Scans every tracked ticker (or just the current one) for "unusual"
+    options blocks: outsized volume relative to open interest (fresh
+    positioning rather than churn) or extreme traded premium.  Uses the
+    same self-contained per-ticker fetch as the Trade Signals scan so it
+    never disturbs the main session state.
+    """
+    s = st.session_state
+
+    st.subheader("Unusual Whales Scanner")
+
+    with st.expander("How to read this scanner", expanded=False):
+        st.markdown(
+            "Each row is a single option contract flagged by the scanner. "
+            "**Vol/OI** is today's volume divided by open interest &mdash; a "
+            "ratio above 1.0 means more contracts traded today than are open, "
+            "a classic sign of fresh position building (unusual flow) rather "
+            "than churn of existing contracts. **Premium** is "
+            "`mark x volume x 100`, the estimated money traded at the last mark."
+        )
+
+    scope = st.radio(
+        "Scope",
+        ["All tracked tickers", "Current ticker only"],
+        horizontal=True,
+        key="uw_scope",
+    )
+    if scope == "All tracked tickers":
+        tickers = list(s.get("ticker_history", []))
+    else:
+        tickers = [s.get("symbol", "")] if s.get("symbol") else []
+    if not tickers:
+        st.info("No tickers to scan — add tickers on the main page first.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        min_vol = st.number_input("Min Volume", min_value=1, value=1000, step=100, key="uw_min_vol")
+    with c2:
+        min_ratio = st.number_input("Min Vol/OI", min_value=0.1, value=1.0, step=0.1, key="uw_min_ratio")
+    with c3:
+        min_premium = st.number_input("Min Premium ($)", min_value=0, value=100000, step=10000, key="uw_min_premium")
+    with c4:
+        max_dte = st.number_input("Max DTE", min_value=1, value=3, step=1, key="uw_max_dte")
+
+    otm_only = st.checkbox(
+        "Show OTM only (strikes beyond spot)",
+        value=True,
+        key="uw_otm_only",
+    )
+
+    run = st.button("Run scan", type="primary", key="run_uw_scan")
+
+    if run:
+        rows = []
+        with st.spinner(f"Scanning {len(tickers)} ticker(s)..."):
+            for sym in tickers:
+                core = _fetch_option_chain_core(sym)
+                if core is None or core["fetch_error"] is not None:
+                    continue
+                data, spot = core["data"], core["spot"]
+                if not data or spot <= 0:
+                    continue
+                for opt in data:
+                    volume = int(opt.get("volume", 0) or 0)
+                    if volume < min_vol:
+                        continue
+                    dte = int(opt.get("days_to_exp", 0) or 0)
+                    if dte <= 0 or dte > max_dte:
+                        continue
+                    oi = int(opt.get("open_interest", 0) or 0)
+                    ratio = volume / oi if oi > 0 else float("inf")
+                    if oi > 0 and ratio < min_ratio:
+                        continue
+                    mark = float(opt.get("mark", 0) or 0)
+                    premium = mark * volume * 100
+                    if premium < min_premium:
+                        continue
+                    if otm_only:
+                        if opt["type"] == "CALL" and opt["strike"] <= spot:
+                            continue
+                        if opt["type"] == "PUT" and opt["strike"] >= spot:
+                            continue
+                    rows.append({
+                        "Ticker": core["sym"],
+                        "Type": opt["type"],
+                        "Side": _infer_uw_side(
+                            float(opt.get("bid", 0) or 0),
+                            float(opt.get("ask", 0) or 0),
+                            float(opt.get("mark", 0) or 0),
+                        ),
+                        "Strike": opt["strike"],
+                        "Expiration": opt["expiration"],
+                        "DTE": dte,
+                        "Volume": volume,
+                        "OI": oi,
+                        "Vol/OI": ratio if oi > 0 else None,
+                        "Mark": mark,
+                        "Premium": premium,
+                        "IV": opt.get("iv", 0) or 0,
+                        "Delta": opt.get("delta", 0) or 0,
+                        "Spot": spot,
+                    })
+        if rows:
+            df = pd.DataFrame(rows).sort_values("Premium", ascending=False)
+            st.session_state.uw_results = df.reset_index(drop=True)
+        else:
+            st.session_state.uw_results = pd.DataFrame()
+
+    results_df = s.get("uw_results")
+    if results_df is None or results_df.empty:
+        st.info("Set your filters and click **Run scan** to surface unusual options activity.")
+        return
+
+    _total_premium = float(results_df["Premium"].sum())
+    _calls = int((results_df["Type"] == "CALL").sum())
+    _puts = int((results_df["Type"] == "PUT").sum())
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Flagged contracts", len(results_df))
+    m2.metric("Total premium", f"${_total_premium:,.0f}")
+    m3.metric("Tickers", results_df["Ticker"].nunique())
+    m4.metric("Calls / Puts", f"{_calls} / {_puts}")
+
+    df = results_df.head(3000).copy()
+    df["Expiration"] = df["Expiration"].map(_format_uw_exp)
+
+    def _row_style(row):
+        is_call = row["Type"] == "CALL"
+        bg = "#e6f7f1" if is_call else "#fdecec"
+        side = row["Side"]
+        if side == "ASK":
+            side_style = "color: #00cc96; font-weight: 600;"
+        elif side == "BID":
+            side_style = "color: #ef5350; font-weight: 600;"
+        else:
+            side_style = "color: #ff9800;"
+        return [
+            side_style if col == "Side" else f"background-color: {bg};"
+            for col in row.index
+        ]
+
+    styled = (
+        df.style
+        .apply(_row_style, axis=1)
+        .format({
+            "Strike": "${:,.2f}",
+            "Volume": "{:,.0f}",
+            "OI": "{:,.0f}",
+            "Vol/OI": lambda v: "—" if pd.isna(v) else f"{v:.2f}x",
+            "Mark": "${:,.2f}",
+            "Premium": "${:,.0f}",
+            "IV": lambda v: "—" if pd.isna(v) or v == 0 else f"{(v / 100 if v > 3 else v):.0%}",
+            "Delta": "{:.2f}",
+            "Spot": "${:,.2f}",
+        })
+        .set_properties(**{"text-align": "right"})
+    )
+
+    st.markdown("""
+<style>
+div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
+div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
+</style>
+""", unsafe_allow_html=True)
+    st.dataframe(
+        styled,
+        height=460,
+        column_config={
+            "Type": st.column_config.TextColumn("Type", width="small"),
+            "Ticker": st.column_config.TextColumn("Ticker", width="small"),
+            "Side": st.column_config.TextColumn("Side", width="small"),
+        },
+    )
+
+
 def render_tabs_frag():
     # Create the tabs with updated order
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "Market Structure", "Positioning", "Volatility", "Heatmaps",
-        "Options Data", "Candlesticks", "Trade Signals", "Order Flow", "Live News"
+        "Options Data", "Candlesticks", "Trade Signals", "Order Flow", "Unusual Whales",
+        "Live News"
     ])
     
     # Render each tab
@@ -2242,6 +2453,9 @@ def render_tabs_frag():
         render_flow_frag()
     
     with tab9:
+        render_unusual_whales()
+    
+    with tab10:
         render_news_frag()
 
 
