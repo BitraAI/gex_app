@@ -259,6 +259,7 @@ journalctl --user -u gex-app.service
 ### Follow logs in real-time
 ```bash
 journalctl --user -u gex-app.service -f
+```
 
 ## Usage
 
