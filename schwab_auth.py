@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 import os
 import sys
+from datetime import datetime, timezone
 
 from schwab import auth
 
 from config import CALLBACK_URL, CLIENT_ID, CLIENT_SECRET, MAX_TOKEN_AGE, TOKEN_PATH
+from _utils import load_json, ensure_dir
 
 
 def _verify_token(path: str) -> bool:
-    import json
-    from datetime import datetime, timezone
     try:
-        with open(path) as f:
-            token = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+        token = load_json(path)
+        if token is None:
+            return False
+    except Exception:
         return False
 
     required_keys = {"access_token", "refresh_token"}
@@ -29,13 +30,13 @@ def _verify_token(path: str) -> bool:
 
     # Refresh token expired → must re-auth
     if now > ct + MAX_TOKEN_AGE:
-        print("Token expired (refresh token >7 days old).", file=__import__("sys").stderr)
+        print("Token expired (refresh token >7 days old).", file=sys.stderr)
         return False
 
     # Access token expired → still ok (library auto-refreshes)
     ei = raw.get("expires_in")
     if ei is not None and now > ct + ei:
-        print("Access token expired; refresh will occur on next API call.", file=__import__("sys").stderr)
+        print("Access token expired; refresh will occur on next API call.", file=sys.stderr)
 
     return True
 
@@ -45,7 +46,7 @@ def main():
         print("Error: client_id and client_secret not found in config.toml or SCHWAB_CLIENT_ID/SCHWAB_CLIENT_SECRET env vars.", file=sys.stderr)
         sys.exit(1)
 
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
+    ensure_dir(TOKEN_PATH)
 
     print("Opening browser for Schwab OAuth login...")
     print(f"Callback URL: {CALLBACK_URL}")

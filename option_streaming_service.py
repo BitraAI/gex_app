@@ -1,11 +1,11 @@
 import asyncio
-import json
 import os
 import threading
 import time as _time_mod
 from datetime import datetime
 import pandas as pd
 from _constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS
+from _utils import load_json, save_json
 from calculations import calculate_atm_strike, get_strike_spacing
 
 
@@ -26,17 +26,11 @@ TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.
 
 
 def _load_ticker_history() -> list[str]:
-    try:
-        with open(TICKER_HISTORY_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    return load_json(TICKER_HISTORY_FILE, [])
 
 
 def _save_ticker_history(history: list[str]) -> None:
-    os.makedirs(os.path.dirname(TICKER_HISTORY_FILE), exist_ok=True)
-    with open(TICKER_HISTORY_FILE, "w") as f:
-        json.dump(history, f)
+    save_json(TICKER_HISTORY_FILE, history)
 
 
 def _make_option_symbol(root: str, yymmdd: str, call_put: str, strike: float) -> str:
@@ -151,15 +145,9 @@ class AtmOptionVolumeService:
         self._put_bid: float | None = None
         self._put_ask: float | None = None
 
-        # Aggregated 1-second bars (primary symbol for chart merge)
-        self._df: pd.DataFrame = pd.DataFrame(
-            columns=[
-                "call_buy_vol", "call_sell_vol",
-                "put_buy_vol", "put_sell_vol",
-                "total_buy_vol", "total_sell_vol",
-            ]
-        )
-        self._df.index.name = "datetime"
+        # Aggregated 1-second bars (primary symbol for chart merge) — list-based
+        # accumulator for O(1) appends; converted to DataFrame only on demand.
+        self._bars: list[dict] = []
         self._lock = threading.Lock()
 
         # Current (incomplete) 1-second bucket
@@ -317,28 +305,26 @@ class AtmOptionVolumeService:
     def get_candles(self) -> pd.DataFrame:
         """Return snapshot of completed 1s bars plus the live incomplete bar."""
         with self._lock:
-            if self._df.empty and self._current_bar is None:
+            columns = [
+                "call_buy_vol", "call_sell_vol",
+                "put_buy_vol", "put_sell_vol",
+                "total_buy_vol", "total_sell_vol",
+            ]
+            if not self._bars and self._current_bar is None:
                 return pd.DataFrame()
 
-            out = self._df.copy()
+            out = pd.DataFrame(self._bars, columns=columns)
+            out.index.name = "datetime"
             if self._current_bar is not None:
-                row = pd.DataFrame(
-                    [[
-                        self._current_bar["call_buy_vol"],
-                        self._current_bar["call_sell_vol"],
-                        self._current_bar["put_buy_vol"],
-                        self._current_bar["put_sell_vol"],
-                        self._current_bar["total_buy_vol"],
-                        self._current_bar["total_sell_vol"],
-                    ]],
-                    columns=[
-                        "call_buy_vol", "call_sell_vol",
-                        "put_buy_vol", "put_sell_vol",
-                        "total_buy_vol", "total_sell_vol",
-                    ],
-                    index=pd.Index([self._current_bucket], name="datetime"),
-                )
-                out = pd.concat([out, row])
+                row = pd.DataFrame([{
+                    "call_buy_vol": self._current_bar["call_buy_vol"],
+                    "call_sell_vol": self._current_bar["call_sell_vol"],
+                    "put_buy_vol": self._current_bar["put_buy_vol"],
+                    "put_sell_vol": self._current_bar["put_sell_vol"],
+                    "total_buy_vol": self._current_bar["total_buy_vol"],
+                    "total_sell_vol": self._current_bar["total_sell_vol"],
+                }])
+                out = pd.concat([out, row], ignore_index=True)
             return out
 
     def register(self, stream_client, symbol: str, expiration: str):
@@ -347,14 +333,7 @@ class AtmOptionVolumeService:
         subscription."""
         self._stop_locked()
         with self._lock:
-            self._df = pd.DataFrame(
-                columns=[
-                    "call_buy_vol", "call_sell_vol",
-                    "put_buy_vol", "put_sell_vol",
-                    "total_buy_vol", "total_sell_vol",
-                ]
-            )
-            self._df.index.name = "datetime"
+            self._bars = []
             self._current_bucket = None
             self._current_bar = None
             self._ticks_received = 0
@@ -374,7 +353,6 @@ class AtmOptionVolumeService:
             # Reset the watchdog timestamp so it doesn't immediately fire
             # again after this re-registration.  The flow needs time to
             # re-subscribe and start receiving ticks.
-            import time as _time_mod
             self._last_tick_time = _time_mod.time()
 
         self._symbol = symbol
@@ -1407,25 +1385,9 @@ class AtmOptionVolumeService:
 
         if bucket != self._current_bucket:
             if self._current_bar is not None:
-                row = pd.DataFrame(
-                    [[
-                        self._current_bar["call_buy_vol"],
-                        self._current_bar["call_sell_vol"],
-                        self._current_bar["put_buy_vol"],
-                        self._current_bar["put_sell_vol"],
-                        self._current_bar["total_buy_vol"],
-                        self._current_bar["total_sell_vol"],
-                    ]],
-                    columns=[
-                        "call_buy_vol", "call_sell_vol",
-                        "put_buy_vol", "put_sell_vol",
-                        "total_buy_vol", "total_sell_vol",
-                    ],
-                    index=pd.Index([self._current_bucket], name="datetime"),
-                )
-                self._df = pd.concat([self._df, row])
-                if len(self._df) > MAX_BAR_ROWS:
-                    self._df = self._df.iloc[-MAX_BAR_ROWS:]
+                self._bars.append(self._current_bar)
+                if len(self._bars) > MAX_BAR_ROWS:
+                    self._bars = self._bars[-MAX_BAR_ROWS:]
 
             # Start new bucket
             cbv = size if (opt_type == "CALL" and direction == "buy") else 0
