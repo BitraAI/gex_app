@@ -45,11 +45,9 @@ class StreamingService:
         # same StreamClient.
         self._on_reconnect_cbs: list = []
 
-        # Aggregated 1-second OHLCV DataFrame — index = bucket start (ms)
-        self._df: pd.DataFrame = pd.DataFrame(
-            columns=["open", "high", "low", "close", "volume", "buy_vol", "sell_vol"]
-        )
-        self._df.index.name = "datetime"
+        # Aggregated 1-second OHLCV — list-based accumulator for O(1) appends;
+        # converted to DataFrame only when consumed by get_candles().
+        self._bars: list[dict] = []
         self._lock = threading.Lock()
 
         # Current (incomplete) 1-second bucket
@@ -107,25 +105,23 @@ class StreamingService:
     def get_candles(self) -> pd.DataFrame:
         """Return snapshot of completed 1s bars plus the live incomplete bar."""
         with self._lock:
-            if self._df.empty and self._current_bar is None:
+            if not self._bars and self._current_bar is None:
                 return pd.DataFrame()
 
-            out = self._df.copy()
+            columns = ["open", "high", "low", "close", "volume", "buy_vol", "sell_vol"]
+            out = pd.DataFrame(self._bars, columns=columns)
+            out.index.name = "datetime"
             if self._current_bar is not None:
-                row = pd.DataFrame(
-                    [[
-                        self._current_bar["open"],
-                        self._current_bar["high"],
-                        self._current_bar["low"],
-                        self._current_bar["close"],
-                        self._current_bar["volume"],
-                        self._current_bar["buy_vol"],
-                        self._current_bar["sell_vol"],
-                    ]],
-                    columns=["open", "high", "low", "close", "volume", "buy_vol", "sell_vol"],
-                    index=pd.Index([self._current_bucket], name="datetime"),
-                )
-                out = pd.concat([out, row])
+                row = pd.DataFrame([{
+                    "open": self._current_bar["open"],
+                    "high": self._current_bar["high"],
+                    "low": self._current_bar["low"],
+                    "close": self._current_bar["close"],
+                    "volume": self._current_bar["volume"],
+                    "buy_vol": self._current_bar["buy_vol"],
+                    "sell_vol": self._current_bar["sell_vol"],
+                }])
+                out = pd.concat([out, row], ignore_index=True)
             return out
 
     def start(self, symbol: str):
@@ -133,10 +129,7 @@ class StreamingService:
             return
         self._stop_locked()
         with self._lock:
-            self._df = pd.DataFrame(
-                columns=["open", "high", "low", "close", "volume", "buy_vol", "sell_vol"]
-            )
-            self._df.index.name = "datetime"
+            self._bars = []
             self._current_bucket = None
             self._current_bar = None
             self._ticks_received = 0
@@ -184,22 +177,9 @@ class StreamingService:
         if bucket != self._current_bucket:
             # Finalise previous bucket
             if self._current_bar is not None:
-                row = pd.DataFrame(
-                    [[
-                        self._current_bar["open"],
-                        self._current_bar["high"],
-                        self._current_bar["low"],
-                        self._current_bar["close"],
-                        self._current_bar["volume"],
-                        self._current_bar["buy_vol"],
-                        self._current_bar["sell_vol"],
-                    ]],
-                    columns=["open", "high", "low", "close", "volume", "buy_vol", "sell_vol"],
-                    index=pd.Index([self._current_bucket], name="datetime"),
-                )
-                self._df = pd.concat([self._df, row])
-                if len(self._df) > MAX_BAR_ROWS:
-                    self._df = self._df.iloc[-MAX_BAR_ROWS:]
+                self._bars.append(self._current_bar)
+                if len(self._bars) > MAX_BAR_ROWS:
+                    self._bars = self._bars[-MAX_BAR_ROWS:]
 
             # Start new bucket
             self._current_bucket = bucket

@@ -11,6 +11,7 @@ from config import (
     CLIENT_SECRET,
     TOKEN_PATH,
 )
+from _utils import to_json as _to_json, load_json, save_json
 
 CANDLE_CACHE_DIR = Path.home() / ".local" / "share" / "gex_app" / "candles"
 
@@ -18,18 +19,14 @@ logger = logging.getLogger(__name__)
 
 
 def _token_loader() -> dict[str, Any]:
-    import json
-    with open(TOKEN_PATH) as f:
-        return json.load(f)
+    token = load_json(TOKEN_PATH)
+    if token is None:
+        return {}
+    return token
 
 
 def _token_writer(token: dict[str, Any], *args: Any, **kwargs: Any) -> None:
-    import json
-    import os
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with open(fd, "w") as f:
-        json.dump(token, f)
+    save_json(TOKEN_PATH, token, secure=True)
 
 
 def create_client() -> AsyncClient:
@@ -76,9 +73,7 @@ async def fetch_option_chain(
             from_date=date.fromisoformat(from_date),
             to_date=date.fromisoformat(to_date),
         )
-        if hasattr(resp, "json"):
-            return resp.json()
-        return resp
+        return _to_json(resp)
     except Exception as e:
         logger.warning("fetch_option_chain failed for %s: %s", symbol, e)
         raise
@@ -91,12 +86,8 @@ async def fetch_quotes(
         result = await client.get_quotes(symbols)
         if isinstance(result, dict):
             pass
-        elif hasattr(result, "json"):
-            try:
-                result = result.json()
-            except (ValueError, TypeError):
-                logger.warning("fetch_quotes json decode failed for %s", symbols)
-                return {}
+        else:
+            result = _to_json(result) or {}
         if not isinstance(result, dict):
             return {}
         return result
@@ -110,8 +101,7 @@ async def _extract_from_quote(
 ) -> float:
     try:
         resp = await client.get_quotes([symbol])
-        if hasattr(resp, "json"):
-            resp = resp.json()
+        resp = _to_json(resp)
         if not isinstance(resp, dict):
             return 0.0
         qd = resp.get(symbol, {}) or {}
@@ -134,8 +124,7 @@ async def get_interest_rate(client: AsyncClient) -> float:
     for sym in ("SGOV", "BIL", "SHV"):
         try:
             resp = await client.get_quotes([sym])
-            if hasattr(resp, "json"):
-                resp = resp.json()
+            resp = _to_json(resp)
             if not isinstance(resp, dict):
                 continue
             qd = resp.get(sym, {}) or {}
@@ -153,8 +142,7 @@ async def get_next_earnings_date(client: AsyncClient, symbol: str) -> Optional[s
     # 1. Try Schwab quote fundamental data
     try:
         resp = await client.get_quotes([symbol])
-        if hasattr(resp, "json"):
-            resp = resp.json()
+        resp = _to_json(resp)
         if isinstance(resp, dict):
             qd = resp.get(symbol, {}) or {}
             fund = qd.get("fundamental", {}) or {}
@@ -297,8 +285,7 @@ async def fetch_price_history_intraday(
                 need_extended_hours_data=False,
             )
 
-        if hasattr(resp, "json"):
-            resp = resp.json()
+        resp = _to_json(resp)
         candles = resp.get("candles", []) if isinstance(resp, dict) else []
         result = []
         for c in candles:
@@ -405,8 +392,7 @@ async def fetch_price_history_daily(
             frequency=1,
             need_extended_hours_data=False,
         )
-        if hasattr(resp, "json"):
-            resp = resp.json()
+        resp = _to_json(resp)
         candles = resp.get("candles", []) if isinstance(resp, dict) else []
         result = []
         for c in candles:
@@ -531,8 +517,7 @@ async def get_20d_rv(client: AsyncClient, symbol: str, length: int = 20) -> floa
             frequency=client.PriceHistory.Frequency.DAILY,
             need_extended_hours_data=False,
         )
-        if hasattr(resp, "json"):
-            resp = resp.json()
+        resp = _to_json(resp)
         candles = resp.get("candles", []) if isinstance(resp, dict) else []
         if len(candles) < length + 1:
             return 0.0

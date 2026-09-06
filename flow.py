@@ -12,6 +12,7 @@ import streamlit as st
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP
+from _utils import compute_strike_increment, format_expiration
 from option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol, _ABSORPTION_MIN_VOL
 from client import fetch_quotes
 from calculations import calculate_atm_strike
@@ -194,8 +195,6 @@ def ensure_atm_streaming(stream_symbol: str):
     _current_sym = _normalize_display_symbol(s.get("symbol", ""))
     if _current_sym and _current_sym not in [_normalize_display_symbol(t) for t in _all_tickers]:
         _all_tickers = list(_all_tickers) + [_current_sym]
-
-    import time as _time_mod
 
     # Index quotes (SPX, RUT, NDX) refreshed every ~10 s via direct REST
     # API polling — the sole source for index-level spots.
@@ -1047,11 +1046,9 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                 analytics.get("put_wall_mark"),
             )
 
-        strikes = sorted(set(e["strike"] for e in data))
-        if len(strikes) >= 2:
-            _strike_inc[display_key] = min(
-                strikes[i+1] - strikes[i] for i in range(len(strikes)-1)
-            )
+        _si = compute_strike_increment(data)
+        if _si is not None:
+            _strike_inc[display_key] = _si
 
         _BASE_DIR = os.path.expanduser("~/.local/share/gex_app")
         _ALERT_STATE_FILE = os.path.join(_BASE_DIR, "alert_state.json")
@@ -1210,11 +1207,9 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
                 analytics.get("put_wall_mark"),
             )
 
-        strikes = sorted(set(e["strike"] for e in data))
-        if len(strikes) >= 2:
-            _strike_inc[display_key] = min(
-                strikes[i+1] - strikes[i] for i in range(len(strikes)-1)
-            )
+        _si = compute_strike_increment(data)
+        if _si is not None:
+            _strike_inc[display_key] = _si
     except Exception as exc:
         logger.warning("[%s] wall refresh failed: %s", display_key, exc)
 
@@ -1245,15 +1240,7 @@ def _format_expiration(exp: str | None) -> str:
     
     Returns empty string for None/invalid input.
     """
-    if not exp:
-        return ""
-    try:
-        exp_date = date.fromisoformat(exp)
-        dte = (exp_date - date.today()).days
-        mmdd = exp[5:10]  # "MM-DD"
-        return f"{mmdd} ({dte}d)" if dte >= 0 else f"{mmdd} (0d)"
-    except (ValueError, TypeError):
-        return exp or ""
+    return format_expiration(exp)
 
 
 def render_flow_legend_and_style():

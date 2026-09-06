@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 import client as client_mod
 from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
+from _utils import compute_strike_increment, floor_dataframe_timestamps, compute_current_bucket, format_expiration
 from client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from streaming_service import StreamingService
 from option_streaming_service import (AtmOptionVolumeService, _load_ticker_history, _save_ticker_history, _normalize_display_symbol, _get_stream_symbol)
@@ -358,11 +359,9 @@ def fetch_data(symbol: str) -> bool:
     # REST wall recompute for a non-primary ticker, which can make the
     # half-strike threshold too large (lazy walls for SPY, NDX etc.) or
     # too small (noisy refreshes for SPX).
-    _strikes = sorted(set(e["strike"] for e in data))
-    if len(_strikes) >= 2:
-        _strike_inc[_normalize_display_symbol(_sym)] = min(
-            _strikes[i + 1] - _strikes[i] for i in range(len(_strikes) - 1)
-        )
+    _si = compute_strike_increment(data)
+    if _si is not None:
+        _strike_inc[_normalize_display_symbol(_sym)] = _si
     st.session_state.etf_analytics = etf_analytics
     if etf_analytics and st.session_state.analytics.get("net_gex", 0) == 0:
         for key in ("net_gex", "total_call_gex", "total_put_gex",
@@ -908,8 +907,7 @@ def render_candlesticks_frag():
         _first_exp = st.session_state.get("selected_expiration")
         _first_exp = _first_exp[0] if isinstance(_first_exp, list) and _first_exp else (_first_exp if isinstance(_first_exp, str) else None)
         if atm_svc and atm_svc.is_running and _first_exp:
-            import time as _time_mod
-            _now = _time_mod.time()
+            _now = time.time()
             _last_spot_refresh = s.get("_last_spot_refresh", 0)
             if _now - _last_spot_refresh >= 2:
                 s._last_spot_refresh = _now
@@ -992,35 +990,7 @@ def render_candlesticks_frag():
                     # Floor streaming 1s bars to the user's timeframe boundary so
                     # live ticks update the current historical bar.
                     tf_minutes = (client_mod.TIMEFRAMES.get(timeframe) or {}).get("minutes")
-                    if tf_minutes is None:
-                        # Daily/weekly/monthly timeframes have no "minutes" key.
-                        # The historical cache for these is timestamped at
-                        # midnight US/Eastern (TDA convention — 05:00 UTC during
-                        # EDT, 06:00 UTC during EST), NOT midnight UTC. So we
-                        # floor live ticks to the America/New_York day boundary
-                        # (their local midnight interpreted as UTC ms) so today's
-                        # daily cache bar keeps updating with new ticks. Otherwise
-                        # the live ticks would floor to UTC midnight and never
-                        # match the historical EDT-midnight bar — today's bar
-                        # wouldn't appear/get updated.
-                        tf_ms = 24 * 60 * 60 * 1000
-                        try:
-                            _ny_tz = ZoneInfo("America/New_York")
-                            # Convert each tick ms -> NY-local date, take that
-                            # date's start-of-day in NY, convert back to UTC ms.
-                            # NOTE: pandas datetime64[ms] casts to int64 directly in
-                            # milliseconds — do NOT divide by 1_000_000.
-                            tick_dt = pd.to_datetime(stream_df["datetime"], unit="ms", utc=True).dt.tz_convert(_ny_tz)
-                            day_start_ny = tick_dt.dt.normalize()
-                            stream_df["datetime"] = day_start_ny.dt.tz_convert("UTC").astype("int64")
-                        except Exception:
-                            # Fallback: floor to UTC day boundary (less correct
-                            # for daily/weekly/monthly cache alignment but never
-                            # raises).
-                            stream_df["datetime"] = (stream_df["datetime"] // tf_ms) * tf_ms
-                    else:
-                        tf_ms = tf_minutes * 60 * 1000
-                        stream_df["datetime"] = (stream_df["datetime"] // tf_ms) * tf_ms
+                    stream_df = floor_dataframe_timestamps(stream_df, "datetime", timeframe, tf_minutes)
                     # Aggregate streaming bars per (timeframe-aligned) timestamp
                     stream_agg = stream_df.groupby("datetime").agg({
                         "open": "first", "high": "max", "low": "min", "close": "last",
@@ -1039,20 +1009,7 @@ def render_candlesticks_frag():
                     # so the live-last-bucket timestamp matches what
                     # stream_agg["datetime"] uses (US/Eastern day boundary for
                     # daily/weekly/monthly; intraday-aligned bucket otherwise).
-                    now_utc_ms = int(pd.Timestamp.now(tz="UTC").value // 1_000_000)
-                    if tf_minutes is None:
-                        try:
-                            _ny_tz = ZoneInfo("America/New_York")
-                            current_bucket = int(
-                                pd.Timestamp.now(tz=_ny_tz)
-                                .normalize()
-                                .tz_convert("UTC")
-                                .value // 1_000_000
-                            )
-                        except Exception:
-                            current_bucket = (now_utc_ms // tf_ms) * tf_ms
-                    else:
-                        current_bucket = (now_utc_ms // tf_ms) * tf_ms
+                    current_bucket = compute_current_bucket(timeframe, tf_minutes)
                     # The "live last bar" is whichever bucket is furthest right:
                     # the current timeframe bucket, or the most recent historical
                     # bar (when the cache is ahead of the wall clock for any
@@ -1177,18 +1134,7 @@ def render_candlesticks_frag():
                 if _idx_spot is not None and float(_idx_spot) > 0:
                     _idx_spot = float(_idx_spot)
                     _tf_min_idx = (client_mod.TIMEFRAMES.get(timeframe) or {}).get("minutes")
-                    if _tf_min_idx is None:
-                        _tf_ms_idx = 24 * 60 * 60 * 1000
-                        try:
-                            _ny_tz_idx = ZoneInfo("America/New_York")
-                            _live_bucket_idx = int(
-                                pd.Timestamp.now(tz=_ny_tz_idx).normalize().tz_convert("UTC").value // 1_000_000
-                            )
-                        except Exception:
-                            _live_bucket_idx = (int(pd.Timestamp.now(tz="UTC").value // 1_000_000) // _tf_ms_idx) * _tf_ms_idx
-                    else:
-                        _tf_ms_idx = _tf_min_idx * 60 * 1000
-                        _live_bucket_idx = (int(pd.Timestamp.now(tz="UTC").value // 1_000_000) // _tf_ms_idx) * _tf_ms_idx
+                    _live_bucket_idx = compute_current_bucket(timeframe, _tf_min_idx)
                     chart_df = chart_df.sort_values("datetime").reset_index(drop=True)
                     _last_hist_time_idx = int(chart_df["datetime"].iloc[-1])
                     _live_last_time_idx = max(_last_hist_time_idx, _live_bucket_idx)
@@ -1232,19 +1178,7 @@ def render_candlesticks_frag():
                         atm_df["datetime"] = atm_df["datetime"].astype("int64")
                         # Floor ATM 1-second bucket timestamps to the chart's
                         # timeframe boundary so they match chart_df["datetime"].
-                        _tf_min = (client_mod.TIMEFRAMES.get(timeframe) or {}).get("minutes")
-                        if _tf_min is None:
-                            _tf_ms = 24 * 60 * 60 * 1000
-                            try:
-                                _ny_tz = ZoneInfo("America/New_York")
-                                tick_dt = pd.to_datetime(atm_df["datetime"], unit="ms", utc=True).dt.tz_convert(_ny_tz)
-                                day_start_ny = tick_dt.dt.normalize()
-                                atm_df["datetime"] = day_start_ny.dt.tz_convert("UTC").astype("int64")
-                            except Exception:
-                                atm_df["datetime"] = (atm_df["datetime"] // _tf_ms) * _tf_ms
-                        else:
-                            _tf_ms = _tf_min * 60 * 1000
-                            atm_df["datetime"] = (atm_df["datetime"] // _tf_ms) * _tf_ms
+                        atm_df = floor_dataframe_timestamps(atm_df, "datetime", timeframe)
                         atm_agg = atm_df.groupby("datetime").agg({
                             "call_buy_vol": "sum", "call_sell_vol": "sum",
                             "put_buy_vol": "sum", "put_sell_vol": "sum",
@@ -1992,6 +1926,20 @@ def render_trade_signals():
                         st.info("No signals found across tickers")
 
 
+_STYLED_DF_CSS = """
+<style>
+div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
+div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
+</style>
+"""
+
+
+def _render_styled_dataframe(styled, height=400, column_config=None):
+    """Render a styled Streamlit dataframe with horizontal-scroll CSS."""
+    st.markdown(_STYLED_DF_CSS, unsafe_allow_html=True)
+    st.dataframe(styled, height=height, column_config=column_config)
+
+
 def render_options_data():
     """Renders the Options Data table.
     
@@ -2150,13 +2098,7 @@ def render_table():
         "Put Delta": "{:.4f}",
     })
 
-    st.markdown("""
-<style>
-div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
-div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
-</style>
-""", unsafe_allow_html=True)
-    st.dataframe(styled, height=400)
+    _render_styled_dataframe(styled, height=400)
 
 
 
@@ -2211,14 +2153,7 @@ def render_news_frag():
 
 def _format_uw_exp(exp: str | None) -> str:
     """Format an expiration date as 'MM-DD (Nd)' for the scanner table."""
-    if not exp:
-        return ""
-    try:
-        exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
-        dte = (exp_date - datetime.now().date()).days
-        return f"{exp[5:10]} ({max(dte, 0)}d)"
-    except (ValueError, TypeError):
-        return exp or ""
+    return format_expiration(exp)
 
 
 def _infer_uw_side(bid: float, ask: float, mark: float) -> str:
@@ -2402,13 +2337,7 @@ def render_unusual_whales():
         .set_properties(**{"text-align": "right"})
     )
 
-    st.markdown("""
-<style>
-div[data-testid="stDataFrame"] { overflow-x: auto; max-width: 100%; }
-div[data-testid="stDataFrame"] > div { overflow-x: auto !important; }
-</style>
-""", unsafe_allow_html=True)
-    st.dataframe(
+    _render_styled_dataframe(
         styled,
         height=460,
         column_config={
