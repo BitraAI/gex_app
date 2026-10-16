@@ -11,7 +11,7 @@ from _utils import compute_strike_increment, floor_dataframe_timestamps, compute
 from client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from streaming_service import StreamingService
 from option_streaming_service import (AtmOptionVolumeService, _load_ticker_history, _save_ticker_history, _normalize_display_symbol, _get_stream_symbol)
-from chart_component import render_chart
+from chart_component import render_chart, render_chart_host
 from flow import (
     _ensure_async_loop,
     _ticker_analytics_cache,
@@ -1272,7 +1272,7 @@ def render_candlesticks_frag():
         elif not _eq_svc.is_running:
             _status = {"text": f"Starting {stream_symbol} stream...", "level": "info"}
         elif _eq_svc.is_connected and _eq_svc.has_data:
-            _msg = f"Receiving {stream_symbol} ticks · {_eq_svc.ticks_received} received"
+            _msg = f"Receiving {stream_symbol} ticks · {_eq_svc.ticks_received}"
             if "Option_Volume_Profile" in selected_indicators and _atm_svc is not None:
                 if _atm_svc.is_running and _atm_svc.has_data:
                     _n = _atm_svc.ticks_received
@@ -1290,6 +1290,10 @@ def render_candlesticks_frag():
             if _err:
                 _msg += f": {_err}"
             _status = {"text": _msg, "level": "warning"}
+
+        # Persistent chart host (constant element): keeps the chart DOM alive
+        # even on ticks without candle data, so it never "disappears".
+        render_chart_host()
 
         if candles_payload:
             iv_skew_indicator_enabled = any(ind in selected_indicators for ind in ["IV Skew (25Δ)"])
