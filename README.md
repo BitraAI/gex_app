@@ -7,7 +7,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 ## Features
 
 - **Real-time Option Chain Data** — Fetches live options data via the Schwab API. For index symbols (`$SPX`, `$RUT`, `$NDX`), the ETF proxy chain (`SPY`, `IWM`, `QQQ`) is automatically fetched as a fallback: when the index chain returns zero gamma or open interest (common with Schwab's index data), delta-matched values from the ETF chain backfill the missing fields so GEX calculations remain meaningful. Per-ticker expirations are managed independently, so non-primary tickers subscribe to the correct option contracts.
-- **Candlestick Charts** — Interactive OHLCV charts with SMA/EMA overlays, Trend, Volume (buy/sell pressure with streaming delta), Volume Profile (VPVR — client-side per-bar volume binned at each visible price level with buy/sell split, POC highlighted, recomputes on every pan/zoom), Anchored VWAP (session-reset line, anchored at each 09:30 ET boundary), Andean Oscillator, and EMA 50 Squeeze indicators. Live ticks from the equity WebSocket are merged into the current bar every second (see `CANDLESTICS.md`). The **Order Flow** tab shows the real-time ATM option flow with per-ticker expirations.
+- **Candlestick Charts** — Interactive OHLCV charts with SMA/EMA overlays, Trend, Volume (buy/sell pressure with streaming delta), Volume Profile (VPVR — client-side per-bar volume binned at each visible price level with buy/sell split, POC highlighted, recomputes on every pan/zoom), Anchored VWAP (session-reset line, anchored at each 09:30 ET boundary), Andean Oscillator, and EMA 50 indicators. Live ticks from the equity WebSocket are merged into the current bar every second (see `CANDLESTICS.md`). The **Order Flow** tab shows the real-time ATM option flow with per-ticker expirations, delta-weighted Net Flow, L2 Liquidity Flow, and Absorption metrics.
 - **Candlestick Chart Interactions** — TradingView-style dual-axis pan and zoom:
   - **Drag in the chart body** pans BOTH the time (X) and price (Y) axes together vertically and horizontally (custom body-drag handler pans Y; LWC handles X natively).
   - **Drag the price-scale labels** (right edge) or **drag the time-scale labels** (bottom) zooms each respective axis natively.
@@ -33,7 +33,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Dealer Position (Long/Short Gamma)
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
    - IV Rank — Where the latest daily return sits in the trailing 52-week range of daily returns. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
-    - **Order Flow** — Real-time ATM option flow for every tracked ticker, shown in the **Order Flow** tab. Subscribes to front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming (with L2 options book support). Index symbols (`$SPX`/`$RUT`/`$NDX`) stream their ETF proxy's options (`SPY`/`IWM`/`QQQ`) at the proxy's ATM strike, so Book Imbalance works for indices too. Each ticker uses its own per-ticker expiration (fetched lazily), so non-primary tickers subscribe to the correct option contracts. The grid shows per-ticker Spot, ATM Strike, Support (Put Wall) / Resistance (Call Wall), ATM Call/Put prices (refreshed every ~2 s from REST option marks — index-option root for indices), a **Trend** label (`up` / `down` / `UP` / `DOWN` / `bullish` / `bearish` / `flat`), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed**, and **Flow Acceleration** (first / second differences of the L2 book-imbalance series), all sourced from `StreamingService.trend_data()`, plus **Absorption** (ATM option volume per $1 of spot move over 60 s — how much flow the book soaked up without moving price), **Liquidity Flow** (net change in L2 resting depth over 60 s — liquidity added/drained), **Buy/Sell** (session-cumulative executed flow split by aggressor side), and **Net Flow** (60 s buy − sell; each trade print updates every tracked ticker sharing that option root, so tracking both `$SPX` and `SPY` updates both rows). Streaming starts when you Refresh a ticker on the main page.
+    - **Order Flow** — Real-time ATM option flow for every tracked ticker, shown in the **Order Flow** tab. Subscribes to front expiration ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming (with L2 options book support). Index symbols (`$SPX`/`$RUT`/`$NDX`) stream their ETF proxy's options (`SPY`/`IWM`/`QQQ`) at the proxy's ATM strike, so Book Imbalance works for indices too. Each ticker uses its own per-ticker expiration (fetched lazily), so non-primary tickers subscribe to the correct option contracts. The grid shows per-ticker **Spot** (live equity stream or REST pre-fetch; index spots fetched separately via REST, stored as normalized uppercase display symbol), **Trend** (`up`/`down`/`UP`/`DOWN`/`bullish`/`bearish`/`flat` — from L2 book-imbalance momentum over 60 s), **Call Price** / **Put Price** (REST option marks at the put-wall / call-wall strikes, refreshed every ~2 s — index symbols quote their own index-option root), **Support** (Put Wall: strike below spot with highest put GEX) and **Resistance** (Call Wall: strike above spot with highest call GEX), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed** (first difference of book-imbalance over 60 s), **Flow Acceleration** (second difference, split at time midpoint), **Absorption** (ATM option volume per $1 of spot move — heavy absorption = price pinned, thin flow = price drifting), **Liquidity Flow** (net change in L2 resting depth over 60 s — positive = book refilling, negative = liquidity draining / break risk), **Net Flow** (60 s delta-weighted executed flow: `delta_buy − delta_sell`; each trade print routes to every tracked ticker whose stream symbol matches the option root), **Buy/Sell** (session-cumulative executed flow split by aggressor side), and **Flow Ratio** (red background `#ef5350` when > 0.8, green background `#00cc96` when < 0.2, bold text). Ticker flow tracking uses normalized display symbols (uppercase, no "$") as keys in `_ticker_flows` so lookups stay consistent. Spot cell background turns green/red on support/resistance wall breaks or reversals. Spot price updates always apply regardless of service running state. Streaming starts when you Refresh a ticker on the main page.
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
@@ -65,15 +65,15 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - **IV (pp)** — IV Richness in percentage points = IV - SSVI IV
   - **Call/Put Delta** — Option delta at the front expiration (used for the Trade Signals delta filters)
 - **Light Theme** — Clean light-themed UI
-- **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
-  - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
-  - **Trend alerts:** `bullish` / `bearish` (reversals) and `up` / `down` directional signals (sourced from `StreamingService.trend_data()` L2 book-imbalance momentum near a wall) sent with a trade suggestion (`BUY CALL` / `BUY PUT`)
-   - **Order absorption:** `Absorption` (vol/$1) and `Wall absorbed` headers on trend/wall alerts, plus a 💥 "wall BROKE after absorbing N contracts" alert when a wall finally breaks
-  - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" and "No OTM ..." informational messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
-  Two delivery paths:
-  - **In-app (single-ticker):** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
-  - **In-app (multi-ticker):** `flow.maybe_fire_wall_zone_alerts()` runs on every Order Flow grid refresh and diffs every tracked ticker in `ticker_history.json` against the persisted per-symbol baseline — no cron / standalone runner required.
-  All alerts are Markdown-formatted with the symbol header and current spot. Reads `BOT_TOKEN` / `CHAT_ID` from the `[telegram]` section of `config.toml` (overridable via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars). Set `enabled = false` to mute alerts without removing secrets. Alerts are delivered silently by default so they don't buzz the recipient's device on every refresh.
+  - **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
+   - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
+   - **Trend alerts:** Wall-reversal alerts with a **conviction gate** (0–5 score from `book_imbalance`, `flow_speed`, `flow_acceleration`, `liquidity_flow`, `net_flow`, and `absorption`). Reversals (`bullish`/`bearish`) at walls fire with score ≥ 2. Directional signals sent with a trade suggestion (`BUY CALL` / `BUY PUT`)
+   - **Wall-broke alerts:** 💥 "wall BROKE after absorbing N contracts" when a wall finally breaks
+   - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" and "No OTM ..." informational messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
+   Two delivery paths:
+   - **In-app (single-ticker):** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
+   - **In-app (multi-ticker):** `flow.maybe_fire_wall_zone_alerts()` runs on every Order Flow grid refresh and diffs every tracked ticker in `ticker_history.json` against the persisted per-symbol baseline — no cron / standalone runner required.
+   All alerts are Markdown-formatted with the symbol header and current spot. Reads `BOT_TOKEN` / `CHAT_ID` from the `[telegram]` section of `config.toml` (overridable via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars). Set `enabled = false` to mute alerts without removing secrets. Alerts are delivered silently by default so they don't buzz the recipient's device on every refresh.
 
 ## Setup
 
@@ -131,7 +131,9 @@ Environment variables `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` override `co
 
 #### Telegram Alerts (optional)
 
-To receive alerts when GEX events fire (gamma flip / wall changes, dealer gamma flips, price crossings), add a `[telegram]` section to `config.toml`:
+See **TELEGRAM.md** for full setup, alert types, message format, and suppression rules.
+
+Quick start: add a `[telegram]` section to `config.toml`:
 
 ```toml
 [telegram]
@@ -140,19 +142,7 @@ BOT_TOKEN = "YOUR_BOT_TOKEN"       # from @BotFather
 CHAT_ID = "YOUR_CHAT_ID"           # from @userinfobot (or a negative group id, or @channelname)
 ```
 
-- Get a `BOT_TOKEN` from [@BotFather](https://t.me/BotFather) after creating a bot.
-- Create a private Channel. Add the bot as admin. Enable Manage Messages -> Post Messages.
-- Get your `CHAT_ID` (Channel's -100… ID) from https://api.telegram.org/bot<BOT_TOKEN>/getUpdates.
-- Environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` override `config.toml`.
-- Alerts are sent synchronously over HTTPS via the Telegram Bot API (no extra async runtime needed) and never raise into the Streamlit app — failed sends are logged but do not interrupt the dashboard.
-
-#### Automatic Multi-Ticker Alerts
-
-Multi-ticker alerts run **inside the Streamlit app** — there is no cron job or standalone runner. Each Order Flow grid refresh invokes `flow.maybe_fire_wall_zone_alerts()`, which iterates every ticker in `~/.local/share/gex_app/ticker_history.json` (the same list the dashboard maintains as you flip through symbols), diffs each symbol's current state against its previous baseline, and pushes Telegram alerts on detected transitions.
-
-Per-symbol previous state is persisted to `~/.local/share/gex_app/alert_state.json` so consecutive refreshes detect true transitions rather than re-broadcasting the current state on every poll. The loop is self-guarded: it is a no-op outside US regular trading hours (Mon–Fri 09:30–16:00 America/New_York) and the heavy full-recompute path is throttled per-ticker (price-move OR max-age triggered, with a minimum cooldown) so Schwab's API quota is respected.
-
-Because the alerts piggyback on the dashboard's existing L1/L2 option stream, every tracked ticker sees its own streaming spot, walls, and trend data drive `diff_alerts` — the same pure rule the in-app single-ticker path and the historical cron runner used (`telegram_notifier.diff_alerts`). Keeping the dashboard open during market hours is all that's required for hands-free multi-ticker alerts.
+Environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` override `config.toml`.
 
 ### Schwab Authentication
 
@@ -272,14 +262,14 @@ journalctl --user -u gex-app.service -f
    - **Drag the price-scale labels** (right edge) to zoom the Y-axis, or the **time-scale labels** (bottom) to zoom the X-axis.
    - **Scroll the mouse wheel** to zoom the X-axis (bar spacing).
    - The Y zoom persists across the live 1-second streaming updates — drag it to where you want and the chart stays there.
- 8. **Order Flow** — open the **Order Flow** tab to see the real-time ATM order-flow grid for every ticker in `ticker_history.json`. Columns: Ticker, Spot, ATM Strike, Expiration, Support (Put Wall), Resistance (Call Wall), Call Price, Put Price, **Trend** (`up` / `down` / `UP` / `DOWN` / `bullish` / `bearish` / `flat` — see `StreamingService.trend_data()`), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed**, and **Flow Acceleration** (first / second differences of the L2 book-imbalance series), plus a market status indicator (green `●` when market is open, amber `●` when closed). Call/Put prices refresh every ~2 s; index symbols (`$SPX`/`$RUT`/`$NDX`) stream via their ETF proxy at proxy strikes and quote index-option roots. Streaming starts when you Refresh a ticker on the main page, so load a symbol first.
+ 8. **Order Flow** — open the **Order Flow** tab to see the real-time ATM order-flow grid for every ticker in `ticker_history.json`. Columns: **Ticker**, **Spot** (live equity stream or REST pre-fetch), **ATM Strike**, **Expiration**, **Support** (Put Wall: strike below spot with highest put GEX), **Resistance** (Call Wall: strike above spot with highest call GEX), **Call Price** / **Put Price** (REST marks at wall strikes, ~2 s refresh; index symbols quote their own index-option root), **Trend** (`up`/`down`/`UP`/`DOWN`/`bullish`/`bearish`/`flat` — from L2 book-imbalance momentum over 60 s), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed** (first difference of book imbalance over 60 s), **Flow Acceleration** (second difference, split at time midpoint), **Absorption** (ATM vol per $1 spot move — heavy = price pinned), **Liquidity Flow** (net L2 depth change over 60 s), **Net Flow** (60 s delta-weighted executed flow), and **Buy/Sell**. Flow Ratio background turns red (`#ef5350`) when > 0.8 and green (`#00cc96`) when < 0.2, both in bold. Spot cell background turns green/red on wall breaks or reversals. Index symbols (`$SPX`/`$RUT`/`$NDX`) stream via their ETF proxy at proxy strikes. Ticker flows use normalized display symbols (uppercase, no "$") as keys so lookups stay consistent. Streaming starts when you Refresh a ticker on the main page.
 
 ## Architecture
 
 ```
 gex_app/
 ├── app.py                              # Main Streamlit application
-├── flow.py                             # Shared ATM Order Flow rendering (grid, market status indicator, session defaults, market-hours check)
+├── flow.py                             # Shared ATM Order Flow rendering (grid, market status indicator, wall-zone alerts, conviction scoring, session defaults, market-hours check)
 ├── analytics.py                        # Analytical calculations (walls, flip, skew, etc.)
 ├── calculations.py                     # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
 ├── charts.py                           # Plotly chart generators
@@ -289,11 +279,12 @@ gex_app/
 ├── config.toml                         # Schwab credentials and settings (NOT committed — see .gitignore)
 ├── config.toml.example                 # Example configuration template
 ├── schwab_auth.py                      # OAuth authentication script
-├── _constants.py                       # Static symbol maps (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS, MAX_BAR_ROWS)
+├── _constants.py                       # Static symbol maps (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS, MAX_BAR_ROWS, flow/stream/polling constants, chart layout)
+├── _utils.py                           # Shared utilities (JSON I/O, nested dict access, timestamp flooring, strike increment computation)
 ├── index_spot_poller.py               # Background poller for index symbol REST quotes ($SPX/$RUT/$NDX → proxy ETF spots)
 ├── news_service.py                    # RSS news fetching + sentiment tagging
-├── option_streaming_service.py        # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, per-ticker expiration, 1s aggregation with buy/sell split — shares the equity StreamClient)
-├── streaming_service.py               # Schwab WebSocket streaming (Level 1 + Level 2 options books, 1s OHLCV aggregation with tick-direction buy/sell volume split)
+├── option_streaming_service.py        # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, per-ticker expiration, 1s aggregation with buy/sell split and delta-weighted Net Flow — shares the equity StreamClient)
+├── streaming_service.py               # Schwab WebSocket streaming (Level 1 + Level 2 options books, O(1) list-based bar accumulator converted to DataFrame on demand)
 ├── signals.py                         # Strategy signals engine (scoring, recommendations, bias)
 ├── svi.py                             # SSVI volatility surface (Raw SVI + SSVI surface calibration)
 ├── telegram_notifier.py               # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
@@ -307,7 +298,7 @@ gex_app/
 │   ├── test_option_streaming.py       # Unit tests for option streaming service
 │   └── test_flow_alerts.py            # Unit tests for wall-buffer, conviction, and alert helpers in flow.py
 ├── CANDLESTICS.md                     # Candlestick chart internals (indicators, dual-axis pan/zoom, Y-range persistence)
-├── FLOW.md                            # ATM order-flow architecture (streaming, absorption, liquidity, net flow)
+├── FLOW.md                            # ATM order-flow architecture (streaming, absorption, liquidity, net flow, conviction-gated alerts)
 ├── SIGNALS.md                         # Strategy-signal logic (scoring, filters, market bias)
 ├── LICENSE                            # License file
 └── README.md                          # This file
@@ -422,9 +413,9 @@ A downward-sloping curve means dealers are short gamma (rising spot reduces net 
 
 ## Data Source
 
-Uses the [Schwab API](https://developer.schwab.com/) via the `schwab-py` Python client library, which provides real-time options chain data including gamma, open interest, volume, IV, and Greeks. For index symbols (`$SPX`, `$RUT`, `$NDX`), the ETF chain is automatically fetched as a fallback source for gamma, open interest, and volume when the index chain returns zeros — matched by delta (not strike) so it works across different price scales.
+Uses the [Schwab API](https://developer.schwab.com/) via the `schwab-py` Python client library, which provides real-time options chain data including gamma, open interest, volume, IV, and Greeks. For index symbols (`$SPX`, `$RUT`, `$NDX`), the ETF chain is automatically fetched as a fallback source for gamma, open interest, and volume when the index chain returns zeros — matched by delta (not strike) so it works across different price scales. Index symbols stream their ETF proxy's options (`SPY`/`IWM`/`QQQ`) at proxy-level strikes, with index-level spot quotes fetched separately via REST.
 
-Streaming uses a single WebSocket connection per session. The equity `StreamingService` owns the connection; the `AtmOptionVolumeService` piggybacks on the same `StreamClient` to subscribe to ATM option L1 quotes without opening a second connection. Each ticker uses its own per-ticker expiration (derived from the earliest option-chain date, `expirations[0]`, via `set_ticker_expiration()`), so non-primary tickers subscribe to the correct option contracts rather than inheriting the primary's expiration. The streaming service also subscribes to Level 1 options for continuous ATM flow and Level 2 options books for order flow analysis.
+Streaming uses a single WebSocket connection per session. The equity `StreamingService` owns the connection; the `AtmOptionVolumeService` piggybacks on the same `StreamClient` to subscribe to ATM option L1 quotes without opening a second connection. Each ticker uses its own per-ticker expiration (derived from the earliest option-chain date, `expirations[0]`, via `set_ticker_expiration()`), so non-primary tickers subscribe to the correct option contracts rather than inheriting the primary's expiration. The streaming service also subscribes to Level 1 options for continuous ATM flow and Level 2 options books for order flow analysis. L1 option ticks are routed to every tracked ticker whose stream symbol matches the option root, so tracking both `$SPX` and `SPY` updates both rows from the same proxy ticks.
 
 ## Disclaimer
 

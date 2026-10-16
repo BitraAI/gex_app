@@ -143,6 +143,7 @@ def _fit_raw_svi(
             method="trf", loss="soft_l1", max_nfev=2000,
         )
     except Exception:
+        logger.debug("SSVI raw fit failed for tenor", exc_info=True)
         return None
 
     a, b, rho, m, sigma = (float(v) for v in res.x)
@@ -159,6 +160,7 @@ def _fit_raw_svi(
             )
             a, b, rho, m, sigma = (float(v) for v in res.x)
         except Exception:
+            logger.debug("SSVI arb-constrained fit failed for tenor", exc_info=True)
             return None
         if not _ensure_arb_constraints(a, b, rho, sigma):
             return None
@@ -445,6 +447,7 @@ def skew_for_tte(
         if put25 is not None and call25 is not None:
             return round(put25 - call25, 4)
     except Exception:
+        logger.debug("SSVI skew_for_tte failed for tte=%s", tte, exc_info=True)
         return None
     return None
 
@@ -501,6 +504,7 @@ def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float 
         if put25_iv is not None and call25_iv is not None:
             skew = round(put25_iv - call25_iv, 4)
     except Exception:
+        logger.debug("SSVI surface calibration failed", exc_info=True)
         skew = None
 
     return {"surface": surface, "skew": skew, "atm_iv": atm_iv}

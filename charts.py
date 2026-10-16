@@ -1243,10 +1243,10 @@ INDICATORS = {
     "SMA 50": {"period": 50, "color": "#ab63fa", "lineWidth": 2},
     "EMA 20": {"period": 20, "color": "#ef553b", "lineWidth": 2},
     "EMA 200": {"period": 200, "color": "#2196f3", "lineWidth": 2},
-    "Trend": {"alphaLength": 50},
+    "Half Trend": {"alphaLength": 50},
     "Volume": {},
-    "Andean Osc": {"length": 50, "sigLength": 9},
-    "EMA 50 Squeeze": {},
+  "Andean Osc": {"length": 50, "sigLength": 9},
+    "EMA 50": {"period": 50, "color": "#ab63fa", "lineWidth": 2},
     "Volume Profile": {},
     "Anchored VWAP": {"color": "#8b5cf6", "lineWidth": 2},
 }
@@ -1346,7 +1346,7 @@ def _andean_oscillator(
     closes: list[float],
     length: int = 50,
     sigLength: int = 9,
-) -> tuple[list[float], list[float], list[float]]:
+) -> tuple[list[float], list[float], list[float], list[float]]:
     alpha = 2.0 / (length + 1)
     up1 = [closes[0]]
     up2 = [closes[0] * closes[0]]
@@ -1363,6 +1363,7 @@ def _andean_oscillator(
         dn2.append(min(min(c2, o2), dn2[-1] + (c2 - dn2[-1]) * alpha))
     bull = []
     bear = []
+    osc = []
     signal = []
     for i in range(len(closes)):
         br = dn2[i] - dn1[i] * dn1[i]
@@ -1371,60 +1372,61 @@ def _andean_oscillator(
         be = ber ** 0.5 if ber > 0 else 0.0
         bull.append(b)
         bear.append(be)
-        dom = max(b, be)
+        osc.append(b - be)
+    sigAlpha = 2.0 / (sigLength + 1)
+    for i in range(len(closes)):
         if i == 0:
-            sig = dom
+            sig = osc[0]
         else:
-            sig = signal[-1] + (1.0 / sigLength) * (dom - signal[-1])
+            sig = signal[-1] + sigAlpha * (osc[i] - signal[-1])
         signal.append(sig)
-    return bull, bear, signal
+    return bull, bear, osc, signal
 
 
-def _ema50_squeeze(
-    highs: list[float],
-    lows: list[float],
-    closes: list[float],
-    length: int = 20,
-    lowDev: float = 1.0,
-    midDev: float = 1.5,
-    highDev: float = 2.0,
-) -> tuple[list[float], list[float | None], list[float | None], list[float | None]]:
-    ema50 = _ema(closes, 50)
-    ema50 = [None] * 49 + ema50  # pad to align with input length
-    sma20 = [None] * 19 + _sma(closes, 20)
-    bb_dev = [None] * 19
-    for i in range(19, len(closes)):
-        chunk = closes[i-19:i+1]
-        mean = sum(chunk) / len(chunk)
-        variance = sum((x - mean) ** 2 for x in chunk) / len(chunk)
-        bb_dev.append(variance ** 0.5)
-
-    tr = [highs[i] - lows[i] for i in range(len(closes))]
-    for i in range(1, len(closes)):
-        tr[i] = max(tr[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-    atr = [None] * 19 + _sma(tr, 20)
-
-    sqz_red = [None] * len(closes)
-    sqz_black = [None] * len(closes)
-    sqz_orange = [None] * len(closes)
-
-    for i in range(19, len(closes)):
-        if ema50[i] is None or sma20[i] is None or bb_dev[i] is None or atr[i] is None:
-            continue
-        ml = sma20[i]
-        ub = ml + highDev * bb_dev[i]
-        hc = ml + highDev * atr[i]
-        mc = ml + midDev * atr[i]
-        lc = ml + lowDev * atr[i]
-
-        if ub < lc:
-            sqz_orange[i] = ema50[i]
-        elif ub < mc:
-            sqz_red[i] = ema50[i]
-        elif ub < hc:
-            sqz_black[i] = ema50[i]
-
-    return ema50, sqz_red, sqz_black, sqz_orange
+def _squeeze_detector(closes, highs, lows, bbLength=20, bbMult=2.0, kcLength=20, kcMult=1.5):
+    if len(closes) < bbLength:
+        return [], [], []
+    bbMiddle = _sma(closes, bbLength)
+    kcMiddle = _sma(closes, kcLength)
+    bbUpper = []
+    bbLower = []
+    for i in range(bbLength - 1, len(closes)):
+        idx = i - bbLength + 1
+        slice_ = closes[i - bbLength + 1: i + 1]
+        mean = sum(slice_) / len(slice_)
+        std = (sum((x - mean) ** 2 for x in slice_) / len(slice_)) ** 0.5
+        bbUpper.append(bbMiddle[idx] + bbMult * std)
+        bbLower.append(bbMiddle[idx] - bbMult * std)
+    tr = []
+    for i in range(len(closes)):
+        if i == 0:
+            tr.append(highs[i] - lows[i])
+        else:
+            tr.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+    kc_atr = _sma(tr, kcLength)
+    kcUpper = []
+    kcLower = []
+    for i in range(kcLength - 1, len(closes)):
+        kcUpper.append(kcMiddle[i - kcLength + 1] + kcMult * kc_atr[i - kcLength + 1])
+        kcLower.append(kcMiddle[i - kcLength + 1] - kcMult * kc_atr[i - kcLength + 1])
+    sqzRed = [None] * len(closes)
+    sqzBlack = [None] * len(closes)
+    sqzOrange = [None] * len(closes)
+    for i in range(bbLength - 1, len(closes)):
+        idx = i - bbLength + 1
+        kc_idx = i - kcLength + 1
+        bb_val_upper = bbUpper[idx]
+        bb_val_lower = bbLower[idx]
+        kc_val_upper = kcUpper[kc_idx] if kc_idx < len(kcUpper) else float('inf')
+        kc_val_lower = kcLower[kc_idx] if kc_idx < len(kcLower) else float('-inf')
+        kc_val_mid = kcMiddle[kc_idx] if kc_idx < len(kcMiddle) else 0.0
+        if bb_val_lower > kc_val_lower and bb_val_upper < kc_val_upper:
+            sqzRed[i] = {"state": "red"}
+        elif bb_val_upper < kc_val_lower or bb_val_lower > kc_val_upper:
+            sqzOrange[i] = {"state": "orange"}
+        else:
+            sqzBlack[i] = {"state": "black"}
+    return sqzRed, sqzBlack, sqzOrange
 
 
 STYLE = """

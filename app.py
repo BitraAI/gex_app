@@ -15,6 +15,7 @@ from chart_component import render_chart
 from flow import (
     _ensure_async_loop,
     _ticker_analytics_cache,
+    _wall_buffer,
     _WALL_ZONE_ALERT_COOLDOWN,
     _strike_inc,
     ensure_atm_streaming,
@@ -78,6 +79,7 @@ _SESSION_DEFAULTS = {
     "strikes": [],
     "by_exp": [],
     "by_exp_all": [],
+    "by_exp_all_version": 0,
     "underlying_20d_rv": 0.0,
     "alerts": [],
     "prev_alerts_state": {},
@@ -449,10 +451,15 @@ def compute_state():
 
     st.session_state.strikes = strikes
     st.session_state.by_exp = by_exp
-    st.session_state.by_exp_all = [
-        e for e in aggregate_by_expiration(st.session_state.data, show_calls, show_puts, spot)
-        if e.get("call_oi", 0) + e.get("put_oi", 0) > 0 or e.get("atm_iv", 0) > 0
-    ]
+    # Cache by_exp_all: only recompute when data changes (tracked by id).
+    # Filter changes (min_oi, show_itm, etc.) should NOT trigger a re-aggregation.
+    _data_ver = id(st.session_state.data)
+    if st.session_state.get("by_exp_all_version", 0) != _data_ver:
+        st.session_state.by_exp_all = [
+            e for e in aggregate_by_expiration(st.session_state.data, show_calls, show_puts, spot)
+            if e.get("call_oi", 0) + e.get("put_oi", 0) > 0 or e.get("atm_iv", 0) > 0
+        ]
+        st.session_state.by_exp_all_version = _data_ver
     st.session_state.analytics = analytics
     _iv_skew = analytics.get("iv_skew")
     _put_iv = analytics.get("put_iv_25d")
@@ -624,10 +631,20 @@ def check_alerts(analytics: dict, spot: float):
             _cw = analytics.get("call_wall")
             _pw = analytics.get("put_wall")
             _wall_zone = None
-            if _cw is not None and spot >= _cw - abs(_cw) * 0.0002:
+            if _cw is not None and _cw - _wall_buffer(_cw) <= spot <= _cw + _wall_buffer(_cw):
                 _wall_zone = "Resistance"
-            elif _pw is not None and spot <= _pw + abs(_pw) * 0.0002:
+            elif _pw is not None and _pw - _wall_buffer(_pw) <= spot <= _pw + _wall_buffer(_pw):
                 _wall_zone = "Support"
+            # Flow ratio for Telegram header
+            _atm_svc = st.session_state.get("atm_option_service")
+            _call_buy = _atm_svc.get_ticker_call_buy(st.session_state.get("symbol")) if _atm_svc else 0
+            _call_sell = _atm_svc.get_ticker_call_sell(st.session_state.get("symbol")) if _atm_svc else 0
+            _put_buy = _atm_svc.get_ticker_put_buy(st.session_state.get("symbol")) if _atm_svc else 0
+            _put_sell = _atm_svc.get_ticker_put_sell(st.session_state.get("symbol")) if _atm_svc else 0
+            _total_flow = (_call_buy or 0) + (_put_sell or 0) + (_put_buy or 0) + (_call_sell or 0)
+            _flow_ratio = round(((_call_buy or 0) + (_put_sell or 0)) / _total_flow, 2) if _total_flow > 0 else None
+            # Absorption for Telegram header
+            _absorption = _atm_svc.get_ticker_absorption(st.session_state.get("symbol")) if _atm_svc else None
             notify_alerts(
                 tg_alerts,
                 symbol=st.session_state.get("symbol"),
@@ -637,6 +654,8 @@ def check_alerts(analytics: dict, spot: float):
                 iv_rank=st.session_state.get("iv_rank"),
                 wall_zone=_wall_zone, pw=_pw, cw=_cw,
                 wall_mark=analytics.get("call_wall_mark") if _wall_zone == "Resistance" else analytics.get("put_wall_mark"),
+                flow_ratio=_flow_ratio,
+                absorption=_absorption,
             )
 
 
@@ -823,8 +842,8 @@ def render_candlesticks_frag():
             timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()), index=0, label_visibility="collapsed", width=100)
         
         with row2:
-            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50 Squeeze", "EMA 200", "Volume Profile", "Anchored VWAP", "Trend", "Volume", "Andean Osc"]
-            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Osc", "EMA 50 Squeeze", "Trend"], label_visibility="collapsed")
+            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "Anchored VWAP", "Half Trend", "Volume", "Andean Osc"]
+            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Osc", "EMA 50", "Half Trend"], label_visibility="collapsed")
         
         # Refresh the cache from the API when the existing on-disk bars are
         # stale relative to the user's chosen timeframe. The chart fragment
@@ -1285,11 +1304,6 @@ def render_candlesticks_frag():
                         "call_iv_25d": _analytics.get("call_iv_25d"),
                         "atm_iv": _analytics.get("atm_iv"),
                     })
-            _chart_key = f"lwc_candlestick_{symbol}"
-            st.markdown(
-                f'<div id="{_chart_key}" style="position:relative;width:100%;"></div>',
-                unsafe_allow_html=True,
-            )
             render_chart(
                 candles_payload,
                 indicators=selected_indicators,

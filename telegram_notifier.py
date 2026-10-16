@@ -25,14 +25,16 @@ from typing import Any, Iterable, Optional
 
 import config
 
+from _constants import FLOW_RATIO_GREEN_THRESHOLD, FLOW_RATIO_RED_THRESHOLD
+
+
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.telegram.org"
 
 
-
 def _enabled() -> bool:
-    """Return True only when Telegram alerts are enabled AND configured."""
+    """Return True only when Telegram is enabled AND configured."""
     return bool(
         config.TELEGRAM_ENABLED
         and config.BOT_TOKEN
@@ -113,6 +115,7 @@ def notify_alerts(
     absorbed_at_wall: Optional[float] = None,
     net_flow: Optional[float] = None,
     rv: Optional[float] = None,
+    flow_ratio: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
     """Push a batch of alert strings to Telegram as one message.
@@ -132,14 +135,14 @@ def notify_alerts(
         from flow import is_market_open
         if not is_market_open():
             logger.debug("market closed — suppressing Telegram alerts for %s",
-                         symbol or "?")
+                          symbol or "?")
             return False
     except Exception as exc:  # noqa: BLE001 — never block alerts on import error
         logger.warning("is_market_open check failed: %s", exc)
     text = _format(alerts, symbol=symbol, spot=spot, gex=gex, iv_rank=iv_rank,
-                   wall_zone=wall_zone, pw=pw, cw=cw, wall_mark=wall_mark, trend_alert=trend_alert,
-                   absorption=absorption, absorbed_at_wall=absorbed_at_wall,
-                   net_flow=net_flow, rv=rv)
+                    wall_zone=wall_zone, pw=pw, cw=cw, wall_mark=wall_mark, trend_alert=trend_alert,
+                    absorption=absorption, absorbed_at_wall=absorbed_at_wall,
+                    net_flow=net_flow, rv=rv, flow_ratio=flow_ratio)
     return send_telegram(text, disable_notification=disable_notification)
 
 
@@ -157,9 +160,9 @@ def diff_alerts(
 
     The set of events detected:
         - Gamma Flip change
-        - Call Wall / Put Wall change
         - Dealer gamma flip (Long ↔ Short)
-        - Spot crossing above/below Call Wall or Put Wall
+        - Call Wall / Put Wall strike value changes
+        - Spot crossing above/below Resistance or Support
     """
     cur = {
         "gamma_flip": analytics.get("gamma_flip"),
@@ -176,20 +179,12 @@ def diff_alerts(
 
     new_alerts: list[str] = []
 
+    cw = cur["call_wall"]
+    pw = cur["put_wall"]
     gf = cur["gamma_flip"]
     prev_gf = prev.get("gamma_flip")
     if gf != prev_gf and prev_gf is not None and gf is not None:
-        new_alerts.append(f"Gamma Flip changed: ${prev_gf:.2f} \u2192 ${gf:.2f}")
-
-    cw = cur["call_wall"]
-    prev_cw = prev.get("call_wall")
-    if cw != prev_cw and prev_cw is not None and cw is not None:
-        new_alerts.append(f"Call Wall changed: ${prev_cw:.2f} \u2192 ${cw:.2f}")
-
-    pw = cur["put_wall"]
-    prev_pw = prev.get("put_wall")
-    if pw != prev_pw and prev_pw is not None and pw is not None:
-        new_alerts.append(f"Put Wall changed: ${prev_pw:.2f} \u2192 ${pw:.2f}")
+        new_alerts.append(f"Gamma Flip changed: ${prev_gf:.2f} \\u2192 ${gf:.2f}")
 
     dp = cur["dealer_position"]
     prev_dp = prev.get("dealer_position")
@@ -198,23 +193,31 @@ def diff_alerts(
     elif prev_dp == "Short Gamma" and dp == "Long Gamma":
         new_alerts.append("Dealer flipped from Short Gamma to Long Gamma")
 
+    # Detect wall (strike) value changes
+    prev_cw = prev.get("call_wall")
+    prev_pw = prev.get("put_wall")
+    if cw is not None and prev_cw is not None and cw != prev_cw:
+        new_alerts.append(f"Call Wall moved: ${prev_cw:.2f} → ${cw:.2f}")
+    if pw is not None and prev_pw is not None and pw != prev_pw:
+        new_alerts.append(f"Put Wall moved: ${prev_pw:.2f} → ${pw:.2f}")
+
     prev_spot = prev.get("spot")
     if prev_spot is not None:
         if cw is not None:
             if prev_spot <= cw and spot > cw:
-                new_alerts.append(f"Price crossed above Call Wall (${cw:.2f})")
+                new_alerts.append(f"Price crossed above Resistance (${cw:.2f})")
             elif prev_spot >= cw and spot < cw:
-                new_alerts.append(f"Price crossed below Call Wall (${cw:.2f})")
+                new_alerts.append(f"Price crossed below Resistance (${cw:.2f})")
         if pw is not None:
             if prev_spot <= pw and spot > pw:
-                new_alerts.append(f"Price crossed above Put Wall (${pw:.2f})")
+                new_alerts.append(f"Price crossed above Support (${pw:.2f})")
             elif prev_spot >= pw and spot < pw:
-                new_alerts.append(f"Price crossed below Put Wall (${pw:.2f})")
+                new_alerts.append(f"Price crossed below Support (${pw:.2f})")
 
     return new_alerts, cur
 
 
-def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None, rv: Optional[float] = None) -> str:
+def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None, rv: Optional[float] = None, flow_ratio: Optional[float] = None) -> str:
     """Build an HTML-formatted message from a list of alert strings."""
     # Trend alerts carry the flow-metric signal line, so those metrics are
     # folded into it instead of duplicated as separate header rows.
@@ -225,10 +228,7 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
     if spot is not None:
         header_lines.append(f"Price: <code>{spot:,.2f}</code>")
     if iv_rank is not None:
-        emoji = "🟢" if iv_rank < 40 else "🔴" if iv_rank > 50 else "🟡"
-        header_lines.append(f"{emoji} IV Rank: <code>{iv_rank:.1f}%</code>")
-    if rv is not None and rv > 0:
-        header_lines.append(f"RV: <code>{rv * 100:.1f}%</code>")
+        pass  # Remove IV Rank line
     if gex is not None:
         emoji = "🟢" if gex > 0 else "🔴"
         header_lines.append(f"{emoji} GEX: <code>{gex:,.0f}</code>")
@@ -245,6 +245,9 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
     if net_flow is not None and not _compact:
         emoji = "🟢" if net_flow > 0 else "🔴" if net_flow < 0 else "🟡"
         header_lines.append(f"{emoji} Net Flow (60s): <code>{net_flow:+,.0f}</code>")
+    if flow_ratio is not None and not _compact:
+        emoji = "🟢" if flow_ratio > FLOW_RATIO_GREEN_THRESHOLD else "🔴" if flow_ratio < FLOW_RATIO_RED_THRESHOLD else "🟡"
+        header_lines.append(f"{emoji} Flow Ratio: <code>{flow_ratio:.0f}</code>")
     body_lines = []
     if trend_alert:
         _buy = trend_alert in ("bullish", "up")
