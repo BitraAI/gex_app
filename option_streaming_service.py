@@ -6,7 +6,7 @@ import time as _time_mod
 from collections import deque
 from datetime import datetime
 import pandas as pd
-from _constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS, ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE
+from _constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS, INDEX_QUOTE_MAP
 from _utils import load_json, save_json
 from calculations import calculate_atm_strike, get_strike_spacing
 
@@ -222,32 +222,6 @@ class AtmOptionVolumeService:
         subscription symbol, not for the flow-key)."""
         with self._lock:
             return [_normalize_display_symbol(sym) for sym in self._ticker_flows.keys()]
-
-    def prune_untracked_index_entries(self, user_tickers: set[str]) -> int:
-        """Remove phantom index entries from ``_ticker_flows`` that aren't in
-        the user's ticker history.
-
-        Index symbols (SPX/RUT/NDX and variants) may have been auto-created
-        in a prior session by the IndexSpotPoller (which used to poll all
-        base index symbols) or by other code paths before the guard in
-        ``set_ticker_spot`` was tightened.  Left unchecked, these phantom
-        entries appear in ``tracked_tickers()`` and generate spurious alerts.
-
-        ``user_tickers`` should be the set of normalized display symbols the
-        user is actively tracking (from ``ticker_history`` + current chart
-        symbol).  Only index symbols (keys of ``INDEX_QUOTE_MAP``) not
-        present in that set are removed.
-
-        Returns the count of purged entries.  All mutations happen under
-        ``self._lock``.
-        """
-        pruned = 0
-        with self._lock:
-            for key in list(self._ticker_flows.keys()):
-                if key in INDEX_QUOTE_MAP and key not in user_tickers:
-                    del self._ticker_flows[key]
-                    pruned += 1
-        return pruned
 
     # ------------------------------------------------------------------ #
     # Public API

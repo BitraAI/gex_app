@@ -26,15 +26,6 @@ _STATIC_LIB_URL = "/app/static/_lwc_lib.js"
 _STATIC_LIB_CHECKED = False
 
 
-def _load_vendored_lwc() -> str:
-    """Read the vendored lightweight-charts bundle (v4.2.1) if present."""
-    try:
-        with open(os.path.join(_BASE_DIR, "_lwc_lib.js"), encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return ""
-
-
 def _ensure_static_lib() -> bool:
     """Copy the vendored LWC bundle into static/ so Streamlit serves it over HTTP.
 
@@ -160,13 +151,11 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         const VOL_H = (d.heights && d.heights.vol) || 0;
         const OSC_H = (d.heights && d.heights.osc) || 0;
         const IV_SKEW_H = (d.heights && d.heights.iv_skew) || 0;
-        const IV_SKEW_HIST_H = (d.heights && d.heights.iv_skew_hist) || 0;
 
         const panes = [{id: 'right', h: MAIN_H}];
         if (d.volume_series) panes.push({id: 'volume', h: VOL_H});
         if (d.andean_series) panes.push({id: 'osc', h: OSC_H});
         if (d.iv_skew_series) panes.push({id: 'iv_skew', h: IV_SKEW_H});
-        if (d.iv_skew_hist) panes.push({id: 'iv_skew_hist', h: IV_SKEW_HIST_H});
 
         const paneIds = new Set(panes.map(function(p) { return p.id; }));
         const PANE_H_DEFAULT = 100;
@@ -187,7 +176,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         collectPaneIds(d.volume_series);
         collectPaneIds(d.andean_series);
         collectPaneIds(d.iv_skew_series);
-        collectPaneIds(d.iv_skew_hist);
 
         const TOTAL_H = panes.reduce(function(s, p) { return s + p.h; }, 0);
         const GAP = 4;
@@ -198,6 +186,11 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
 
         const chart = LightweightCharts.createChart(container, {
             height: TOTAL_H,
+            // autoSize: Streamlit tabs mount hidden panels (width 0). Without
+            // this the chart would be built once at width 0 and never repaint
+            // when the tab is opened; with it, the library re-measures and
+            // redraws whenever the container becomes visible/resizes.
+            autoSize: true,
             layout: {background:{type:'solid',color:bg}, textColor:tc},
             grid: {vertLines:{color:gc}, horzLines:{color:gc}},
             crosshair: {mode:0},
@@ -266,7 +259,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         for (const s of d.volume_series || []) { addSeries(s); }
         for (const s of d.andean_series || []) { addSeries(s); }
         for (const s of d.iv_skew_series || []) { addSeries(s); }
-        for (const s of d.iv_skew_hist || []) { addSeries(s); }
 
         const paneEdges = {};
         let y = 0;
@@ -302,7 +294,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         }
         applyPanePriceFormat(d.andean_series);
         applyPanePriceFormat(d.iv_skew_series);
-        applyPanePriceFormat(d.iv_skew_hist);
 
         const AXIS_W = 60;
         const indicatorPanes = panes.filter(function(p) { return p.id !== 'right'; });
@@ -895,6 +886,7 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
 
     window['__cw_tick_' + ROOT_ID] = function(init) {
         try {
+            window['__cw_last_init_' + ROOT_ID] = init;
             const cur = window[CHART_KEY + '__state'];
             const sig = __cwSigOf(init);
             // If the container vanished or was recreated empty (innerHTML reset,
@@ -934,12 +926,33 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             if (window.console && console.error) console.error('cw tick error', err);
         }
     };
+
+    // Watchdog: covers first-load races, e.g. the payload element executing
+    // before the host script, or the chart library still downloading when the
+    // first payload arrives. If the container is mounted but empty and a
+    // payload has been cached, re-dispatch it; the dispatcher then decides
+    // between rebuild and incremental update. Once the chart DOM is alive
+    // this interval is a cheap no-op.
+    let __cwWatchMiss = 0;
+    setInterval(function() {
+        try {
+            const c = document.getElementById(ROOT_ID);
+            if (!c || c.childElementCount > 0) { __cwWatchMiss = 0; return; }
+            const lastInit = window['__cw_last_init_' + ROOT_ID];
+            if (!lastInit) return;
+            if (typeof LightweightCharts !== 'undefined') {
+                const fn = window['__cw_tick_' + ROOT_ID];
+                if (fn) fn(lastInit);
+            } else {
+                __cwWatchMiss++;
+                if (__cwWatchMiss === 10) {
+                    __cwSetStatus({text: 'Loading chart library...', level: 'warning'});
+                }
+            }
+        } catch (e) {}
+    }, 600);
 })();
 """ % {'root_id': root_id}
-
-
-def build_series_key(name: str) -> str:
-    return name
 
 
 def _convert_time(t, et_offset):
@@ -1004,19 +1017,19 @@ def build_init_data(
         })
 
     series_list.append({
-        "type": "Candlestick", "key": build_series_key("candlestick"), "data": cd,
+        "type": "Candlestick", "key": "candlestick", "data": cd,
         "options": candlestick_options,
     })
 
     if call_wall is not None:
         series_list.append({
-            "type": "Line", "key": build_series_key("call_wall"),
+            "type": "Line", "key": "call_wall",
             "data": [{"time": cd[i]["time"], "value": call_wall} for i in range(len(cd))],
             "options": {"color": "#ef553b", "lineWidth": 1, "lineStyle": 2, "title": "Resistance"},
         })
     if put_wall is not None:
         series_list.append({
-            "type": "Line", "key": build_series_key("put_wall"),
+            "type": "Line", "key": "put_wall",
             "data": [{"time": cd[i]["time"], "value": put_wall} for i in range(len(cd))],
             "options": {"color": "#00cc96", "lineWidth": 1, "lineStyle": 2, "title": "Support"},
         })
@@ -1079,9 +1092,13 @@ def build_init_data(
                         clr = "#ffa726"
                     _oscd.append({"time": cd[i]["time"], "value": o, "color": clr})
                 sqzRed, sqzBlack, sqzOrange = _squeeze_detector(closes, highs, lows)
-                sqzRed_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#ef5350"} for i in range(len(cd)) if sqzRed[i] and sqzRed[i].get("state") == "red"]
-                sqzBlack_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#000000"} for i in range(len(cd)) if sqzBlack[i] and sqzBlack[i].get("state") == "black"]
-                sqzOrange_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#ff9800"} for i in range(len(cd)) if sqzOrange[i] and sqzOrange[i].get("state") == "orange"]
+                # _squeeze_detector returns empty lists until sqzLength (20)
+                # bars exist; indexing them for a short history raised IndexError
+                # and broke the whole chart on the first ticks of a stream.
+                _nSqz = min(len(cd), len(sqzRed), len(sqzBlack), len(sqzOrange))
+                sqzRed_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#ef5350"} for i in range(_nSqz) if sqzRed[i] and sqzRed[i].get("state") == "red"]
+                sqzBlack_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#000000"} for i in range(_nSqz) if sqzBlack[i] and sqzBlack[i].get("state") == "black"]
+                sqzOrange_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#ff9800"} for i in range(_nSqz) if sqzOrange[i] and sqzOrange[i].get("state") == "orange"]
                 andean_series = [
                     {"type": "Histogram", "key": "andean_osc", "data": _oscd, "options": {"priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
                     {"type": "Line", "key": "andean_signal", "data": [{"time": cd[i]["time"], "value": signal[i]} for i in range(len(cd))], "options": {"color": "#ffa15a", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
@@ -1208,8 +1225,18 @@ def _build_iv_skew_data(iv_skew_history: list, et_offset: int) -> dict | None:
     hist_data = []
     for row in iv_skew_history:
         t = _convert_time(row.get("datetime", 0), et_offset)
-        val = row.get("value", 0)
+        # Rows are appended with the "iv_skew" key; accept the legacy
+        # "value" key as well.
+        val = row.get("iv_skew", row.get("value"))
         hist_data.append({"time": t, "value": float(val) if val is not None else 0})
+    # LWC series require unique timestamps; history rows are captured at
+    # millisecond resolution but chart times are seconds — collapse dupes
+    # (last value wins).
+    if len(hist_data) > 1:
+        by_t = {}
+        for pt in hist_data:
+            by_t[pt["time"]] = pt
+        hist_data = [by_t[t] for t in sorted(by_t)]
 
     if hist_data:
         series.append({
@@ -1219,14 +1246,23 @@ def _build_iv_skew_data(iv_skew_history: list, et_offset: int) -> dict | None:
             "options": {"color": "#9c27b0", "lineWidth": 2, "priceScaleId": "iv_skew", "priceLineVisible": False, "lastValueVisible": False},
         })
 
-    # IV Skew Histogram (positive = premium, negative = discount)
+    # IV Skew Histogram (positive = premium, negative = discount). Same source
+    # value as the line: `iv_skew` is already signed; falling back to a
+    # dedicated "histogram" key when present.
     hist_bar_data = []
     for row in iv_skew_history:
         t = _convert_time(row.get("datetime", 0), et_offset)
-        val = row.get("histogram", 0)
+        val = row.get("histogram")
+        if val is None:
+            val = row.get("iv_skew")
         if val is not None:
             color = "#26a69a" if val >= 0 else "#ef5350"
             hist_bar_data.append({"time": t, "value": float(val), "color": color})
+    if len(hist_bar_data) > 1:
+        by_t = {}
+        for pt in hist_bar_data:
+            by_t[pt["time"]] = pt
+        hist_bar_data = [by_t[t] for t in sorted(by_t)]
 
     if hist_bar_data:
         series.append({
@@ -1285,9 +1321,13 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_c
     # dispatcher either rebuilds (structure changed) or updates just the last
     # bar of each series.
     payload_js = json.dumps(init_data).replace("<", "\\u003c")
+    # Cache the payload on window BEFORE dispatching: if the payload element
+    # executes before the host script (or the library is still loading), the
+    # host's watchdog can rebuild from the cached payload later.
     payload_html = (
-        '<script>window.__cw_tick_' + _ROOT_ID
-        + ' && window.__cw_tick_' + _ROOT_ID + '(' + payload_js + ');</script>'
+        '<script>window.__cw_last_init_' + _ROOT_ID + ' = ' + payload_js + ';'
+        'window.__cw_tick_' + _ROOT_ID
+        + ' && window.__cw_tick_' + _ROOT_ID + '(window.__cw_last_init_' + _ROOT_ID + ');</script>'
     )
     st.html(payload_html, unsafe_allow_javascript=True, width="stretch")
 

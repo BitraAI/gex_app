@@ -15,10 +15,12 @@ import threading
 import time as _time_mod
 import streamlit as st
 from collections import deque
-from datetime import date, datetime
+from datetime import datetime
 from functools import partial
 from zoneinfo import ZoneInfo
-from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT, FLOW_WATCHDOG_STALE_SECONDS
+from _constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT,
+                        FLOW_WATCHDOG_STALE_SECONDS,
+                        ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE)
 from _utils import compute_strike_increment, format_expiration
 from option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol, _ABSORPTION_MIN_VOL
 from client import fetch_quotes
@@ -1367,7 +1369,6 @@ def render_atm_order_flow_grid():
     underlying data actually changes.
     """
     s = st.session_state
-    current_sym = _normalize_display_symbol(s.get("symbol", ""))
     atm_svc = s.get("atm_option_service")
 
     update_flow_cache()
@@ -1495,54 +1496,6 @@ def render_atm_order_flow_grid():
     # HTML table instead: `table-layout: fixed` distributes the tab width
     # evenly across the columns and the headers wrap onto multiple lines
     # (see render_flow_legend_and_style for the `.flow-grid` CSS).
-    def _trend_color(row):
-        """Color the Trend label (up/down/bullish/bearish) by direction.
-
-        Reversal labels (bullish/bearish) are bolded to surface the flip;
-        up/down are green/red; flat is amber.
-
-        When spot leaves the support zone (upwards), trend shows UP in GREEN.
-        Within support zone, trend shows BULLISH.
-        When spot leaves the resistance zone (downwards), trend shows DOWN in RED.
-        Within resistance zone, trend shows BEARISH.
-        """
-        val = row["Trend"]
-        spot = row["Spot"]
-        support = row["Support"]
-        resistance = row["Resistance"]
-        
-        if val is None:
-            return ""
-        
-        # When spot leaves support zone (moves away from support wall), show UP in GREEN
-        # This indicates bullish sentiment as spot moves away from support
-        if spot is not None and support is not None:
-            if spot > support + _wall_buffer(support):  # Spot has left support zone upwards
-                return "color: #00cc96; font-weight: bold;"
-        
-        # Within support zone, show BULLISH
-        if spot is not None and support is not None:
-            if support - _wall_buffer(support) <= spot <= support + _wall_buffer(support):
-                return "color: #00cc96; font-weight: bold;"
-        
-        # When spot leaves resistance zone (moves away from resistance wall), show DOWN in RED
-        # This indicates bearish sentiment as spot moves away from resistance
-        if spot is not None and resistance is not None:
-            if spot < resistance - _wall_buffer(resistance):  # Spot has left resistance zone downwards
-                return "color: #ef5350; font-weight: bold;"
-        
-        # Within resistance zone, show BEARISH
-        if spot is not None and resistance is not None:
-            if resistance - _wall_buffer(resistance) <= spot <= resistance + _wall_buffer(resistance):
-                return "color: #ef5350; font-weight: bold;"
-        
-        val_l = val.lower()
-        if val_l in ("bearish", "down"):
-            return "color: #ef5350; font-weight: bold;"
-        if val_l in ("bullish", "up"):
-            return "color: #00cc96; font-weight: bold;"
-        return "color: #ff9800; font-weight: bold;"
-
     def _book_imbalance_color(val):
         """Color the book imbalance value based on magnitude."""
         if val is None:

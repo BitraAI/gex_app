@@ -246,8 +246,8 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         emoji = "🟢" if net_flow > 0 else "🔴" if net_flow < 0 else "🟡"
         header_lines.append(f"{emoji} Net Flow (60s): <code>{net_flow:+,.0f}</code>")
     if flow_ratio is not None and not _compact:
-        emoji = "🟢" if flow_ratio > FLOW_RATIO_GREEN_THRESHOLD else "🔴" if flow_ratio < FLOW_RATIO_RED_THRESHOLD else "🟡"
-        header_lines.append(f"{emoji} Flow Ratio: <code>{flow_ratio:.0f}</code>")
+        emoji = "🟢" if flow_ratio < FLOW_RATIO_GREEN_THRESHOLD else "🔴" if flow_ratio > FLOW_RATIO_RED_THRESHOLD else "🟡"
+        header_lines.append(f"{emoji} Flow Ratio: <code>{flow_ratio:.2f}</code>")
     body_lines = []
     if trend_alert:
         _buy = trend_alert in ("bullish", "up")

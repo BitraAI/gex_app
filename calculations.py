@@ -460,16 +460,3 @@ def aggregate_by_expiration(
         result.append(item)
 
     return result
-
-
-def compute_totals(
-    data: list[dict[str, Any]],
-) -> dict[str, float]:
-    total_call_gex = sum(e["gex"] for e in data if e["type"] == "CALL" and e["gex"] > 0)
-    total_put_gex = sum(abs(e["gex"]) for e in data if e["type"] == "PUT" and e["gex"] < 0)
-    net_gex = total_call_gex - total_put_gex
-    return {
-        "total_call_gex": round(total_call_gex, 2),
-        "total_put_gex": round(total_put_gex, 2),
-        "net_gex": round(net_gex, 2),
-    }

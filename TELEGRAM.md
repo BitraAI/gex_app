@@ -20,7 +20,7 @@ CHAT_ID = "YOUR_CHAT_ID"           # channel @userinfobot, negative group id, or
 
 ### Getting credentials
 
-1. **BOT_TOKEN** — message [@BotFather](https://t.me/BotFather), `/newbot`, follow the prompts.
+1. **BOT_TOKEN** — message [@BotFather](https://t.me/BotFather) in the search bar, `/newbot`, choose a username for your bot. Get the token to access the HTTP API.
 2. **CHAT_ID** — create a private channel, add the bot as admin (enable Post Messages),
    then fetch `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates` to read the
    chat id (a `-100…` channel id, negative group id, or `@channelname`).
@@ -121,8 +121,8 @@ Price: <code>$XXX.XX</code>
 
 ### Flow Ratio thresholds
 
-- `flow_ratio > FLOW_RATIO_GREEN_THRESHOLD` → 🟢 (bullish bias)
-- `flow_ratio < FLOW_RATIO_RED_THRESHOLD` → 🔴 (bearish bias)
+- `flow_ratio < 0.20` → 🟢 (bullish bias)
+- `flow_ratio > 0.80` → 🔴 (bearish bias)
 - otherwise → 🟡 (neutral)
 
 ### Trend alerts (compact body)
