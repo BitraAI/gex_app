@@ -210,6 +210,7 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
                 lockFirstTime: false,
                 allowScroll: true,
                 allowZoom: true,
+                rightOffset: 5,
             },
         });
 
@@ -908,13 +909,13 @@ def build_init_data(
         series_list.append({
             "type": "Line", "key": build_series_key("call_wall"),
             "data": [{"time": cd[i]["time"], "value": call_wall} for i in range(len(cd))],
-            "options": {"color": "#ef553b", "lineWidth": 1, "lineStyle": 2, "title": "Call Wall"},
+            "options": {"color": "#ef553b", "lineWidth": 1, "lineStyle": 2, "title": "Resistance"},
         })
     if put_wall is not None:
         series_list.append({
             "type": "Line", "key": build_series_key("put_wall"),
             "data": [{"time": cd[i]["time"], "value": put_wall} for i in range(len(cd))],
-            "options": {"color": "#00cc96", "lineWidth": 1, "lineStyle": 2, "title": "Put Wall"},
+            "options": {"color": "#00cc96", "lineWidth": 1, "lineStyle": 2, "title": "Support"},
         })
 
     if indicators:
