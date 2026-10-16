@@ -1,26 +1,29 @@
-"""Lightweight-charts component rendered via st.components.v1.html in an iframe.
+"""Lightweight-charts rendered directly in the main Streamlit document.
 
-Each call generates a unique DOM element ID so that Streamlit re-renders
-(fragment re-execution, tab switches) always target the correct container.
+The chart lives in a *constant* ``st.html`` host element (with
+``unsafe_allow_javascript=True``): Streamlit's frontend only re-runs the
+embedded scripts when the sanitized body changes, so a constant host body
+means the chart DOM (and any pan/zoom state) survives every fragment tick.
 
-Streamlit's st.html() uses client-side DOMPurify which strips <script> tags
-entirely (even with unsafe_allow_javascript=True).  To bypass this we render
-the chart inside an iframe via st.components.v1.html() — the iframe content
-is delivered as-is with no sanitization.
-
-The entire payload (LWC library + init logic + chart data) is base64-encoded
-and decoded/executed at runtime inside the iframe.
+Each tick also renders a tiny *payload* element whose body changes (it holds
+the current chart data).  Its script re-executes every tick and calls the
+host-registered dispatcher ``window.__cw_tick_<root_id>(init)``, which either
+rebuilds the chart (structure changed) or incrementally updates only the last
+bar of each series (structure unchanged) via ``series.update()``.
 """
 
-import base64
 import json
 import os
-import textwrap
+import shutil
 
 import streamlit as st
-from streamlit.components.v1 import html as components_html
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_ID = "lwc_candlestick"
+_STATIC_LIB_DIR = os.path.join(_BASE_DIR, "static")
+_STATIC_LIB_PATH = os.path.join(_STATIC_LIB_DIR, "_lwc_lib.js")
+_STATIC_LIB_URL = "/app/static/_lwc_lib.js"
+_STATIC_LIB_CHECKED = False
 
 
 def _load_vendored_lwc() -> str:
@@ -32,81 +35,52 @@ def _load_vendored_lwc() -> str:
         return ""
 
 
-_VENDORED_LWC = _load_vendored_lwc()
+def _ensure_static_lib() -> bool:
+    """Copy the vendored LWC bundle into static/ so Streamlit serves it over HTTP.
 
-
-def _escape_non_ascii(s: str) -> str:
-    """Escape all non-ASCII characters as \\uXXXX for safe eval()."""
-    return "".join(
-        c if ord(c) < 0x80 else "\\u{:04x}".format(ord(c))
-        for c in s
-    )
-
-
-def _encode_payload(lwc_js: str, init_js: str) -> str:
-    """Base64-encode the combined LWC library + app init JS with non-ASCII escaped."""
-    combined = "(function(){\n" + lwc_js + "\n" + init_js + "\n})();"
-    escaped = _escape_non_ascii(combined)
-    b64 = base64.b64encode(escaped.encode("ascii")).decode("ascii")
-    return b64
-
-
-def _render_js(init_js: str) -> str:
-    """Render a complete HTML page for the iframe.
-
-    The entire JS payload (LWC lib + init) is base64-encoded with
-    non-ASCII chars escaped as \\uXXXX, then decoded via eval()
-    inside the iframe — no DOMPurify interference.
+    Requires ``server.enableStaticServing = true`` in .streamlit/config.toml
+    (see the config file shipped with the app).
     """
-    if _VENDORED_LWC:
-        b64 = _encode_payload(_VENDORED_LWC, init_js)
-    else:
-        escaped = _escape_non_ascii(init_js)
-        b64 = base64.b64encode(escaped.encode("ascii")).decode("ascii")
-
-    iframe_html = textwrap.dedent('''<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; position: relative; }
-</style>
-</head>
-<body>
-<script>
-(function(){
-    var b='{{B64_PLACEHOLDER}}';
-    try{
-        var raw=decodeURIComponent(escape(atob(b)));
-        console.log('chart: decoded payload',raw.length,'bytes');
-        eval(raw);
-        console.log('chart: eval done');
-    }catch(e){console.error('chart: error',e);}})();
-</script>
-</body>
-</html>''')
-    return iframe_html.replace('{{B64_PLACEHOLDER}}', b64)
+    global _STATIC_LIB_CHECKED
+    if _STATIC_LIB_CHECKED:
+        return True
+    try:
+        src = os.path.join(_BASE_DIR, "_lwc_lib.js")
+        if not os.path.exists(src):
+            return False
+        os.makedirs(_STATIC_LIB_DIR, exist_ok=True)
+        need_copy = True
+        if os.path.exists(_STATIC_LIB_PATH):
+            try:
+                if (os.path.getmtime(src) == os.path.getmtime(_STATIC_LIB_PATH)
+                        and os.path.getsize(src) == os.path.getsize(_STATIC_LIB_PATH)):
+                    need_copy = False
+            except OSError:
+                need_copy = True
+        if need_copy:
+            shutil.copy2(src, _STATIC_LIB_PATH)
+        _STATIC_LIB_CHECKED = True
+        return True
+    except Exception:
+        return False
 
 
 # ------------------------------------------------------------------
-# Chart init logic (must be kept free of < comparison operators at the
-# top-level of the HTML source).  The init JS is embedded via base64
-# so it can safely contain <, >, <=, >= etc.
-# ------------------------------------------------------------------
+# Chart init logic (kept free of < at top-level of the HTML source --
+# scripts are injected via st.html(unsafe_allow_javascript=True)).
 
-def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
-                    main_height: int, vol_height: int, osc_height: int,
-                    iv_skew_height: int, iv_skew_hist_height: int) -> str:
-    """Build the chart initialization JavaScript as a Python string.
+def build_host_js(root_id: str = _ROOT_ID) -> str:
+    """Build the chart host JavaScript as a single self-contained JS snippet.
 
-    All string-formatting uses %(name)s so the result is a single
-    self-contained JS function that DOMPurify never touches (it's
-    base64-encoded before HTML output).
+    All per-render values (data, colors, pane heights) arrive at runtime via
+    ``window.__cw_tick_<root_id>(init)`` dispatch calls, so the host script is
+    a constant string: its st.html element never re-runs its innerHTML/scripts,
+    keeping the chart DOM (and any pan/zoom state) alive across ticks.
     """
     return """
 (function() {
     const ROOT_ID = '%(root_id)s';
-    const DATA = %(json_data)s;
+    var DATA = null;
     let container = document.getElementById(ROOT_ID);
     if (!container) {
         container = document.createElement('div');
@@ -116,8 +90,36 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
     }
 
     const RENDER_KEY = '__lwc_render_' + ROOT_ID;
-    const RENDER_VERSION = (window[RENDER_KEY] || 0) + 1;
+    let RENDER_VERSION = (window[RENDER_KEY] || 0) + 1;
     window[RENDER_KEY] = RENDER_VERSION;
+    const CHART_KEY = '__lwc_chart_' + ROOT_ID;
+    // Invalidate any stale chart state from a previous host-script instance so
+    // the next dispatch rebuilds fresh chart DOM (e.g. after an element remount).
+    window[CHART_KEY + '__state'] = null;
+
+    function __cwSetStatus(stObj) {
+        const colors = {
+            info:    {bg: 'rgba(33,150,243,0.92)', fg: '#ffffff'},
+            success: {bg: 'rgba(0,204,150,0.92)', fg: '#0e1117'},
+            warning: {bg: 'rgba(255,193,7,0.95)',  fg: '#31333f'},
+        };
+        let badge = document.getElementById('cw_status_badge');
+        if (stObj && stObj.text) {
+            const c = colors[stObj.level || 'info'] || colors.info;
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.id = 'cw_status_badge';
+                badge.style.cssText = 'position:absolute;top:4px;left:4px;padding:4px 10px;border-radius:6px;background:' + c.bg + ';color:' + c.fg + ';font-size:12px;font-weight:600;pointer-events:none;z-index:10;box-shadow:0 1px 3px rgba(0,0,0,0.35);white-space:nowrap;';
+                if (container) container.appendChild(badge);
+            }
+            badge.textContent = stObj.text;
+            badge.style.background = c.bg;
+            badge.style.color = c.fg;
+            badge.style.display = '';
+        } else if (badge) {
+            badge.style.display = 'none';
+        }
+    }
 
     function initChart() {
         if (typeof LightweightCharts === 'undefined') {
@@ -128,6 +130,11 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
     }
     function doInit() {
         if (window[RENDER_KEY] !== RENDER_VERSION) return;
+        if (!DATA || !DATA.init) return;
+        // Refresh the container reference: React may have recreated the div
+        // (innerHTML reset) since the host script ran; never build into a
+        // detached node.
+        container = document.getElementById(ROOT_ID) || container;
 
         const PAYLOAD_HASH_KEY = '__lwc_payload_hash_' + ROOT_ID;
         const PAYLOAD_VERSION_KEY = '__lwc_payload_version_' + ROOT_ID;
@@ -145,15 +152,15 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
         window[SAVED_KEY] = null;
 
         const d = DATA.init;
-        const bg = '%(bg)s';
-        const tc = '%(tc)s';
-        const gc = '%(gc)s';
+        const bg = (d.theme && d.theme.bg) || '#ffffff';
+        const tc = (d.theme && d.theme.text) || '#1e293b';
+        const gc = (d.theme && d.theme.grid) || '#e9eef3';
 
-        const MAIN_H = %(main_height)d;
-        const VOL_H = %(vol_height)d;
-        const OSC_H = %(osc_height)d;
-        const IV_SKEW_H = %(iv_skew_height)d;
-        const IV_SKEW_HIST_H = %(iv_skew_hist_height)d;
+        const MAIN_H = (d.heights && d.heights.main) || 420;
+        const VOL_H = (d.heights && d.heights.vol) || 0;
+        const OSC_H = (d.heights && d.heights.osc) || 0;
+        const IV_SKEW_H = (d.heights && d.heights.iv_skew) || 0;
+        const IV_SKEW_HIST_H = (d.heights && d.heights.iv_skew_hist) || 0;
 
         const panes = [{id: 'right', h: MAIN_H}];
         if (d.volume_series) panes.push({id: 'volume', h: VOL_H});
@@ -237,6 +244,7 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
             }
             if (series && s.data) {
                 series.setData(s.data);
+                series.__cwN = s.data.length;
             }
             if (series && s.key) {
                 _allSeriesByKey[s.key] = series;
@@ -419,19 +427,7 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
         }
         requestAnimationFrame(axisLoop);
 
-        if (d.status && d.status.text) {
-            const lvl = d.status.level || 'info';
-            const colors = {
-                'info':    {bg: 'rgba(33,150,243,0.92)', fg: '#ffffff'},
-                'success': {bg: 'rgba(0,204,150,0.92)', fg: '#0e1117'},
-                'warning': {bg: 'rgba(255,193,7,0.95)',  fg: '#31333f'},
-            };
-            const c = colors[lvl] || colors['info'];
-            const badge = document.createElement('div');
-            badge.textContent = d.status.text;
-            badge.style.cssText = 'position:absolute;top:4px;left:4px;padding:4px 10px;border-radius:6px;background:' + c.bg + ';color:' + c.fg + ';font-size:12px;font-weight:600;pointer-events:none;z-index:10;box-shadow:0 1px 3px rgba(0,0,0,0.35);white-space:nowrap;';
-            container.appendChild(badge);
-        }
+        __cwSetStatus(d.status);
 
         const ts = chart.timeScale();
 
@@ -651,7 +647,8 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
         }
         requestAnimationFrame(saveLoop);
 
-        const vpBars = d.vp_vols ? d.vp_vols.slice() : null;
+        let vpBars = d.vp_vols ? d.vp_vols.slice() : null;
+        let vpDirty = true;
         if (vpBars && candleSeries) {
             const overlay = document.createElement('canvas');
             overlay.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:5;';
@@ -660,7 +657,6 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
 
             const MAX_W_FRAC = 0.18;
             const NUM_BINS = 60;
-            let vpDirty = true;
 
             function drawVPVR() {
                 const w = container.clientWidth;
@@ -804,10 +800,13 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
                 }
                 requestAnimationFrame(vpLoop);
             }
+            window[CHART_KEY + '__setVp'] = function(v) {
+                vpBars = v ? v.slice() : null;
+                vpDirty = true;
+            };
             requestAnimationFrame(vpLoop);
         }
 
-        const CHART_KEY = '__lwc_chart_' + ROOT_ID;
         window[CHART_KEY] = {
             chart: chart,
             candleSeries: candleSeries,
@@ -817,22 +816,126 @@ def _build_init_js(root_id: str, json_data: str, bg: str, tc: str, gc: str,
         for (const sk of Object.keys(_allSeriesByKey)) {
             window[CHART_KEY + '_' + sk] = _allSeriesByKey[sk];
         }
+        window[CHART_KEY + '__state'] = {
+            sig: __cwSigOf(d),
+            symbol: d.symbol || '',
+            chart: chart,
+            candleSeries: candleSeries,
+            byKey: _allSeriesByKey,
+            container: container,
+            setStatusFn: __cwSetStatus,
+        };
     }
 
-    initChart();
-})();
-""" % {
-        'root_id': root_id,
-        'json_data': json_data,
-        'bg': bg,
-        'tc': tc,
-        'gc': gc,
-        'main_height': main_height,
-        'vol_height': vol_height,
-        'osc_height': osc_height,
-        'iv_skew_height': iv_skew_height,
-        'iv_skew_hist_height': iv_skew_hist_height,
+    // ---------------- Per-tick dispatcher (defined once, in-page) ----------------
+    function __cwSigOf(d) {
+        const keys = [];
+        function collect(list) {
+            if (!list) return;
+            for (let i = 0; i < list.length; i++) keys.push(list[i].type + '|' + (list[i].key || ''));
+        }
+        collect(d.series); collect(d.volume_series); collect(d.andean_series); collect(d.iv_skew_series);
+        if (d.vp_vols && d.vp_vols.length) keys.push('vp|1');
+        keys.sort();
+        // Wall level changes (call/put wall values) alter the flat series values:
+        // include the current levels so a wall move triggers a full rebuild.
+        const ser = d.series || [];
+        const walls = [];
+        for (let i = 0; i < ser.length; i++) {
+            const s = ser[i];
+            if (s.key === 'call_wall' || s.key === 'put_wall') {
+                const arr = s.data || [];
+                walls.push(arr.length ? arr[arr.length - 1].value : null);
+            }
+        }
+        return JSON.stringify([d.symbol || '', keys, d.heights || null, walls]);
     }
+
+    function tryUpdate(ser, row) {
+        if (!row) return true;
+        try {
+            ser.update(row.value === null ? {time: row.time} : row);
+            return true;
+        } catch (err) {
+            return false;
+        }
+    }
+
+    function __applyRows(ser, rows) {
+        if (!ser || !rows || !rows.length) return;
+        const prev = ser.__cwN || 0;
+        const n = rows.length;
+        if (prev === 0 || n < prev) {
+            try { ser.setData(rows); } catch (_) {}
+            ser.__cwN = n;
+            return;
+        }
+        // n === prev: refresh the last point (live tick). n > prev: append new bars.
+        let ok = true;
+        const start = (n === prev) ? n - 1 : prev;
+        for (let i = start; i < n && ok; i++) {
+            ok = tryUpdate(ser, rows[i]);
+        }
+        if (!ok) {
+            // Out-of-order or stale tail: full (visual) replace for this series only.
+            try { ser.setData(rows); } catch (_) {}
+        }
+        ser.__cwN = n;
+    }
+
+    function __applyList(byKey, list) {
+        if (!list || !byKey) return;
+        for (let i = 0; i < list.length; i++) {
+            const s = list[i];
+            if (s.type === 'Candlestick') continue;
+            const series = byKey[s.key];
+            if (series) __applyRows(series, s.data);
+        }
+    }
+
+    window['__cw_tick_' + ROOT_ID] = function(init) {
+        try {
+            const cur = window[CHART_KEY + '__state'];
+            const sig = __cwSigOf(init);
+            // If the container vanished or was recreated empty (innerHTML reset,
+            // fragment reconciliation), force a rebuild so the chart repaints.
+            const containerNow = document.getElementById(ROOT_ID);
+            const domOk = !!(containerNow && containerNow.childElementCount > 0);
+            if (!cur || cur.sig !== sig || !domOk) {
+                // On a symbol switch the saved pan/zoom (incl. PINNED price ranges)
+                // belongs to the old ticker's price levels; restoring it would pin
+                // the new ticker's price axis to wrong values. Clear it.
+                try {
+                    if (cur && cur.symbol && init.symbol && cur.symbol !== init.symbol) {
+                        window['__lwc_saved_' + ROOT_ID] = null;
+                    }
+                } catch (_) {}
+                try { if (cur && cur.chart && cur.chart.remove) cur.chart.remove(); } catch (_) {}
+                window[CHART_KEY + '__state'] = null;
+                DATA = {init: init};
+                initChart();
+                return;
+            }
+            let cs = null;
+            const serList = init.series || [];
+            for (let i = 0; i < serList.length; i++) {
+                if (serList[i].type === 'Candlestick') { cs = serList[i].data; break; }
+            }
+            if (cs) __applyRows(cur.candleSeries, cs);
+            __applyList(cur.byKey, serList);
+            __applyList(cur.byKey, init.volume_series);
+            __applyList(cur.byKey, init.andean_series);
+            __applyList(cur.byKey, init.iv_skew_series);
+            try {
+                if (window[CHART_KEY + '__setVp'] && init.vp_vols) window[CHART_KEY + '__setVp'](init.vp_vols);
+            } catch (_) {}
+            if (cur.setStatusFn) try { cur.setStatusFn(init.status); } catch (_) {}
+        } catch (err) {
+            if (window.console && console.error) console.error('cw tick error', err);
+        }
+    };
+})();
+""" % {'root_id': root_id}
 
 
 def build_series_key(name: str) -> str:
@@ -1136,6 +1239,15 @@ def _build_iv_skew_data(iv_skew_history: list, et_offset: int) -> dict | None:
     return {"series": series} if series else None
 
 
+def render_chart_host():
+    """Render the persistent chart host element (constant body).
+
+    Must be called every fragment tick (including when there is no candle
+    payload) so the host div always exists and the chart DOM survives.
+    """
+    st.html(get_host_html(), unsafe_allow_javascript=True, width="stretch")
+
+
 def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
@@ -1160,16 +1272,37 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_c
         if iv_skew_result:
             init_data["iv_skew_series"] = iv_skew_result.get("series", [])
 
-    root_id = f"lwc_candlestick_{symbol}"
-    _bg, _tc, _gc = "#ffffff", "#1e293b", "#e9eef3"
+    init_data["symbol"] = symbol
+    init_data["heights"] = {
+        "main": main_height, "vol": vol_height, "osc": osc_height,
+        "iv_skew": iv_skew_height, "iv_skew_hist": iv_skew_hist_height,
+    }
+    init_data["theme"] = {"bg": "#ffffff", "text": "#1e293b", "grid": "#e9eef3"}
 
-    # Build the init JS and encode it (along with the vendored LWC lib) as base64
-    payload = {"init": init_data}
-    json_str = json.dumps(payload)
-    init_js = _build_init_js(root_id, json_str, _bg, _tc, _gc,
-                             main_height, vol_height, osc_height,
-                             iv_skew_height, iv_skew_hist_height)
+    # Dispatch the current data. The host element is rendered by
+    # render_chart_host() (called every tick, unconditional). This element's
+    # body changes every tick, so its script re-executes and the host
+    # dispatcher either rebuilds (structure changed) or updates just the last
+    # bar of each series.
+    payload_js = json.dumps(init_data).replace("<", "\\u003c")
+    payload_html = (
+        '<script>window.__cw_tick_' + _ROOT_ID
+        + ' && window.__cw_tick_' + _ROOT_ID + '(' + payload_js + ');</script>'
+    )
+    st.html(payload_html, unsafe_allow_javascript=True, width="stretch")
 
-    html_output = _render_js(init_js)
-    total_height = main_height + vol_height + osc_height + iv_skew_height + iv_skew_hist_height
-    components_html(html_output, height=total_height)
+
+_HOST_JS_CACHE: str | None = None
+
+
+def get_host_html() -> str:
+    """Constant host HTML: vendored LWC script tag + container div + chart code."""
+    global _HOST_JS_CACHE
+    if _HOST_JS_CACHE is None:
+        _ensure_static_lib()
+        _HOST_JS_CACHE = (
+            '<script src="' + _STATIC_LIB_URL + '"></script>'
+            '<div id="' + _ROOT_ID + '" style="width:100%;position:relative;"></div>'
+            '<script>' + build_host_js(_ROOT_ID) + '</script>'
+        )
+    return _HOST_JS_CACHE
