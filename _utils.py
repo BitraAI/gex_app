@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime, timezone
-from typing import Any, Optional
+from datetime import date
+from typing import Any
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -19,16 +19,6 @@ def to_json(resp: Any) -> Any:
     if hasattr(resp, "json"):
         return resp.json()
     return resp
-
-
-def nested_get(d: dict, *keys: str, default: Any = None) -> Any:
-    """Safely traverse nested dicts: nested_get(d, 'a', 'b', 'c', default=0)
-    returns d['a']['b']['c'] or default if any key is missing."""
-    for key in keys:
-        if not isinstance(d, dict):
-            return default
-        d = d.get(key, default) or default
-    return d
 
 
 def ensure_dir(path: str) -> None:
@@ -84,33 +74,6 @@ def format_expiration(exp: str | None) -> str:
         return exp or ""
 
 
-def floor_ts_to_tf(
-    ts_ms: int, timeframe: str, tf_minutes: int | None = None
-) -> int:
-    """Floor a timestamp (ms since epoch, UTC) to a timeframe boundary.
-
-    For intraday timeframes (*tf_minutes* is set), simply floors to the
-    nearest *tf_minutes* interval.
-
-    For daily/weekly/monthly (when *tf_minutes* is None), floors to the
-    start of the US/Eastern trading day so it aligns with TDA's daily
-    cache bars (which use midnight ET, not midnight UTC).
-    """
-    if tf_minutes is None:
-        tf_ms = 24 * 60 * 60 * 1000
-        try:
-            ny_tz = ZoneInfo("America/New_York")
-            now_ny = datetime.fromtimestamp(ts_ms / 1000, tz=ZoneInfo("UTC")).astimezone(ny_tz)
-            day_start_ny = now_ny.replace(hour=0, minute=0, second=0, microsecond=0)
-            return int(day_start_ny.astimezone(ZoneInfo("UTC")).timestamp() * 1000)
-        except Exception:
-            logger.debug("Timezone fallback for bucket_timestamp", exc_info=True)
-            return (ts_ms // tf_ms) * tf_ms
-    else:
-        tf_ms = tf_minutes * 60 * 1000
-        return (ts_ms // tf_ms) * tf_ms
-
-
 def floor_dataframe_timestamps(
     df: pd.DataFrame,
     col: str = "datetime",
@@ -163,16 +126,3 @@ def compute_current_bucket(timeframe: str, tf_minutes: int | None = None) -> int
     else:
         tf_ms = tf_minutes * 60 * 1000
         return (now_utc_ms // tf_ms) * tf_ms
-
-
-def extract_last_price(quote: dict) -> float | None:
-    """Extract the best available price from a Schwab quote dict."""
-    last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-    if last is not None:
-        try:
-            v = float(last)
-            if v > 0:
-                return v
-        except (ValueError, TypeError):
-            pass
-    return None

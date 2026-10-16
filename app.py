@@ -37,8 +37,6 @@ from charts import _get_style, _get_css
 from config import validate_config
 
 
-from zoneinfo import ZoneInfo
-
 # Fail fast with a clear, actionable message if config.toml / env vars are
 # missing required credentials — otherwise the user hits a cryptic traceback
 # only after clicking Refresh.  Done at module scope (before main) so the
@@ -473,6 +471,10 @@ def compute_state():
             "call_iv_25d": _call_iv,
             "atm_iv": _atm_iv,
         })
+        # Cap the history: rows accumulate while the app runs and would grow
+        # unbounded (built into the chart payload on every fragment tick).
+        if len(st.session_state.iv_skew_history) > 900:
+            st.session_state.iv_skew_history = st.session_state.iv_skew_history[-900:]
     st.session_state.expirations = sorted(set(
         e["expiration"] for e in st.session_state.data
     ))
@@ -1309,7 +1311,7 @@ def render_candlesticks_frag():
                         "call_iv_25d": _analytics.get("call_iv_25d"),
                         "atm_iv": _analytics.get("atm_iv"),
                     })
-            s["iv_skew_history"] = _iv_skew_hist
+            s["iv_skew_history"] = _iv_skew_hist[-900:] if len(_iv_skew_hist) > 900 else _iv_skew_hist
             render_chart(
                 candles_payload,
                 indicators=selected_indicators,
@@ -2196,8 +2198,8 @@ def _infer_uw_side(bid: float, ask: float, mark: float) -> str:
     return "MID"
 
 
-def render_unusual_whales():
-    """Unusual Whales scanner tab.
+def render_unusual_trades():
+    """Unusual Trades scanner tab.
 
     Scans every tracked ticker (or just the current one) for "unusual"
     options blocks: outsized volume relative to open interest (fresh
@@ -2207,7 +2209,7 @@ def render_unusual_whales():
     """
     s = st.session_state
 
-    st.subheader("Unusual Whales Scanner")
+    st.subheader("Unusual Trades Scanner")
 
     with st.expander("How to read this scanner", expanded=False):
         st.markdown(
@@ -2372,7 +2374,7 @@ def render_tabs_frag():
     # Create the tabs with updated order
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "Market Structure", "Positioning", "Volatility", "Heatmaps",
-        "Options Data", "Candlesticks", "Trade Signals", "Order Flow", "Unusual Whales",
+        "Options Data", "Candlesticks", "Trade Signals", "Order Flow", "Unusual Trades",
         "Live News"
     ])
     
@@ -2402,7 +2404,7 @@ def render_tabs_frag():
         render_flow_frag()
     
     with tab9:
-        render_unusual_whales()
+        render_unusual_trades()
     
     with tab10:
         render_news_frag()
