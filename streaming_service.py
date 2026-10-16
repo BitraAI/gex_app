@@ -1,6 +1,12 @@
 import asyncio
+import logging
+import math
 import threading
 import time as _time_mod
+
+from _constants import STREAM_RECONNECT_DELAY, STREAM_RETRY_DELAY, STREAM_RETRY_BACKOFF
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 from schwab.streaming import StreamClient
@@ -8,6 +14,11 @@ from websockets.exceptions import ConnectionClosed
 
 from _constants import MAX_BAR_ROWS
 from option_streaming_service import _get_stream_symbol
+
+
+def _exp_neg(x: float) -> float:
+    """Fast ``e^(-x)`` helper."""
+    return math.exp(-x)
 
 
 class StreamingService:
@@ -305,7 +316,7 @@ class StreamingService:
             except Exception as e:
                 with self._lock:
                     self._last_error = f"Subs failed: {e}"
-                await asyncio.sleep(2)
+                await asyncio.sleep(STREAM_RECONNECT_DELAY)
                 continue
             break
 
@@ -319,7 +330,7 @@ class StreamingService:
             except Exception as e:
                 with self._lock:
                     self._last_error = f"handle_message: {e}"
-                await asyncio.sleep(3)
+                await asyncio.sleep(STREAM_RETRY_DELAY)
                 if self._running and self._symbol:
                     try:
                         await sc.login()
@@ -329,7 +340,7 @@ class StreamingService:
                                 await sc.level_one_equity_subs([self._symbol])
                                 await self._subscribe_books(sc)
                             except Exception:
-                                await asyncio.sleep(2)
+                                await asyncio.sleep(STREAM_RETRY_BACKOFF)
                                 continue
                             break
                         with self._lock:
@@ -472,7 +483,7 @@ class StreamingService:
             # Don't wedge silently: if a SUBS is rejected (bad symbol, budget,
             # socket race) the next refresh's full SUBS retries it.  Surface
             # it so the failure is visible instead of invisible.
-            print(f"[StreamingService] OPTIONS_BOOK subscribe error: {e}")
+            logger.error("[StreamingService] OPTIONS_BOOK subscribe error: %s", e)
 
     async def _subscribe_books(self, sc: StreamClient):
         """Subscribe OPTIONS_BOOK for the ATM OCC contracts of the chart
@@ -496,9 +507,16 @@ class StreamingService:
     def _book_volume_for_symbol(self, symbol: str) -> tuple[float, float] | None:
         """Sum Level-2 OPTIONS-book resting volume for one underlying stream
         symbol, aggregated across the ATM call/put OCC contracts registered
-        for it: TOTAL_VOLUME across the best bid levels and best ask levels.
-        Returns ``(bid_vol, ask_vol)`` or None when no contract book has
-        arrived yet.
+        for it.  Uses a **weighted imbalance** that combines two factors:
+
+        1. **Depth proximity** — levels closer to the midpoint (best bid / best
+           ask) decay exponentially by level index:  ``w_level = e^(-λ * idx)``
+           with λ = ln(2)/3 so the 3rd level is halved.
+        2. **Price-distance** — volume farther from the mid-price gets lower
+           weight:  ``w_price = 1 / (1 + |level_price - mid| / mid)``.
+
+        Returns ``(weighted_bid_vol, weighted_ask_vol)`` or None when no
+        contract book has arrived yet.
 
         Assumes *self._lock* is held (called from handlers and trend_data).
         """
@@ -508,6 +526,7 @@ class StreamingService:
         bid_vol = 0.0
         ask_vol = 0.0
         found = False
+        _LAMBDA = 0.231049  # ln(2)/3  →  half-life at level index 3
         for c in contracts:
             content = self._books_options.get(c)
             if content is None:
@@ -515,14 +534,55 @@ class StreamingService:
             if not content:
                 continue
             found = True
-            for ask in (content.get("ASKS") or []):
+            # Compute mid-price from best available quotes; fallback to 1.0
+            bids = content.get("BIDS") or []
+            asks = content.get("ASKS") or []
+            best_bid_price = None
+            best_ask_price = None
+            if bids:
                 try:
-                    ask_vol += float(ask.get("TOTAL_VOLUME") or 0)
+                    best_bid_price = float(bids[0].get("PRICE") or 0)
                 except (TypeError, ValueError):
                     pass
-            for bid in (content.get("BIDS") or []):
+            if asks:
                 try:
-                    bid_vol += float(bid.get("TOTAL_VOLUME") or 0)
+                    best_ask_price = float(asks[0].get("PRICE") or 0)
+                except (TypeError, ValueError):
+                    pass
+            if best_bid_price and best_ask_price and (best_bid_price + best_ask_price) > 0:
+                mid = (best_bid_price + best_ask_price) / 2.0
+            else:
+                mid = 1.0
+            # Weighted ask volume — asks sorted ascending; idx 0 = best ask
+            for idx, ask in enumerate(asks):
+                try:
+                    vol = float(ask.get("TOTAL_VOLUME") or 0)
+                    if vol <= 0:
+                        continue
+                    # Level proximity: best ask (idx=0) gets weight 1.0
+                    level_w = _exp_neg(_LAMBDA * idx)
+                    # Price-distance from mid
+                    ask_price = float(ask.get("PRICE") or 0)
+                    if ask_price > 0:
+                        price_w = mid / (mid + abs(ask_price - mid))
+                    else:
+                        price_w = 1.0
+                    ask_vol += vol * level_w * price_w
+                except (TypeError, ValueError):
+                    pass
+            # Weighted bid volume — bids sorted descending; idx 0 = best bid
+            for idx, bid in enumerate(bids):
+                try:
+                    vol = float(bid.get("TOTAL_VOLUME") or 0)
+                    if vol <= 0:
+                        continue
+                    level_w = _exp_neg(_LAMBDA * idx)
+                    bid_price = float(bid.get("PRICE") or 0)
+                    if bid_price > 0:
+                        price_w = mid / (mid + abs(bid_price - mid))
+                    else:
+                        price_w = 1.0
+                    bid_vol += vol * level_w * price_w
                 except (TypeError, ValueError):
                     pass
         if not found:
@@ -582,16 +642,15 @@ class StreamingService:
         rather than uniformly.  Sign semantics match the legacy option-flow
         momentum math so the same >0.3 thresholds apply downstream.
 
-        Assumes *self._lock* is held.
+        Assumes *self._lock* is held.  The 60 s pruning is handled by
+        ``_update_book_imbalance`` on each book update, so this method
+        skips redundant cleanup (avoiding double pop(0) on the shared list).
         """
         history = self._book_imb_history.get(symbol)
         if not history or len(history) < 2:
             return 0.0, 0.0
-        now = _time_mod.time()
-        while history and history[0][0] < now - 60:
-            history.pop(0)
-        if len(history) < 2:
-            return 0.0, 0.0
+        # NOTE: _update_book_imbalance already prunes the history to the
+        # trailing 60 s on every book update, so no second cleanup needed.
         # first difference of the ratio over the trailing 60 s window
         flow_speed = history[-1][1] - history[0][1]
         # second difference: (change over recent half) - (change over older
@@ -633,6 +692,7 @@ class StreamingService:
 
     def trend_data(self, stream_symbol: str) -> dict:
         """L2-sourced trend snapshot for a stream symbol, matching the dict
+
         shape previously produced by
         ``StreamingService.get_ticker_trend_data``:
 
@@ -659,28 +719,43 @@ class StreamingService:
             flow_speed, flow_acceleration = self._flow_speed_and_accel(stream_symbol)
             liquidity_flow = self._liquidity_flow(stream_symbol)
 
-            # trend direction from L2 book pressure (same thresholds as before)
+            # trend direction from L2 book pressure:
+            # 1) Determine the raw directional label from book_imbalance + flow_speed
             if ratio is None or len(history) < 2:
-                trend = "flat"
-            elif ratio > 0.3 and flow_speed > 0 and flow_acceleration > 0:
-                trend = "UP"
-            elif ratio < -0.3 and flow_speed < 0 and flow_acceleration < 0:
-                trend = "DOWN"
+                raw_trend = "flat"
             elif ratio > 0.3 and flow_speed > 0:
-                trend = "up"
+                raw_trend = "up"
             elif ratio < -0.3 and flow_speed < 0:
-                trend = "down"
+                raw_trend = "down"
             else:
-                trend = "flat"
+                raw_trend = "flat"
+
+            # 2) Upgrade to strong (UP/DOWN) when book_imbalance is strong
+            #    AND flow_speed shows momentum — acceleration magnitude
+            #    boosts the label but is NOT a sign gate (a strong trend
+            #    remains valid even while acceleration dips negative).
+            if raw_trend == "up" and abs(flow_speed) > 0.2:
+                trend = "UP"
+            elif raw_trend == "down" and abs(flow_speed) > 0.2:
+                trend = "DOWN"
+            else:
+                trend = raw_trend
 
             prev = self._prev_trend.get(stream_symbol)
             self._prev_trend[stream_symbol] = trend
 
         reversal: str | None = None
         if prev is not None and prev != trend:
-            if prev == "down" and trend == "up":
+            # Detect bullish/bearish reversals across all directional
+            # transitions (not just plain down→up / up→down), so that
+            # strong trends that flip direction also fire reversals.
+            _was_bullish = prev in ("up", "UP", "bullish")
+            _was_bearish = prev in ("down", "DOWN", "bearish")
+            _is_bullish = trend in ("up", "UP", "bullish")
+            _is_bearish = trend in ("down", "DOWN", "bearish")
+            if _was_bearish and _is_bullish:
                 reversal = "bullish"
-            elif prev == "up" and trend == "down":
+            elif _was_bullish and _is_bearish:
                 reversal = "bearish"
 
         now = _time_mod.time()

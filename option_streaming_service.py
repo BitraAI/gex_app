@@ -1,12 +1,16 @@
 import asyncio
+import logging
 import os
 import threading
 import time as _time_mod
+from collections import deque
 from datetime import datetime
 import pandas as pd
-from _constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS
+from _constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS, ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE
 from _utils import load_json, save_json
 from calculations import calculate_atm_strike, get_strike_spacing
+
+logger = logging.getLogger(__name__)
 
 
 # Minimum seconds between REST option-chain re-fetches for a single ticker
@@ -240,8 +244,7 @@ class AtmOptionVolumeService:
         pruned = 0
         with self._lock:
             for key in list(self._ticker_flows.keys()):
-                norm = _normalize_display_symbol(key)
-                if norm in INDEX_QUOTE_MAP and norm not in user_tickers:
+                if key in INDEX_QUOTE_MAP and key not in user_tickers:
                     del self._ticker_flows[key]
                     pruned += 1
         return pruned
@@ -382,10 +385,11 @@ class AtmOptionVolumeService:
         all_symbols = list(dict.fromkeys([primary_symbol] + self._all_tickers))
         with self._lock:
             for sym in all_symbols:
-                if sym in self._ticker_flows:
+                norm = _normalize_display_symbol(sym)
+                if norm in self._ticker_flows:
                     continue
                 stream_sym = _get_stream_symbol(sym)
-                self._ticker_flows[sym] = {
+                self._ticker_flows[norm] = {
                     "stream_symbol": stream_sym,
                     "spot": 0.0,
                     "atm_strike": 0.0,
@@ -409,14 +413,15 @@ class AtmOptionVolumeService:
                     "bearish": 0,
                     "buy_vol": 0,
                     "sell_vol": 0,
+                    "cumulative_call_buy": 0,
                     "call_delta": None,
                     "put_delta": None,
                     "delta_buy": 0.0,
                     "delta_sell": 0.0,
                     "flow_history": [],
-                    "vol_history": [],
-                    "spot_history": [],
-                    "exec_history": [],
+                    "vol_history": deque(),
+                    "spot_history": deque(),
+                    "exec_history": deque(),
                     "flow_speed": 0,
                     "flow_acceleration": 0,
                     "book_imbalance": None,
@@ -479,16 +484,16 @@ class AtmOptionVolumeService:
                 return None
             now = _time_mod.time()
             spot = ticker.get("spot", 0.0) or 0.0
-            sh = ticker.setdefault("spot_history", [])
-            vh = ticker.setdefault("vol_history", [])
+            sh = ticker.setdefault("spot_history", deque())
+            vh = ticker.setdefault("vol_history", deque())
             while sh and sh[0][0] < now - 60:
-                sh.pop(0)
+                sh.popleft()
             while vh and vh[0][0] < now - 60:
-                vh.pop(0)
+                vh.popleft()
             if spot > 0:
                 sh.append((now, spot))
                 while sh and sh[0][0] < now - 60:
-                    sh.pop(0)
+                    sh.popleft()
             if len(vh) < 2 or len(sh) < 2:
                 return None
             vol_60 = vh[-1][1] - vh[0][1]
@@ -511,13 +516,49 @@ class AtmOptionVolumeService:
             buy = ticker.get("buy_vol", 0)
             sell = ticker.get("sell_vol", 0)
             now = _time_mod.time()
-            eh = ticker.setdefault("exec_history", [])
+            eh = ticker.setdefault("exec_history", deque())
             while eh and eh[0][0] < now - 60:
-                eh.pop(0)
+                eh.popleft()
             net_60 = None
             if len(eh) >= 2:
                 net_60 = eh[-1][1] - eh[0][1]
             return buy, sell, net_60
+
+    def get_ticker_call_buy(self, display_symbol: str) -> int | None:
+        """Return cumulative call buy volume for a tracked ticker,
+        or None if not tracked / no data yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("cumulative_call_buy", 0)
+
+    def get_ticker_call_sell(self, display_symbol: str) -> int | None:
+        """Return cumulative call sell volume for a tracked ticker,
+        or None if not tracked / no data yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("cumulative_call_sell", 0)
+
+    def get_ticker_put_buy(self, display_symbol: str) -> int | None:
+        """Return cumulative put buy volume for a tracked ticker,
+        or None if not tracked / no data yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("cumulative_put_buy", 0)
+
+    def get_ticker_put_sell(self, display_symbol: str) -> int | None:
+        """Return cumulative put sell volume for a tracked ticker,
+        or None if not tracked / no data yet."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("cumulative_put_sell", 0)
 
     def get_ticker_option_prices(self, display_symbol: str) -> dict:
         """Return {call_price, put_price} mid-market for a tracked ticker,
@@ -933,12 +974,28 @@ class AtmOptionVolumeService:
                     "proxy_spot": None,
                     "bullish": 0,
                     "bearish": 0,
+                    "buy_vol": 0,
+                    "sell_vol": 0,
+                       "cumulative_call_buy": 0,
+                   "cumulative_call_sell": 0,
+                    "cumulative_put_buy": 0,
+                    "cumulative_put_sell": 0,
+                    "call_delta": None,
+                    "put_delta": None,
+                    "delta_buy": 0.0,
+                    "delta_sell": 0.0,
                     "flow_history": [],
+                    "vol_history": deque(),
+                    "spot_history": deque(),
+                    "exec_history": deque(),
+                    "flow_speed": 0,
+                    "flow_acceleration": 0,
+                    "book_imbalance": None,
+                    "book_imbalance_history": [],
                     "trend": "flat",
+                    "trend_reversal": None,
                 }
-                if self._running and self._expiration:
-                    sc = self._stream_client
-            else:
+            if ticker is not None:
                 old = ticker["spot"]
                 ticker["spot"] = spot
                 # Only recalc ATM strike when the spot has moved by at least
@@ -1301,11 +1358,10 @@ class AtmOptionVolumeService:
             # don't repeat the same notice on every re-subscribe.
             _skipped_set = frozenset(skipped_no_spot)
             if _skipped_set != self._last_skipped_no_spot:
-                print(
-                    f"[AtmOptionVolumeService] _do_subscribe: skipped "
-                    f"{len(skipped_no_spot)} ticker(s) with unknown "
-                    f"(proxy) spot: "
-                    f"{skipped_no_spot} (will subscribe when spot arrives)"
+                logger.warning(
+                    "[AtmOptionVolumeService] _do_subscribe: skipped %d ticker(s) with unknown (proxy) spot: %s (will subscribe when spot arrives)",
+                    len(skipped_no_spot),
+                    skipped_no_spot,
                 )
                 self._last_skipped_no_spot = _skipped_set
 
@@ -1348,20 +1404,22 @@ class AtmOptionVolumeService:
             # Only log on first failure or when the error message changes
             _err_key = str(e)[:120]
             if _err_key != getattr(self, "_last_sub_err_key", None):
-                print(
-                    f"[AtmOptionVolumeService] _do_subscribe FAILED: "
-                    f"{type(e).__name__}: {e} (symbols={len(all_symbols)})"
-                    f"{' — will reconnect' if _is_dead else ''}"
+                logger.error(
+                    "[AtmOptionVolumeService] _do_subscribe FAILED: %s: %s (symbols=%d)%s",
+                    type(e).__name__,
+                    e,
+                    len(all_symbols),
+                    " — will reconnect" if _is_dead else "",
                 )
                 self._last_sub_err_key = _err_key
             return
 
         _ok_set = _new_set
         if _ok_set != self._last_sub_ok_set:
-            print(
-                f"[AtmOptionVolumeService] _do_subscribe OK: "
-                f"subscribed {len(all_symbols)} option symbols "
-                f"({len(tickers) - len(skipped_no_spot)} ticker(s))"
+            logger.info(
+                "[AtmOptionVolumeService] _do_subscribe OK: subscribed %d option symbols (%d ticker(s))",
+                len(all_symbols),
+                len(tickers) - len(skipped_no_spot),
             )
             self._last_sub_ok_set = _ok_set
 
@@ -1461,17 +1519,21 @@ class AtmOptionVolumeService:
             if opt_type == "CALL":
                 ticker["bullish"] += size
                 ticker["buy_vol"] = ticker.get("buy_vol", 0) + size
+                ticker["cumulative_call_buy"] = ticker.get("cumulative_call_buy", 0) + size
             else:
                 ticker["bearish"] += size
                 ticker["sell_vol"] = ticker.get("sell_vol", 0) + size
-            signed = _d * size
+                ticker["cumulative_put_buy"] = ticker.get("cumulative_put_buy", 0) + size
+                signed = _d * size
         elif direction == "sell":
             if opt_type == "CALL":
                 ticker["bearish"] += size
                 ticker["sell_vol"] = ticker.get("sell_vol", 0) + size
+                ticker["cumulative_call_sell"] = ticker.get("cumulative_call_sell", 0) + size
             else:
                 ticker["bullish"] += size
                 ticker["buy_vol"] = ticker.get("buy_vol", 0) + size
+                ticker["cumulative_put_sell"] = ticker.get("cumulative_put_sell", 0) + size
             signed = -_d * size
         else:
             # Unknown direction — split evenly between bullish and bearish
@@ -1480,6 +1542,10 @@ class AtmOptionVolumeService:
             ticker["bearish"] += size - half
             ticker["buy_vol"] = ticker.get("buy_vol", 0) + half
             ticker["sell_vol"] = ticker.get("sell_vol", 0) + size - half
+            ticker["cumulative_call_buy"] = ticker.get("cumulative_call_buy", 0) + half
+            ticker["cumulative_call_sell"] = ticker.get("cumulative_call_sell", 0) + half
+            ticker["cumulative_put_buy"] = ticker.get("cumulative_put_buy", 0) + half
+            ticker["cumulative_put_sell"] = ticker.get("cumulative_put_sell", 0) + half
             signed = _d * half - _d * (size - half)
 
         # Delta-weighted net flow for the Net Flow column.
@@ -1493,14 +1559,14 @@ class AtmOptionVolumeService:
         # cumulative net executed flow (delta_buy - delta_sell) for the 60 s
         # net line.
         now = _time_mod.time()
-        vh = ticker.setdefault("vol_history", [])
+        vh = ticker.setdefault("vol_history", deque())
         vh.append((now, ticker["bullish"] + ticker["bearish"]))
         while vh and vh[0][0] < now - 60:
-            vh.pop(0)
-        eh = ticker.setdefault("exec_history", [])
+            vh.popleft()
+        eh = ticker.setdefault("exec_history", deque())
         eh.append((now, ticker.get("delta_buy", 0.0) - ticker.get("delta_sell", 0.0)))
         while eh and eh[0][0] < now - 60:
-            eh.pop(0)
+            eh.popleft()
 
     def _infer_dir(self, price: float, bid: float | None, ask: float | None) -> str:
         if bid is not None and ask is not None:

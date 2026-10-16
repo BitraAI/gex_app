@@ -13,7 +13,7 @@ import logging
 from typing import List
 
 from client import fetch_quotes
-from _constants import INDEX_QUOTE_MAP
+from _constants import INDEX_QUOTE_MAP, INDEX_SPOT_MAX_RETRIES, INDEX_SPOT_RETRY_BACKOFF, INDEX_SPOT_UNEXPECTED_BACKOFF_MULTIPLIER
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL = 2.0
 
 # Max REST fetch attempts on transient errors (timeouts, 5xx, etc.)
-MAX_RETRIES = 3
+MAX_RETRIES = INDEX_SPOT_MAX_RETRIES
 
 
 
@@ -114,7 +114,7 @@ class IndexSpotPoller:
         while self._running:
             try:
                 # Throttle calls if we've recently polled to avoid hammering the API
-                current_time = asyncio.get_event_loop().time()
+                current_time = asyncio.get_running_loop().time()
                 time_since_last_poll = current_time - self._last_poll_time
                 
                 if time_since_last_poll < POLL_INTERVAL:
@@ -141,7 +141,7 @@ class IndexSpotPoller:
                             break
                         except Exception:
                             if attempt < MAX_RETRIES - 1:
-                                await asyncio.sleep(1.0)
+                                await asyncio.sleep(INDEX_SPOT_RETRY_BACKOFF)
                             else:
                                 raise
                     
@@ -191,7 +191,7 @@ class IndexSpotPoller:
                 break
             except Exception as e:
                 logger.error("Unexpected error in index poller loop: %s", e)
-                await asyncio.sleep(POLL_INTERVAL * 5)  # Wait longer on unexpected errors
+                await asyncio.sleep(POLL_INTERVAL * INDEX_SPOT_UNEXPECTED_BACKOFF_MULTIPLIER)  # Wait longer on unexpected errors
                 
         self._task = None
         logger.info("Index poller loop stopped")

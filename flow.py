@@ -7,19 +7,22 @@ safely from either entry point without re-running app.py's top-level code.
 
 import asyncio
 import html
+import json
+import logging
+import os
+import random
+import threading
 import time as _time_mod
 import streamlit as st
+from collections import deque
 from datetime import date, datetime
+from functools import partial
 from zoneinfo import ZoneInfo
-from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP
+from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT, FLOW_WATCHDOG_STALE_SECONDS
 from _utils import compute_strike_increment, format_expiration
 from option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol, _ABSORPTION_MIN_VOL
 from client import fetch_quotes
 from calculations import calculate_atm_strike
-import json
-import logging
-import os
-from functools import partial
 
 from analytics import compute_analytics
 from calculations import build_greeks_lookup, parse_option_chain
@@ -42,7 +45,7 @@ _last_full_recompute_ts: dict[str, float] = {}  # last full recompute time (mono
 _strike_inc: dict[str, float] = {}       # known strike increment per ticker
 logger = logging.getLogger(__name__)
 
-_FETCH_RETRIES = 3
+_FETCH_RETRIES = TICKER_RETRY_COUNT
 
 # Trend cell de-bounce: the displayed direction must persist for this many
 # consecutive samples before the Trend cell flips, so noisy streaming
@@ -68,8 +71,7 @@ async def _fetch_quotes_with_retry(client, symbols, max_retries=None):
             return await fetch_quotes(client, symbols)
         except Exception:
             if attempt < max_retries - 1:
-                import random
-                await asyncio.sleep(0.5 + random.random() * 1.0)
+                await asyncio.sleep(ATM_SUBSCRIBE_BACKOFF_BASE + random.random() * ATM_SUBSCRIBE_BACKOFF_RANGE)
             else:
                 raise
 
@@ -99,7 +101,6 @@ def _ensure_async_loop() -> asyncio.AbstractEventLoop:
     """Get or create the shared asyncio event loop (must match app.py)."""
     _ASYNC_LOOP = getattr(_ensure_async_loop, "_loop", None)
     if _ASYNC_LOOP is None:
-        import threading
         _ASYNC_LOOP = asyncio.new_event_loop()
         t = threading.Thread(target=_ASYNC_LOOP.run_forever, daemon=True)
         t.start()
@@ -222,7 +223,7 @@ def ensure_atm_streaming(stream_symbol: str):
                             s.spot_cache[_disp_upper] = float(last)
                             atm_svc.set_ticker_spot(_disp_upper, float(last))
                 except Exception as e:
-                    print(f"[ensure_atm_streaming] index quote fetch failed: {e}")
+                    logger.warning("[ensure_atm_streaming] index quote fetch failed: %s", e)
 
     if svc and svc.is_connected and atm_svc and _first_exp:
 
@@ -256,7 +257,7 @@ def ensure_atm_streaming(stream_symbol: str):
                     else:
                         s.spot_cache[_disp_upper] = float(last)
             except Exception as e:
-                print(f"[ensure_atm_streaming] spot pre-fetch failed: {e}")
+                logger.warning("[ensure_atm_streaming] spot pre-fetch failed: %s", e)
 
         # Refresh the Call/Put Price marks for every tracked ticker every
         # ~2 s.  The streamed L1 bids only cover ATM strikes, and the wall
@@ -302,7 +303,7 @@ def ensure_atm_streaming(stream_symbol: str):
                         if _acall is not None or _aput is not None:
                             atm_svc.set_ticker_option_prices(_tk, _acall, _aput)
                 except Exception as e:
-                    print(f"[ensure_atm_streaming] option quote refresh failed: {e}")
+                    logger.warning("[ensure_atm_streaming] option quote refresh failed: %s", e)
 
         _was_reconnect = getattr(atm_svc, "_needs_reconnect", False)
         _need_register = (
@@ -377,8 +378,26 @@ def ensure_atm_streaming(stream_symbol: str):
                         "put_ask": None,
                         "bullish": 0,
                         "bearish": 0,
+                        "buy_vol": 0,
+                        "sell_vol": 0,
+                        "cumulative_call_buy": 0,
+                         "cumulative_call_sell": 0,
+                        "cumulative_put_buy": 0,
+                        "cumulative_put_sell": 0,
+                        "call_delta": None,
+                        "put_delta": None,
+                        "delta_buy": 0.0,
+                        "delta_sell": 0.0,
                         "flow_history": [],
+                        "vol_history": deque(),
+                        "spot_history": deque(),
+                        "exec_history": deque(),
+                        "flow_speed": 0,
+                        "flow_acceleration": 0,
+                        "book_imbalance": None,
+                        "book_imbalance_history": [],
                         "trend": "flat",
+                        "trend_reversal": None,
                     }
 
         _spot_map = {}
@@ -422,8 +441,26 @@ def ensure_atm_streaming(stream_symbol: str):
                                         "put_ask": None,
                                         "bullish": 0,
                                         "bearish": 0,
+                                        "buy_vol": 0,
+                                        "sell_vol": 0,
+                                        "cumulative_call_buy": 0,
+                                       "cumulative_call_sell": 0,
+                                        "cumulative_put_buy": 0,
+                                        "cumulative_put_sell": 0,
+                                        "call_delta": None,
+                                        "put_delta": None,
+                                        "delta_buy": 0.0,
+                                        "delta_sell": 0.0,
                                         "flow_history": [],
+                                        "vol_history": deque(),
+                                        "spot_history": deque(),
+                                        "exec_history": deque(),
+                                        "flow_speed": 0,
+                                        "flow_acceleration": 0,
+                                        "book_imbalance": None,
+                                        "book_imbalance_history": [],
                                         "trend": "flat",
+                                        "trend_reversal": None,
                                     }
                     # Now set the walls
                     atm_svc.set_ticker_walls(current_sym, put_wall, call_wall)
@@ -568,8 +605,8 @@ def _wall_price_marks(
     nearest to spot, falling back to the ATM prices when a wall-level mark is
     unavailable.  Used by both the alert path and the grid columns so the
     wall-pricing logic exists in one place."""
-    _dist_cw = abs(spot - call_wall) if call_wall is not None else float("inf")
-    _dist_pw = abs(spot - put_wall) if put_wall is not None else float("inf")
+    _dist_cw = abs(spot - call_wall) if call_wall is not None and spot is not None else float("inf")
+    _dist_pw = abs(spot - put_wall) if put_wall is not None and spot is not None else float("inf")
     if _dist_cw <= _dist_pw:
         _call_p = wall_prices.get("call_wall_call_price") or opt_prices.get("call_price")
         _put_p = wall_prices.get("call_wall_put_price") or opt_prices.get("put_price")
@@ -850,6 +887,13 @@ def maybe_fire_wall_zone_alerts() -> None:
             state[t_upper] = next_state
             _cache = _ticker_analytics_cache.get(t_upper.split(":")[0]) or {}
             _rv = _cache.get("rv", 0.0)
+            # Flow ratio for Telegram header
+            _call_buy = atm_svc.get_ticker_call_buy(t_upper) if atm_svc else 0
+            _call_sell = atm_svc.get_ticker_call_sell(t_upper) if atm_svc else 0
+            _put_buy = atm_svc.get_ticker_put_buy(t_upper) if atm_svc else 0
+            _put_sell = atm_svc.get_ticker_put_sell(t_upper) if atm_svc else 0
+            _total_flow = (_call_buy or 0) + (_put_sell or 0) + (_put_buy or 0) + (_call_sell or 0)
+            _flow_ratio = round(((_call_buy or 0) + (_put_sell or 0)) / _total_flow, 2) if _total_flow > 0 else None
             notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
                           gex=_cache.get("net_gex"), rv=_rv if _rv > 0 else None,
                           iv_rank=_cache.get("iv_rank"),
@@ -859,6 +903,7 @@ def maybe_fire_wall_zone_alerts() -> None:
                           absorption=_absorption_now,
                           absorbed_at_wall=_absorbed_at_wall,
                           net_flow=_net_60,
+                          flow_ratio=_flow_ratio,
                           disable_notification=False)
         else:
             state[t_upper] = next_state
@@ -1130,6 +1175,15 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         )]
 
         if tg_alerts and now_ts - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
+            # Flow ratio for Telegram header
+            _call_buy = atm_svc.get_ticker_call_buy(display_key) if atm_svc else 0
+            _call_sell = atm_svc.get_ticker_call_sell(display_key) if atm_svc else 0
+            _put_buy = atm_svc.get_ticker_put_buy(display_key) if atm_svc else 0
+            _put_sell = atm_svc.get_ticker_put_sell(display_key) if atm_svc else 0
+            _total_flow = (_call_buy or 0) + (_put_sell or 0) + (_put_buy or 0) + (_call_sell or 0)
+            _flow_ratio = round(((_call_buy or 0) + (_put_sell or 0)) / _total_flow, 2) if _total_flow > 0 else None
+            # Absorption for Telegram header
+            _absorption = atm_svc.get_ticker_absorption(display_key) if atm_svc else None
             next_sym_state["last_alert_ts"] = now_ts
             await loop.run_in_executor(
                 None, partial(
@@ -1137,6 +1191,8 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                 symbol=api_symbol, spot=spot,
                 gex=analytics.get("net_gex"),
                 iv_rank=iv_rank, wall_zone=_wall_zone, pw=_pw, cw=_cw,
+                    flow_ratio=_flow_ratio,
+                    absorption=_absorption,
                     disable_notification=False,
                 ),
             )
@@ -1336,9 +1392,6 @@ def render_atm_order_flow_grid():
             put_wall_val = atm_svc.get_ticker_put_wall(t_upper) if atm_svc else None
             call_wall_val = atm_svc.get_ticker_call_wall(t_upper) if atm_svc else None
 
-            _net_60 = (
-                atm_svc.get_ticker_executed_net60(t_upper)[2] if atm_svc else None
-            )
             _call_p, _put_p = _wall_price_marks(opt_prices, wall_prices, call_wall_val, put_wall_val, spot)
             
             # Trend from streaming (bullish/bearish reversal or bare direction)
@@ -1387,6 +1440,13 @@ def render_atm_order_flow_grid():
                 _trend_state[t_upper] = {"candidate": _candidate, "streak": _streak, "display": _display}
                 trend_display = _display
 
+            _call_buy = atm_svc.get_ticker_call_buy(t_upper) if atm_svc else 0
+            _call_sell = atm_svc.get_ticker_call_sell(t_upper) if atm_svc else 0
+            _put_buy = atm_svc.get_ticker_put_buy(t_upper) if atm_svc else 0
+            _put_sell = atm_svc.get_ticker_put_sell(t_upper) if atm_svc else 0
+            _net_flow = _call_buy + _put_sell - _put_buy - _call_sell
+            _total_flow = _call_buy + _put_sell + _put_buy + _call_sell
+            _flow_ratio = round((_call_buy + _put_sell) / _total_flow, 2) if _total_flow > 0 else 0.0
             rows.append({
                 "Ticker": t_upper,
                 "Spot": spot,
@@ -1399,7 +1459,8 @@ def render_atm_order_flow_grid():
                 "Book Imbalance": book_imbalance,
                 "Flow Speed": flow_speed,
                 "Flow Acceleration": flow_acceleration,
-                "Net Flow": _net_60,
+                "Net Flow": _net_flow,
+                "Flow Ratio": _flow_ratio,
                 "Liquidity Flow": ticker_data.get("liquidity_flow") if _svc is not None else None,
                 "Absorption": atm_svc.get_ticker_absorption(t_upper) if atm_svc else None,
             })
@@ -1409,20 +1470,18 @@ def render_atm_order_flow_grid():
         return
 
     # Hash the row data to detect whether anything actually changed.
-    # Include a 10 s epoch so the Spot column is re-rendered every
-    # 10 s even when the cached value is unchanged, keeping the display
-    # visibly "alive" for users who watch the grid.
-    # Include a 60 s epoch so the Support / Resistance wall columns are
-    # re-rendered every 60 s even when their stored values are unchanged.
-    _atm_epoch = int(_time_mod.time() // 10)
-    _wall_epoch = int(_time_mod.time() // 60)
+    # Only meaningful data changes trigger re-render — this prevents flicker
+    # caused by the table being re-drawn on every 2-second fragment tick.
     data_key = tuple(
-        (r["Ticker"], r["Spot"], r["Expiration"],
+        (r["Ticker"],
+         r["Expiration"],
          r["Support"], r["Resistance"], r["Trend"],
-          r["Call Price"], r["Put Price"], r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"], r["Net Flow"], r["Liquidity Flow"], r["Absorption"])
+         r["Call Price"], r["Put Price"], r["Net Flow"], r["Flow Ratio"],
+         r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"],
+         r["Liquidity Flow"], r["Absorption"])
         for r in rows
     )
-    data_hash = hash((data_key, _atm_epoch, _wall_epoch))
+    data_hash = hash(data_key)
 
     cached_hash = s.get("_flow_styled_hash")
     cached_styled = s.get("_flow_styled")
@@ -1522,6 +1581,16 @@ def render_atm_order_flow_grid():
         if val < _ABSORPTION_LOW:
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
+
+    def _flow_ratio_color(val):
+        """Color the flow ratio: red background > 0.8, green background < 0.2."""
+        if val is None or not isinstance(val, (int, float)):
+            return ""
+        if val > 0.8:
+            return "background-color: #ef5350; font-weight: bold;"
+        if val < 0.2:
+            return "background-color: #00cc96; font-weight: bold;"
+        return ""
 
     def _net_flow_color(val):
         """Color the 60 s net executed flow (buy - sell) by sign."""
@@ -1695,13 +1764,10 @@ def render_atm_order_flow_grid():
         ("Support", "right", _fmt_money, _support_bg),
         ("Resistance", "right", _fmt_money, _resistance_bg),
         ("Call Price", "right", _fmt_money, _call_price_bg),
-        ("Put Price", "right", _fmt_money, _put_price_bg),
-        ("Trend", "center", lambda v: html.escape(str(v)) if v is not None else "", _trend_color),
-        ("Book Imbalance", "right", lambda v: _fmt_signed(v, 2), _mk_color("Book Imbalance", _book_imbalance_color)),
-        ("Flow Speed", "right", lambda v: _fmt_signed(v, 0), _mk_color("Flow Speed", _flow_speed_color)),
-        ("Flow Acceleration", "right", lambda v: _fmt_signed(v, 2), _mk_color("Flow Acceleration", _flow_acceleration_color)),
-        ("Liquidity Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Liquidity Flow", _liquidity_flow_color)),
+("Put Price", "right", _fmt_money, _put_price_bg),
+        ("Flow Ratio", "right", lambda v: f"{v:.2f}", _mk_color("Flow Ratio", _flow_ratio_color)),
         ("Net Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Net Flow", _net_flow_color)),
+        ("Liquidity Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Liquidity Flow", _liquidity_flow_color)),
         ("Absorption", "right", _fmt_commas, _mk_color("Absorption", _absorption_color)),
     ]
 
@@ -1749,8 +1815,8 @@ def render_flow_frag():
     # so the next ensure_atm_streaming cycle re-subscribes everything.
     atm_svc = s.get("atm_option_service")
     if atm_svc and is_market_open() and atm_svc.is_running:
-        if atm_svc.is_feed_stale(max_age_seconds=60):
-            print("[_flow_grid] watchdog: feed stale >60 s, forcing reconnect")
+        if atm_svc.is_feed_stale(max_age_seconds=FLOW_WATCHDOG_STALE_SECONDS):
+            logger.warning("[_flow_grid] watchdog: feed stale >60 s, forcing reconnect")
             atm_svc._needs_reconnect = True
 
     ensure_atm_streaming(mapped)

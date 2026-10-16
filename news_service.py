@@ -6,8 +6,11 @@ breaking stories through the existing Telegram alert pipeline.
 """
 
 import asyncio
+import logging
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import feedparser
 
@@ -52,7 +55,7 @@ class NewsService:
         for sym in symbols:
             try:
                 url = YAHOO_RSS_URL.format(symbol=sym)
-                f = await asyncio.get_event_loop().run_in_executor(
+                f = await asyncio.get_running_loop().run_in_executor(
                     None, lambda: feedparser.parse(url)
                 )
                 for entry in f.entries:
@@ -73,7 +76,7 @@ class NewsService:
                         "published": entry.get("published", ""),
                     })
             except Exception:
-                pass
+                logger.debug("Error parsing RSS feed for symbol", exc_info=True)
         if new_articles:
             self._articles = new_articles + self._articles
             # Cap at 200 to avoid unbounded memory growth

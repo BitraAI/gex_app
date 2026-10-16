@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 
@@ -101,6 +104,7 @@ def floor_ts_to_tf(
             day_start_ny = now_ny.replace(hour=0, minute=0, second=0, microsecond=0)
             return int(day_start_ny.astimezone(ZoneInfo("UTC")).timestamp() * 1000)
         except Exception:
+            logger.debug("Timezone fallback for bucket_timestamp", exc_info=True)
             return (ts_ms // tf_ms) * tf_ms
     else:
         tf_ms = tf_minutes * 60 * 1000
@@ -128,6 +132,7 @@ def floor_dataframe_timestamps(
             day_start_ny = tick_dt.dt.normalize()
             df[col] = day_start_ny.dt.tz_convert("UTC").astype("int64")
         except Exception:
+            logger.debug("Timezone fallback for floor_dataframe_timestamps", exc_info=True)
             df[col] = (df[col] // tf_ms) * tf_ms
     else:
         tf_ms = tf_minutes * 60 * 1000
@@ -152,6 +157,7 @@ def compute_current_bucket(timeframe: str, tf_minutes: int | None = None) -> int
                 .value // 1_000_000
             )
         except Exception:
+            logger.debug("Timezone fallback for compute_current_bucket", exc_info=True)
             tf_ms = 24 * 60 * 60 * 1000
             return (now_utc_ms // tf_ms) * tf_ms
     else:
