@@ -221,6 +221,7 @@ TIMEFRAMES = {
     "1d":  {"label": "1d",  "minutes": None, "freq": None,                  "ftype": "DAILY",  "ptype": "YEAR", "period": 1},
     "1w":  {"label": "1w",  "minutes": None, "freq": None,                  "ftype": "WEEKLY", "ptype": "YEAR", "period": 5},
     "1month": {"label": "1M", "minutes": None, "freq": None,                "ftype": "MONTHLY","ptype": "YEAR", "period": 10},
+    "233t": {"label": "233t", "minutes": None, "freq": "EVERY_MINUTE",       "ftype": "MINUTE", "ptype": "DAY",  "period": 3},
 }
 
 

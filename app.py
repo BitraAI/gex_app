@@ -817,6 +817,7 @@ def render_sidebar():
 TIMEFRAMES = {
     "1m": "1min", "2m": "2min", "5m": "5min", "15m": "15min",
     "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1D", "1w": "1W", "1M": "1ME",
+    "233t": "233t",
 }
 
 
@@ -842,8 +843,8 @@ def render_candlesticks_frag():
             timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()), index=0, label_visibility="collapsed", width=100)
         
         with row2:
-            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "Anchored VWAP", "Half Trend", "Volume", "Andean Osc"]
-            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Osc", "EMA 50", "Half Trend"], label_visibility="collapsed")
+            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "Anchored VWAP", "Half Trend", "Volume", "Andean Squeeze"]
+            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "EMA 50", "Half Trend"], label_visibility="collapsed")
         
         # Refresh the cache from the API when the existing on-disk bars are
         # stale relative to the user's chosen timeframe. The chart fragment
@@ -1304,6 +1305,7 @@ def render_candlesticks_frag():
                         "call_iv_25d": _analytics.get("call_iv_25d"),
                         "atm_iv": _analytics.get("atm_iv"),
                     })
+            s["iv_skew_history"] = _iv_skew_hist
             render_chart(
                 candles_payload,
                 indicators=selected_indicators,
