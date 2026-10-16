@@ -1245,7 +1245,7 @@ INDICATORS = {
     "EMA 200": {"period": 200, "color": "#2196f3", "lineWidth": 2},
     "Half Trend": {"alphaLength": 50},
     "Volume": {},
-  "Andean Osc": {"length": 50, "sigLength": 9},
+  "Andean Squeeze": {"length": 50, "sigLength": 9},
     "EMA 50": {"period": 50, "color": "#ab63fa", "lineWidth": 2},
     "Volume Profile": {},
     "Anchored VWAP": {"color": "#8b5cf6", "lineWidth": 2},
@@ -1383,49 +1383,52 @@ def _andean_oscillator(
     return bull, bear, osc, signal
 
 
-def _squeeze_detector(closes, highs, lows, bbLength=20, bbMult=2.0, kcLength=20, kcMult=1.5):
-    if len(closes) < bbLength:
+def _squeeze_detector(closes, highs, lows, sqzLength=20, highDev=2.0, midDev=1.5, lowDev=1.0):
+    if len(closes) < sqzLength:
         return [], [], []
-    bbMiddle = _sma(closes, bbLength)
-    kcMiddle = _sma(closes, kcLength)
+    bbMiddle = _sma(closes, sqzLength)
     bbUpper = []
-    bbLower = []
-    for i in range(bbLength - 1, len(closes)):
-        idx = i - bbLength + 1
-        slice_ = closes[i - bbLength + 1: i + 1]
+    for i in range(sqzLength - 1, len(closes)):
+        idx = i - sqzLength + 1
+        slice_ = closes[i - sqzLength + 1: i + 1]
         mean = sum(slice_) / len(slice_)
         std = (sum((x - mean) ** 2 for x in slice_) / len(slice_)) ** 0.5
-        bbUpper.append(bbMiddle[idx] + bbMult * std)
-        bbLower.append(bbMiddle[idx] - bbMult * std)
+        bbUpper.append(bbMiddle[idx] + highDev * std)
     tr = []
     for i in range(len(closes)):
         if i == 0:
             tr.append(highs[i] - lows[i])
         else:
             tr.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
-    kc_atr = _sma(tr, kcLength)
+    kc_atr = _sma(tr, sqzLength)
     kcUpper = []
+    kcMiddle = []
     kcLower = []
-    for i in range(kcLength - 1, len(closes)):
-        kcUpper.append(kcMiddle[i - kcLength + 1] + kcMult * kc_atr[i - kcLength + 1])
-        kcLower.append(kcMiddle[i - kcLength + 1] - kcMult * kc_atr[i - kcLength + 1])
+    for i in range(sqzLength - 1, len(closes)):
+        kcUpper.append(bbMiddle[i - sqzLength + 1] + highDev * kc_atr[i - sqzLength + 1])
+        kcMiddle.append(bbMiddle[i - sqzLength + 1] + midDev * kc_atr[i - sqzLength + 1])
+        kcLower.append(bbMiddle[i - sqzLength + 1] - lowDev * kc_atr[i - sqzLength + 1])
     sqzRed = [None] * len(closes)
     sqzBlack = [None] * len(closes)
     sqzOrange = [None] * len(closes)
-    for i in range(bbLength - 1, len(closes)):
-        idx = i - bbLength + 1
-        kc_idx = i - kcLength + 1
+    for i in range(sqzLength - 1, len(closes)):
+        idx = i - sqzLength + 1
+        kc_idx = i - sqzLength + 1
         bb_val_upper = bbUpper[idx]
-        bb_val_lower = bbLower[idx]
         kc_val_upper = kcUpper[kc_idx] if kc_idx < len(kcUpper) else float('inf')
-        kc_val_lower = kcLower[kc_idx] if kc_idx < len(kcLower) else float('-inf')
+        kc_val_lower = kcLower[kc_idx] if kc_idx < len(kcLower) else float('inf')
         kc_val_mid = kcMiddle[kc_idx] if kc_idx < len(kcMiddle) else 0.0
-        if bb_val_lower > kc_val_lower and bb_val_upper < kc_val_upper:
-            sqzRed[i] = {"state": "red"}
-        elif bb_val_upper < kc_val_lower or bb_val_lower > kc_val_upper:
+        # Classify by Upper BB position relative to Keltner Channel levels:
+        #   sqzRed    — KC_Low < BB_Upper < KC_Mid   (tight squeeze, lower half)
+        #   sqzBlack  — KC_Mid < BB_Upper < KC_High (upper half / expansion)
+        #   sqzOrange — BB_Upper <= KC_Low          (very tight squeeze)
+        if bb_val_upper <= kc_val_lower:
             sqzOrange[i] = {"state": "orange"}
-        else:
+        elif kc_val_lower < bb_val_upper < kc_val_mid:
+            sqzRed[i] = {"state": "red"}
+        elif kc_val_mid < bb_val_upper < kc_val_upper:
             sqzBlack[i] = {"state": "black"}
+
     return sqzRed, sqzBlack, sqzOrange
 
 

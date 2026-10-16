@@ -960,7 +960,7 @@ def build_init_data(
                     {"type": "Histogram", "key": "sell_vol", "data": sell_vol, "options": {"color": "#ef5350", "priceFormat": {"type": "volume"}, "priceScaleId": "volume", "lastValueVisible": False}},
                 ]
                 continue
-            if name == "Andean Osc":
+            if name == "Andean Squeeze":
                 bull, bear, osc, signal = _andean_oscillator(opens, closes, cfg["length"], cfg["sigLength"])
                 _oscd = []
                 for i in range(len(cd)):
@@ -976,9 +976,9 @@ def build_init_data(
                         clr = "#ffa726"
                     _oscd.append({"time": cd[i]["time"], "value": o, "color": clr})
                 sqzRed, sqzBlack, sqzOrange = _squeeze_detector(closes, highs, lows)
-                sqzRed_data = [{"time": cd[i]["time"], "value": 0.001, "color": "#ef5350"} for i in range(len(cd)) if sqzRed[i] and sqzRed[i].get("state") == "red"]
-                sqzBlack_data = [{"time": cd[i]["time"], "value": 0.001, "color": "#888888"} for i in range(len(cd)) if sqzBlack[i] and sqzBlack[i].get("state") == "black"]
-                sqzOrange_data = [{"time": cd[i]["time"], "value": 0.001, "color": "#ff9800"} for i in range(len(cd)) if sqzOrange[i] and sqzOrange[i].get("state") == "orange"]
+                sqzRed_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#ef5350"} for i in range(len(cd)) if sqzRed[i] and sqzRed[i].get("state") == "red"]
+                sqzBlack_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#000000"} for i in range(len(cd)) if sqzBlack[i] and sqzBlack[i].get("state") == "black"]
+                sqzOrange_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#ff9800"} for i in range(len(cd)) if sqzOrange[i] and sqzOrange[i].get("state") == "orange"]
                 andean_series = [
                     {"type": "Histogram", "key": "andean_osc", "data": _oscd, "options": {"priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
                     {"type": "Line", "key": "andean_signal", "data": [{"time": cd[i]["time"], "value": signal[i]} for i in range(len(cd))], "options": {"color": "#ffa15a", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
@@ -1139,7 +1139,7 @@ def _build_iv_skew_data(iv_skew_history: list, et_offset: int) -> dict | None:
 def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
-    osc_height = 100 if (indicators and "Andean Osc" in indicators) else 0
+    osc_height = 100 if (indicators and "Andean Squeeze" in indicators) else 0
     iv_skew_height = 100 if (indicators and "IV Skew (25Δ)" in indicators) and iv_skew_history and len(iv_skew_history) > 0 else 0
     iv_skew_hist_height = 50 if (indicators and "IV Skew (25Δ)" in indicators) and iv_skew_history and len(iv_skew_history) > 0 else 0
 
@@ -1160,12 +1160,12 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_c
         if iv_skew_result:
             init_data["iv_skew_series"] = iv_skew_result.get("series", [])
 
-    payload = {"init": init_data}
-    json_str = json.dumps(payload)
     root_id = f"lwc_candlestick_{symbol}"
     _bg, _tc, _gc = "#ffffff", "#1e293b", "#e9eef3"
 
     # Build the init JS and encode it (along with the vendored LWC lib) as base64
+    payload = {"init": init_data}
+    json_str = json.dumps(payload)
     init_js = _build_init_js(root_id, json_str, _bg, _tc, _gc,
                              main_height, vol_height, osc_height,
                              iv_skew_height, iv_skew_hist_height)
