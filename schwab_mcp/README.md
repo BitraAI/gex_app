@@ -80,6 +80,7 @@ with the code-gated confirm flow — a real user approval at every step.
 | "What are today's market movers in the $SPX" | `get_movers` | Normalized ≤10 rows (symbol, name, last, % change, volume share); aliases like `SPX` work; only populates during regular hours |
 | "Get my transactions from the last 30 days" | `get_transactions` | Sorted rows + net-cash-change summary; window capped at 60 days by the API |
 | "Buy 1 share XLE at $35" | `place_buy_order` | Code-gated: preview shows exact spec + notional + `confirmation_code`, agent asks the user, execute only with `confirm=true` + that code; returns order id + live status |
+| "Sell my 3 shares of AAPL at $50" | `place_sell_order` | Sells LONG shares only (short-selling rejected); same code-gated preview → user approval → confirm flow; MARKET or LIMIT |
 | "Replace my XLE order at $30 instead" | `replace_order` | Same code gate; changes only the passed params (new order id issued); rejects orders in terminal states and multi-leg orders |
 | "Cancel my XLE order" | `cancel_order` | Preview flags already-filled/canceled orders before `confirm=true` sends the cancel (no code gate — flattening is de-risking) |
 
@@ -183,7 +184,7 @@ inline; always take the semaphore per API call; catch everything and return
 }
 ```
 
-- **Python**: `/path/to/home/gex_venv/bin/python` (has `mcp`, `schwab-py`,
+- **Python**: `/path/to/venv/bin/python` (has `mcp`, `schwab-py`,
   pandas, numpy, pyarrow).
 - **Transport**: stdio.
 - **Auth/token**: `~/.local/share/gex_app/schwab_token.json` (same file the
