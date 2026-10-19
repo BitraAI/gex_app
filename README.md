@@ -86,12 +86,12 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 ### Installation
 
 ```bash
-$ python3 -m venv gex_venv
-$ source gex_venv/bin/activate
+$ git clone https://github.com/BitraAI/gex_app.git
+$ cd gex_app
+$ python3 -m venv .venv
+$ source .venv/bin/activate
 (gex_venv) $ python -m pip install -U pip
 (gex_venv) $ python -m pip install -U uv
-(gex_venv) $ git clone https://github.com/BitraAI/gex_app.git
-(gex_venv) $ cd gex_app
 (gex_venv) $ uv pip install -r requirements.txt
 ```
 
