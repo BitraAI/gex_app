@@ -2,7 +2,7 @@
 
 Read-only [Model Context Protocol](https://modelcontextprotocol.io) server that
 exposes the repo's market-data and Schwab-account capabilities as tools for AI
-agents (registered globally with OpenCode as **`gex-app`**).
+agents (registered globally with OpenCode as **`gex_app`**).
 
 All data comes directly from the **Schwab Trader API** via the official
 `schwab-py` SDK; all analytics are computed locally with the exact same
