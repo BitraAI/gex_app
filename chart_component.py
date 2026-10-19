@@ -239,6 +239,11 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
                 series.setData(s.data);
                 series.__cwN = s.data.length;
             }
+            if (series && s.markers && series.setMarkers) {
+                // Round dots / arrows attached to the series (e.g. squeeze
+                // dots on the Andean zero line).
+                try { series.setMarkers(s.markers); series.__cwM = s.markers.length; } catch (_) {}
+            }
             if (series && s.key) {
                 _allSeriesByKey[s.key] = series;
             }
@@ -880,7 +885,13 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             const s = list[i];
             if (s.type === 'Candlestick') continue;
             const series = byKey[s.key];
-            if (series) __applyRows(series, s.data);
+            if (!series) continue;
+            __applyRows(series, s.data);
+            if (s.markers && series.setMarkers && series.__cwM !== s.markers.length) {
+                // New bars appended → re-apply the (growing) marker list.
+                try { series.setMarkers(s.markers); } catch (_) {}
+                series.__cwM = s.markers.length;
+            }
         }
     }
 
@@ -968,7 +979,7 @@ def build_init_data(
     put_wall: float | None = None,
     last_close: float | None = None,
 ) -> dict:
-    from charts import _get_est_offset, _sma, _ema, _trend, _andean_oscillator, _anchored_vwap, _squeeze_detector, INDICATORS
+    from charts import _get_est_offset, _sma, _ema, _half_trend, _andean_oscillator, _anchored_vwap, _squeeze_detector, INDICATORS
 
     try:
         et_offset = _get_est_offset()
@@ -1096,16 +1107,34 @@ def build_init_data(
                 # bars exist; indexing them for a short history raised IndexError
                 # and broke the whole chart on the first ticks of a stream.
                 _nSqz = min(len(cd), len(sqzRed), len(sqzBlack), len(sqzOrange))
-                sqzRed_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#ef5350"} for i in range(_nSqz) if sqzRed[i] and sqzRed[i].get("state") == "red"]
-                sqzBlack_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#000000"} for i in range(_nSqz) if sqzBlack[i] and sqzBlack[i].get("state") == "black"]
-                sqzOrange_data = [{"time": cd[i]["time"], "value": 0.1, "color": "#ff9800"} for i in range(_nSqz) if sqzOrange[i] and sqzOrange[i].get("state") == "orange"]
+                # Squeeze states are rendered as round dots sitting on the
+                # Andean zero line (markers on the andean_zero series) instead
+                # of square histogram stubs. The three states are mutually
+                # exclusive per bar, so one dot per bar at most.
+                _sqzStateColor = {"red": "#ef5350", "black": "#000000", "orange": "#ff9800"}
+                sqz_markers = []
+                for i in range(_nSqz):
+                    for _sq in (sqzRed, sqzBlack, sqzOrange):
+                        _st = (_sq[i] or {}).get("state") if _sq[i] else None
+                        if _st:
+                            sqz_markers.append({
+                                "time": cd[i]["time"],
+                                "position": "inBar",
+                                "shape": "circle",
+                                "color": _sqzStateColor.get(_st, "#ff9800"),
+                                "size": 0.05,
+                            })
+                            break
                 andean_series = [
                     {"type": "Histogram", "key": "andean_osc", "data": _oscd, "options": {"priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
                     {"type": "Line", "key": "andean_signal", "data": [{"time": cd[i]["time"], "value": signal[i]} for i in range(len(cd))], "options": {"color": "#ffa15a", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
-                    {"type": "Line", "key": "andean_zero", "data": [{"time": cd[i]["time"], "value": 0} for i in range(len(cd))], "options": {"color": "#808080", "lineWidth": 1, "lineStyle": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False, "crosshairMarkerVisible": False}},
-                    {"type": "Histogram", "key": "sqz_red", "data": sqzRed_data, "options": {"priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False, "base": 0}},
-                    {"type": "Histogram", "key": "sqz_black", "data": sqzBlack_data, "options": {"priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False, "base": 0}},
-                    {"type": "Histogram", "key": "sqz_orange", "data": sqzOrange_data, "options": {"priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False, "base": 0}},
+                    {
+                        "type": "Line", "key": "andean_zero",
+                        "data": [{"time": cd[i]["time"], "value": 0} for i in range(len(cd))],
+                        "options": {"color": "#808080", "lineWidth": 1, "lineStyle": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False, "crosshairMarkerVisible": False},
+                        # Round squeeze dots on the zero line (circle markers).
+                        "markers": sqz_markers,
+                    },
                 ]
                 continue
             if name == "EMA 50":
@@ -1180,11 +1209,22 @@ def build_init_data(
                     })
                 continue
             if name == "Half Trend":
-                mv = _trend(opens, closes, cfg["alphaLength"])
+                # Half Trend (thinkscript logic): up segments green, down red.
+                mv, dirs = _half_trend(highs, lows, closes, cfg.get("amplitude", 2))
+                ht_data = [
+                    {
+                        "time": cd[i]["time"],
+                        "value": mv[i],
+                        "color": "#26a69a" if dirs[i] == 0 else "#ef5350",
+                    }
+                    for i in range(len(cd))
+                ]
                 series_list.append({
                     "type": "Line", "key": "trend",
-                    "data": [{"time": cd[i]["time"], "value": mv[i]} for i in range(len(cd))],
-                    "options": {"color": cfg.get("color", "#ffa15a"), "lineWidth": cfg.get("lineWidth", 2), "priceLineVisible": False, "lastValueVisible": False},
+                    "data": ht_data,
+                    # Per-point colors are used by LWC >= 4.1; the default
+                    # here only covers data points without one.
+                    "options": {"color": "#26a69a", "lineWidth": cfg.get("lineWidth", 2), "priceLineVisible": False, "lastValueVisible": False, "crosshairMarkerVisible": False},
                 })
                 continue
             period = cfg.get("period")

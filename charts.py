@@ -1239,16 +1239,16 @@ def _get_est_offset() -> int:
 
 
 INDICATORS = {
-    "SMA 20": {"period": 20, "color": "#ffa15a", "lineWidth": 2},
-    "SMA 50": {"period": 50, "color": "#ab63fa", "lineWidth": 2},
-    "EMA 20": {"period": 20, "color": "#ef553b", "lineWidth": 2},
-    "EMA 200": {"period": 200, "color": "#2196f3", "lineWidth": 2},
-    "Half Trend": {"alphaLength": 50},
+    "SMA 20": {"period": 20, "color": "#B388FF", "lineWidth": 2},
+    "SMA 50": {"period": 50, "color": "#FF8C42", "lineWidth": 2},
+    "EMA 20": {"period": 20, "color": "#00D5FF", "lineWidth": 2},
+    "EMA 200": {"period": 200, "color": "#FF4D6D", "lineWidth": 2},
+    "Half Trend": {"amplitude": 2},
     "Volume": {},
   "Andean Squeeze": {"length": 50, "sigLength": 9},
-    "EMA 50": {"period": 50, "color": "#ab63fa", "lineWidth": 2},
+    "EMA 50": {"period": 50, "color": "#FFD700", "lineWidth": 2},
     "Volume Profile": {},
-    "Anchored VWAP": {"color": "#8b5cf6", "lineWidth": 2},
+    "Anchored VWAP": {"color": "#9400D3", "lineWidth": 2},
 }
 
 
@@ -1264,16 +1264,119 @@ def _ema(values: list[float], period: int) -> list[float]:
     return ema
 
 
-def _trend(opens: list[float], closes: list[float], alpha_length: int) -> list[float]:
-    alpha = 2.0 / (alpha_length + 1)
-    up = [max(opens[0], closes[0])]
-    dn = [min(opens[0], closes[0])]
-    for i in range(1, len(closes)):
-        u = max(max(closes[i], opens[i]), up[-1] - alpha * (up[-1] - closes[i]))
-        d = min(min(closes[i], opens[i]), dn[-1] + alpha * (closes[i] - dn[-1]))
-        up.append(u)
-        dn.append(d)
-    return [(up[i] + dn[i]) / 2 for i in range(len(up))]
+def _half_trend(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    amplitude: int = 2,
+) -> tuple[list[float], list[int]]:
+    """Half Trend indicator — direct translation of the user's thinkscript
+    logic.
+
+    Per bar (Amplitude-period windows, expanding during warm-up so the line
+    is defined from the first bar):
+
+        lowpricei  = Lowest(low, Amplitude)
+        highpricei = Highest(high, Amplitude)
+        lowma      = average(low, Amplitude)
+        highma     = average(high, Amplitude)
+
+        nexttrend == 1: maxlowprice = Max(lowpricei, maxlowprice[1]);
+            flip to a downtrend (trend = 1, nexttrend = 0,
+            minhighprice = highpricei) when highma < maxlowprice[1]
+            and close < low[1]
+        nexttrend == 0: minhighprice = Min(highpricei, minhighprice[1]);
+            flip to an uptrend (trend = 0, nexttrend = 1,
+            maxlowprice = lowpricei) when lowma > minhighprice[1]
+            and close > high[1]
+
+        trend == 0: up = (flip from a downtrend) ? dn[1] : Max(maxlowprice[1], up[1]); dn = 0
+        trend == 1: dn = (flip from an uptrend) ? up[1] : Min(minhighprice, dn[1]); up = 0
+        halftrend = up > 0 ? up : dn
+
+    Conditions read [1] (previous-bar) state, so each branch snapshots its
+    previous values before updating. The thinkscript's platform zero
+    defaults would trap Max/Min at 0 for positive prices, so the recursion
+    is seeded from the first bar (as the original Pine source does via
+    `nz(low[1])` / `nz(high[1])` anchors), and `low[1]` / `high[1]` reads
+    before the first bar are treated as absent.
+
+    Returns (halftrend values, trend per bar) — trend is 0 for the up (green)
+    side and 1 for the down (red) side; both lists align with the inputs.
+    """
+    amplitude = max(1, int(amplitude))
+    n = len(closes)
+    if n == 0:
+        return [], []
+
+    low_i: list[float] = []    # lowpricei
+    high_i: list[float] = []   # highpricei
+    low_ma: list[float] = []   # lowma
+    high_ma: list[float] = []  # highma
+    for i in range(n):
+        a = max(0, i - amplitude + 1)
+        lo_w = lows[a:i + 1]
+        hi_w = highs[a:i + 1]
+        low_i.append(min(lo_w))
+        high_i.append(max(hi_w))
+        low_ma.append(sum(lo_w) / len(lo_w))
+        high_ma.append(sum(hi_w) / len(hi_w))
+
+    # Recursive state, seeded from the first bar.
+    next_trend = 0
+    trend = 0
+    max_low_price = lows[0]
+    min_high_price = highs[0]
+    up = 0.0
+    dn = 0.0
+
+    vals: list[float] = [0.0] * n
+    dirs: list[int] = [0] * n
+
+    for i in range(n):
+        prev_trend = trend
+        prev_next_trend = next_trend
+        prev_max_low = max_low_price
+        prev_min_high = min_high_price
+        prev_up = up
+        prev_dn = dn
+
+        # --- nexttrend / maxlowprice / minhighprice state machine ---
+        if i >= amplitude and prev_next_trend == 1:
+            max_low_price = max(low_i[i], max_low_price)
+            if high_ma[i] < prev_max_low and closes[i] < lows[i - 1]:
+                trend = 1
+                next_trend = 0
+                min_high_price = high_i[i]
+        elif prev_next_trend == 0:
+            min_high_price = min(high_i[i], min_high_price)
+            if (
+                low_ma[i] > prev_min_high
+                and i > 0
+                and closes[i] > highs[i - 1]
+            ):
+                trend = 0
+                next_trend = 1
+                max_low_price = low_i[i]
+
+        # --- up / dn line state machine ---
+        if trend == 0:
+            if prev_trend != 0:
+                up = prev_dn
+            else:
+                up = max(prev_max_low, prev_up)
+            dn = 0.0
+        elif prev_trend != 1:
+            dn = prev_up
+            up = 0.0
+        elif trend == 1:
+            dn = min(min_high_price, prev_dn)
+            up = prev_up
+
+        vals[i] = up if up > 0 else dn
+        dirs[i] = trend
+
+    return vals, dirs
 
 
 # RTH session open in seconds-of-day (ET wall-clock), 9:30 ET = 34200s.
