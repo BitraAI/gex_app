@@ -125,6 +125,49 @@ if not st.session_state.ticker_history:
 
 st.markdown(_get_css(), unsafe_allow_html=True)
 
+# Sidebar (left panel): pull the whole stack up so all items fit in view.
+# stSidebarHeader is a fixed 3.75rem row (+1rem margin) that reserves space
+# for the app logo even when none is set (2rem stLogoSpacer), so collapse it;
+# stSidebarUserContent adds 6rem of bottom scroll padding; widget stacks use
+# ~1rem flex gaps — all tightened here.
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"] [data-testid="stSidebarHeader"],
+    [data-testid="stSidebarHeader"] {
+        height: auto !important;
+        min-height: 0 !important;
+        margin-bottom: 0.25rem !important;
+    }
+    [data-testid="stLogoSpacer"] {
+        height: 0.25rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+        padding-top: 0 !important;
+        padding-bottom: 1rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"],
+    [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+        gap: 0.25rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h4 {
+        margin: 0.15rem 0 0.35rem 0 !important;
+        padding-top: 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+        margin: 0 0 0.2rem 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stHorizontalRule"],
+    [data-testid="stSidebar"] hr {
+        margin: 0.25rem 0 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ---------------------------------------------------------------------------
 # Landing / auth gate
 #
