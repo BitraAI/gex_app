@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS users (
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     last_login    TEXT
 );
+CREATE TABLE IF NOT EXISTS password_resets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    email      TEXT    NOT NULL COLLATE NOCASE,
+    token_hash TEXT    NOT NULL UNIQUE,
+    expires_at TEXT    NOT NULL,
+    used_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_resets_email ON password_resets(email);
 """
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -53,7 +61,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the table if missing; migrate the old username+email schema."""
+    """Create the tables if missing; migrate the old username+email schema."""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
     if not cols:
         conn.executescript(_SCHEMA)
@@ -76,6 +84,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         conn.execute("DROP TABLE users_legacy")
         conn.commit()
+    else:
+        # Users table exists; make sure the resets table does too.
+        conn.executescript(_SCHEMA)
 
 
 # ---------------- password hashing ----------------
@@ -173,3 +184,79 @@ def user_count() -> int:
     with closing(_connect()) as conn:
         _ensure_schema(conn)
         return int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+
+# ---------------- password reset tokens ----------------
+
+_RESET_TTL_MINUTES = 30
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_reset_token(email: str) -> str | None:
+    """Create a single-use password-reset token; ``None`` for unknown emails.
+
+    Only the SHA-256 hash of the token is stored, so the plaintext token can
+    only travel in the emailed link. Unused tokens for the address are
+    invalidated when a new one is requested.
+    """
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        return None
+    with closing(_connect()) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT id FROM users WHERE email = ?", (email,)
+        ).fetchone()
+        if row is None:
+            return None
+        # A fresh request supersedes any pending link for this address.
+        conn.execute("DELETE FROM password_resets WHERE email = ? AND used_at IS NULL", (email,))
+        token = secrets.token_urlsafe(32)
+        conn.execute(
+            "INSERT INTO password_resets (email, token_hash, expires_at) VALUES (?, ?, datetime('now', ?))",
+            (email, _token_hash(token), f"+{_RESET_TTL_MINUTES} minutes"),
+        )
+        conn.commit()
+        return token
+
+
+def validate_reset_token(token: str) -> str | None:
+    """Return the account email if the token is unused and unexpired."""
+    if not token:
+        return None
+    with closing(_connect()) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT email FROM password_resets WHERE token_hash = ? AND used_at IS NULL "
+            "AND expires_at > datetime('now')",
+            (_token_hash(token),),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def reset_password(token: str, new_password: str) -> str:
+    """Consume a valid reset token and set the new password; return the email."""
+    if not (_MIN_PASSWORD <= len(new_password or "") <= _MAX_PASSWORD):
+        raise AuthError(f"Password must be {_MIN_PASSWORD}-{_MAX_PASSWORD} characters")
+    with closing(_connect()) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT email FROM password_resets WHERE token_hash = ? AND used_at IS NULL "
+            "AND expires_at > datetime('now')",
+            (_token_hash(token or ""),),
+        ).fetchone()
+        if row is None:
+            raise AuthError("This reset link is invalid or has expired. Request a new one.")
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE email = ?",
+            (hash_password(new_password), row[0]),
+        )
+        conn.execute(
+            "UPDATE password_resets SET used_at = datetime('now') WHERE token_hash = ?",
+            (_token_hash(token),),
+        )
+        conn.commit()
+        return row[0]

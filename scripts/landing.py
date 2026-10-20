@@ -9,12 +9,15 @@ Brand tokens lifted from robinhood.com's stylesheet: primary green
 ``--rh__primary-base`` = #00c805, ink #040d14, neutral greys #f4f4f5/#e6e6e6,
 pill CTAs, and huge tight serif-free headlines.
 """
+import logging
 import os
 import shutil
 
 import streamlit as st
 
-from scripts import auth_db
+from scripts import auth_db, mailer
+
+log = logging.getLogger("gex.landing")
 
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _STATIC_DIR = os.path.join(_BASE, "static")
@@ -351,9 +354,50 @@ header[data-testid="stHeader"] { background: transparent; }
 """
 
 
+def _set_mode(mode: str):
+    """on_click callback factory: switch the auth card's segmented control."""
+    def _cb():
+        st.session_state["gh_auth_mode"] = mode
+    return _cb
+
+
 def _auth_card() -> None:
+    # First-class reset-completion notice (survives the query-param rerun).
+    if st.session_state.pop("gh_reset_done", False):
+        st.success("Password updated. Log in with your new password.")
+
+    # `?reset=<token>` from the emailed link takes over the card entirely.
+    reset_token = st.query_params.get("reset")
+    if reset_token:
+        email = auth_db.validate_reset_token(reset_token)
+        if email:
+            with st.form("gh_reset_form"):
+                st.markdown(f"**Reset the password for {email}**")
+                p1 = st.text_input("New password", type="password", key="gh_rs_pass")
+                p2 = st.text_input("Confirm new password", type="password", key="gh_rs_conf")
+                if st.form_submit_button("Reset password", width="stretch"):
+                    if p1 != p2:
+                        st.error("Passwords don't match")
+                    else:
+                        try:
+                            auth_db.reset_password(reset_token, p1)
+                            st.session_state["gh_reset_done"] = True
+                            st.session_state["gh_auth_mode"] = "Log in"
+                            try:
+                                del st.query_params["reset"]
+                            except Exception:
+                                pass
+                            st.rerun()
+                        except auth_db.AuthError as exc:
+                            st.error(str(exc))
+        else:
+            st.error("This reset link is invalid or has expired. Request a new one below.")
+        st.button("Back to log in", key="gh_reset_back",
+                  on_click=_set_mode("Log in"), width="stretch")
+        return
+
     mode = st.segmented_control(
-        "Log in or sign up", ["Log in", "Sign up"],
+        "Log in or sign up", ["Log in", "Sign up", "Forgot password"],
         key="gh_auth_mode", label_visibility="collapsed",
     ) or "Log in"
     if mode == "Log in":
@@ -368,6 +412,36 @@ def _auth_card() -> None:
                     st.rerun()
                 except auth_db.AuthError as exc:
                     st.error(str(exc))
+        st.button("Forgot password?", key="gh_forgot_btn",
+                  on_click=_set_mode("Forgot password"), width="stretch")
+    elif mode == "Forgot password":
+        with st.form("gh_forgot_form", clear_on_submit=True):
+            email = st.text_input("Account email", key="gh_fp_email")
+            if st.form_submit_button("Send reset link", width="stretch"):
+                token = auth_db.create_reset_token(email)
+                if token is not None:
+                    link = mailer.reset_link(token)
+                    try:
+                        mailer.send_reset_email(email, link)
+                        st.success(f"Reset link sent to {email}. It is valid for 30 minutes.")
+                    except mailer.MailError as exc:
+                        # No SMTP / send failure: write the link to the app log
+                        # so the operator can still finish the reset by hand.
+                        log.error("Password-reset link for %s: %s", email, link)
+                        st.error(str(exc))
+                        if not mailer.smtp_configured():
+                            st.caption(
+                                "Email delivery isn't configured. Add `smtp_host`, "
+                                "`smtp_port`, `smtp_user`, `smtp_password` under "
+                                "`[email]` in config.toml to send these links; the "
+                                "link was captured in the app log meanwhile."
+                            )
+                else:
+                    # Same wording as the success path to avoid revealing
+                    # whether the address is registered.
+                    st.success(f"If {email} has an account, a reset link is on its way.")
+        st.button("Back to log in", key="gh_forgot_back",
+                  on_click=_set_mode("Log in"), width="stretch")
     else:
         with st.form("gh_signup_form", clear_on_submit=True):
             email = st.text_input("Email", key="gh_su_email")

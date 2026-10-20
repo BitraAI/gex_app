@@ -311,6 +311,7 @@ The app opens on a Robinhood-style landing page (promo bar, sticky nav, hero wit
 
 - **Accounts live in SQLite** at `~/.local/share/gex_app/app.db` (WAL mode; override the path with the `GEX_APP_DB` env var). One `users` table keyed by **email only**: unique case-insensitive address + salted **scrypt** password hash (stdlib `hashlib`), `created_at` / `last_login` stamps. Ledger databases created with the earlier username+email schema are migrated automatically on first use.
 - **The signed-in user** is kept in `st.session_state["gex_user"]`; **Log out** (top of the sidebar) clears it and returns to the landing page.
+- **Forgot password**: the auth card offers a "Forgot password?" view that emails a single-use reset link (30-minute expiry) after asking for the account email. SMTP settings live under `[email]` in `config.toml` (`smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `from_addr`, `use_ssl`, `link_base`); without `smtp_host` the link is written to the app log instead. Tokens are stored only as SHA-256 hashes in a `password_resets` table; a new request invalidates any pending link, and the emailed `…/?reset=<token>` URL opens the app in reset mode.
 - The landing screenshots are copied at render time from `assets/` into `static/landing/` (git-ignored) and served by Streamlit's static handler.
 
 ### Calculation Details
