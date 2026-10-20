@@ -11,7 +11,7 @@ async def get_candles(symbol: str = "SPY", timeframe: str = "1m", bars: int = 30
     bars: most recent N bars to return.
     """
     try:
-        from client import fetch_candles_smart
+        from scripts.client import fetch_candles_smart
         allowed = {"1m", "2m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "233t"}
         if timeframe not in allowed:
             return _err(f"timeframe must be one of {sorted(allowed)}")

@@ -1,9 +1,8 @@
-from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from analytics import _filter_strikes_near_atm
-from calculations import aggregate_by_expiration
+from scripts.analytics import _filter_strikes_near_atm
+from scripts.calculations import aggregate_by_expiration
+from scripts._utils import secs_since_market_open
 
 
 def assess_market_bias(
@@ -646,10 +645,7 @@ def _tte_from_dtes(dtes: list[int]) -> float | None:
     valid = [d for d in dtes if d > 0]
     if not valid:
         return None
-    now = datetime.now(ZoneInfo("America/New_York"))
-    secs_since_930 = now.hour * 3600 + now.minute * 60 + now.second - 34200
-    secs_since_930 = max(0, min(secs_since_930, 23400))
-    secs_left = 23400 - secs_since_930
+    secs_left = 23400 - secs_since_market_open()
     return (min(valid) + secs_left / 23400) / 365.0
 
 

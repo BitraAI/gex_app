@@ -59,7 +59,7 @@ async def _get_client() -> Any:
     if _client is None:
         async with _client_lock:
             if _client is None:
-                from client import create_client
+                from scripts.client import create_client
                 _client = create_client()
     return _client
 
@@ -102,7 +102,7 @@ def _err(msg: str) -> str:
 
 async def _r_and_q(symbol: str) -> tuple[float, float]:
     """Risk-free rate proxy + dividend yield, same sources as app.py."""
-    from client import get_interest_rate, get_yield
+    from scripts.client import get_interest_rate, get_yield
     try:
         r = float(await get_interest_rate(await _get_client())) / 100.0
     except Exception:

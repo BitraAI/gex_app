@@ -6,9 +6,9 @@ import time as _time_mod
 from collections import deque
 from datetime import datetime
 import pandas as pd
-from _constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS, INDEX_QUOTE_MAP
-from _utils import load_json, save_json
-from calculations import calculate_atm_strike, get_strike_spacing
+from scripts._constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS, INDEX_QUOTE_MAP
+from scripts._utils import load_json, save_json
+from scripts.calculations import calculate_atm_strike, get_strike_spacing
 
 logger = logging.getLogger(__name__)
 
@@ -290,18 +290,12 @@ class AtmOptionVolumeService:
             if not self._bars and self._current_bar is None:
                 return pd.DataFrame()
 
-            out = pd.DataFrame(self._bars, columns=columns)
+            rows = self._bars
+            cur = self._current_bar
+            if cur is not None:
+                rows = [*rows, cur]
+            out = pd.DataFrame(rows, columns=columns)
             out.index.name = "datetime"
-            if self._current_bar is not None:
-                row = pd.DataFrame([{
-                    "call_buy_vol": self._current_bar["call_buy_vol"],
-                    "call_sell_vol": self._current_bar["call_sell_vol"],
-                    "put_buy_vol": self._current_bar["put_buy_vol"],
-                    "put_sell_vol": self._current_bar["put_sell_vol"],
-                    "total_buy_vol": self._current_bar["total_buy_vol"],
-                    "total_sell_vol": self._current_bar["total_sell_vol"],
-                }])
-                out = pd.concat([out, row], ignore_index=True)
             return out
 
     def register(self, stream_client, symbol: str, expiration: str):

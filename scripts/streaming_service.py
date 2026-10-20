@@ -4,7 +4,7 @@ import math
 import threading
 import time as _time_mod
 
-from _constants import STREAM_RECONNECT_DELAY, STREAM_RETRY_DELAY, STREAM_RETRY_BACKOFF
+from scripts._constants import STREAM_RECONNECT_DELAY, STREAM_RETRY_DELAY, STREAM_RETRY_BACKOFF
 
 logger = logging.getLogger(__name__)
 
@@ -12,8 +12,8 @@ import pandas as pd
 from schwab.streaming import StreamClient
 from websockets.exceptions import ConnectionClosed
 
-from _constants import MAX_BAR_ROWS
-from option_streaming_service import _get_stream_symbol
+from scripts._constants import MAX_BAR_ROWS
+from scripts.option_streaming_service import _get_stream_symbol
 
 
 def _exp_neg(x: float) -> float:
@@ -106,7 +106,7 @@ class StreamingService:
     @property
     def has_data(self) -> bool:
         with self._lock:
-            return self._current_bar is not None or not self._df.empty
+            return self._current_bar is not None or not self._bars
 
     @property
     def last_error(self) -> str | None:
@@ -120,19 +120,12 @@ class StreamingService:
                 return pd.DataFrame()
 
             columns = ["open", "high", "low", "close", "volume", "buy_vol", "sell_vol"]
-            out = pd.DataFrame(self._bars, columns=columns)
+            rows = self._bars
+            cur = self._current_bar
+            if cur is not None:
+                rows = [*rows, cur]
+            out = pd.DataFrame(rows, columns=columns)
             out.index.name = "datetime"
-            if self._current_bar is not None:
-                row = pd.DataFrame([{
-                    "open": self._current_bar["open"],
-                    "high": self._current_bar["high"],
-                    "low": self._current_bar["low"],
-                    "close": self._current_bar["close"],
-                    "volume": self._current_bar["volume"],
-                    "buy_vol": self._current_bar["buy_vol"],
-                    "sell_vol": self._current_bar["sell_vol"],
-                }])
-                out = pd.concat([out, row], ignore_index=True)
             return out
 
     def start(self, symbol: str):

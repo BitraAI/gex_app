@@ -27,8 +27,8 @@ Two-stage calibration following the README:
 Public API:
 
 * ``calibrate(data, spot)`` — returns a dict ``{"surface": SSVISurface,
-  "skew": float|None, "atm_iv": float|None}`` suitable for storing in
-  ``analytics["ssvi_surface"]`` / ``analytics["ssvi_skew"]``.
+  "atm_iv": float|None}`` suitable for storing in
+  ``analytics["ssvi_surface"]``.
 * ``SSVISurface.iv(strike, tte)`` —IMPLIED VOL (decimal) at any
   (strike, time-to-expiry-in-years).
 """
@@ -40,11 +40,12 @@ import math
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
-from datetime import datetime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 import numpy as np
+
+from scripts._utils import secs_since_market_open
+
 from scipy.optimize import least_squares
 
 
@@ -268,11 +269,7 @@ def _group_otm_quotes(
     feed the fit (the standard "use liquid OTM wings" choice).
     """
     grouped: dict[str, dict[str, Any]] = {}
-    _ny = ZoneInfo("America/New_York")
-    _ny_now = datetime.now(_ny)
-    _secs_since_930 = _ny_now.hour * 3600 + _ny_now.minute * 60 + _ny_now.second - 34200
-    _secs_since_930 = max(0, min(_secs_since_930, 23400))
-    _secs_left = 23400 - _secs_since_930
+    _secs_left = 23400 - secs_since_market_open()
     for e in data:
         try:
             iv_raw = float(e.get("iv", 0.0) or 0.0)
@@ -397,7 +394,7 @@ def _fit_ssvi_surface(
     )
 
 
-def _bscall_delta(s: float, k: float, tte: float, sigma: float, r: float = 0.0) -> float:
+def _bscall_delta(s: float, k: float, tte: float, sigma: float) -> float:
     """Black-Scholes call delta (r=0 assumed). Used for skew root-finding."""
     if sigma <= 0.0 or tte <= 0.0:
         return 0.5
@@ -410,7 +407,7 @@ def _implied_vol_for_delta(
 ) -> Optional[float]:
     """Find the strike whose BS delta == ``target_delta`` under SSVI IV.
 
-    Used to compute the 25Δ put IV for ``ssvi_skew``. Bisect over strikes
+    Used to compute the 25Δ skew in ``skew_for_tte``. Bisect over strikes
     because IV is a known closed-form function of strike via the surface.
     """
     s = float(ref_spot) if ref_spot is not None and ref_spot > 0 else surface.spot
@@ -462,18 +459,17 @@ def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float 
         q: dividend yield (decimal, default 0.0).
 
     Returns:
-        ``{"surface": SSVISurface|None, "skew": float|None,
-           "atm_iv": float|None}``.
+        ``{"surface": SSVISurface|None, "atm_iv": float|None}``.
     """
     spot_f = float(spot)
     if not data or spot_f <= 0.0:
         logger.warning("SSVI: no data or spot=%s", spot_f)
-        return {"surface": None, "skew": None, "atm_iv": None}
+        return {"surface": None, "atm_iv": None}
 
     grouped = _group_otm_quotes(data, spot_f, r=r, q=q)
     if not grouped:
         logger.warning("SSVI: _group_otm_quotes returned empty (no OTM options with OI>0)")
-        return {"surface": None, "skew": None, "atm_iv": None}
+        return {"surface": None, "atm_iv": None}
 
     per_tenor: list[RawSVIFit] = []
     for exp, vals in grouped.items():
@@ -483,12 +479,12 @@ def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float 
 
     if not per_tenor:
         logger.warning("SSVI: no valid per-tenor fits (%d groups)", len(grouped))
-        return {"surface": None, "skew": None, "atm_iv": None}
+        return {"surface": None, "atm_iv": None}
 
     surface = _fit_ssvi_surface(per_tenor, spot_f, r=r, q=q)
     if surface is None:
         logger.warning("SSVI: _fit_ssvi_surface returned None (%d tenors)", len(per_tenor))
-        return {"surface": None, "skew": None, "atm_iv": None}
+        return {"surface": None, "atm_iv": None}
 
     # ATM IV = sqrt(theta_front / tte_front) for the front-month tenor.
     front = min(per_tenor, key=lambda f: f.tte)
@@ -496,16 +492,5 @@ def calibrate(data: list[dict[str, Any]], spot: float, r: float = 0.0, q: float 
     if atm_iv is not None:
         atm_iv = float(min(max(atm_iv, 1e-4), 5.0))
 
-    # 25Δ skew (SSVI-smoothed) = put25 IV - call25 IV at the front TTE.
-    try:
-        put25_iv = _implied_vol_for_delta(surface, -0.25, front.tte)
-        call25_iv = _implied_vol_for_delta(surface, 0.25, front.tte)
-        skew: Optional[float] = None
-        if put25_iv is not None and call25_iv is not None:
-            skew = round(put25_iv - call25_iv, 4)
-    except Exception:
-        logger.debug("SSVI surface calibration failed", exc_info=True)
-        skew = None
-
-    return {"surface": surface, "skew": skew, "atm_iv": atm_iv}
+    return {"surface": surface, "atm_iv": atm_iv}
 

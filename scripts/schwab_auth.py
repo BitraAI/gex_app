@@ -5,8 +5,14 @@ from datetime import datetime, timezone
 
 from schwab import auth
 
-from config import CALLBACK_URL, CLIENT_ID, CLIENT_SECRET, MAX_TOKEN_AGE, TOKEN_PATH
-from _utils import load_json, ensure_dir
+# Allow running this file directly (python3 scripts/schwab_auth.py): put the
+# repo root on sys.path so the scripts.* package imports resolve.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from scripts.config import CALLBACK_URL, CLIENT_ID, CLIENT_SECRET, MAX_TOKEN_AGE, TOKEN_PATH
+from scripts._utils import load_json, ensure_dir
 
 
 def _verify_token(path: str) -> bool:

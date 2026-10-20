@@ -5,14 +5,14 @@ from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
-import client as client_mod
-from _constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
-from _utils import compute_strike_increment, floor_dataframe_timestamps, compute_current_bucket, format_expiration
-from client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
-from streaming_service import StreamingService
-from option_streaming_service import (AtmOptionVolumeService, _load_ticker_history, _save_ticker_history, _normalize_display_symbol, _get_stream_symbol)
-from chart_component import render_chart, render_chart_host
-from flow import (
+from scripts import client as client_mod
+from scripts._constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
+from scripts._utils import compute_strike_increment, floor_dataframe_timestamps, compute_current_bucket, format_expiration, flow_metrics, is_otm_or_atm, is_itm_or_atm
+from scripts.client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
+from scripts.streaming_service import StreamingService
+from scripts.option_streaming_service import (AtmOptionVolumeService, _load_ticker_history, _save_ticker_history, _normalize_display_symbol, _get_stream_symbol)
+from scripts.chart_component import render_chart, render_chart_host
+from scripts.flow import (
     _ensure_async_loop,
     _ticker_analytics_cache,
     _wall_buffer,
@@ -22,19 +22,19 @@ from flow import (
     render_flow_frag,
     run_async,
 )
-from news_service import NewsService
-from index_spot_poller import IndexSpotPoller
-from calculations import (
+from scripts.news_service import NewsService
+from scripts.index_spot_poller import IndexSpotPoller
+from scripts.calculations import (
     aggregate_by_strike,
     aggregate_by_expiration,
     parse_option_chain,
     build_greeks_lookup,
 )
-from analytics import _filter_strikes_near_atm, compute_analytics
-from signals import generate_recommendations, assess_market_bias, _tte_from_dtes
-from telegram_notifier import notify_alerts, diff_alerts
-from charts import _get_style, _get_css
-from config import validate_config
+from scripts.analytics import _filter_strikes_near_atm, compute_analytics
+from scripts.signals import generate_recommendations, assess_market_bias, _tte_from_dtes
+from scripts.telegram_notifier import notify_alerts, diff_alerts
+from scripts.charts import _get_style, _get_css
+from scripts.config import validate_config
 
 
 # Fail fast with a clear, actionable message if config.toml / env vars are
@@ -372,7 +372,6 @@ def fetch_data(symbol: str) -> bool:
                 st.session_state.analytics[key] = etf_analytics[key]
     if etf_analytics and st.session_state.analytics.get("ssvi_surface") is None:
         st.session_state.analytics["ssvi_surface"] = etf_analytics.get("ssvi_surface")
-        st.session_state.analytics["ssvi_skew"] = etf_analytics.get("ssvi_skew")
     if etf_analytics and st.session_state.analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
         st.session_state.analytics["atm_iv"] = etf_analytics["atm_iv"]
     st.session_state.iv_rank = compute_iv_rank(symbol)
@@ -398,17 +397,9 @@ def apply_filters():
     if cfg.get("min_vol", 0) > 0:
         filtered = [e for e in filtered if e["volume"] >= cfg["min_vol"]]
     if not cfg.get("show_itm", True):
-        filtered = [
-            e for e in filtered
-            if (e["type"] == "CALL" and e["strike"] >= spot)
-            or (e["type"] == "PUT" and e["strike"] <= spot)
-        ]
+        filtered = [e for e in filtered if is_otm_or_atm(e, spot)]
     if not cfg.get("show_otm", True):
-        filtered = [
-            e for e in filtered
-            if (e["type"] == "CALL" and e["strike"] <= spot)
-            or (e["type"] == "PUT" and e["strike"] >= spot)
-        ]
+        filtered = [e for e in filtered if is_itm_or_atm(e, spot)]
 
     active = sorted(set(
         e["expiration"] for e in filtered
@@ -639,12 +630,13 @@ def check_alerts(analytics: dict, spot: float):
                 _wall_zone = "Support"
             # Flow ratio for Telegram header
             _atm_svc = st.session_state.get("atm_option_service")
-            _call_buy = _atm_svc.get_ticker_call_buy(st.session_state.get("symbol")) if _atm_svc else 0
-            _call_sell = _atm_svc.get_ticker_call_sell(st.session_state.get("symbol")) if _atm_svc else 0
-            _put_buy = _atm_svc.get_ticker_put_buy(st.session_state.get("symbol")) if _atm_svc else 0
-            _put_sell = _atm_svc.get_ticker_put_sell(st.session_state.get("symbol")) if _atm_svc else 0
-            _total_flow = (_call_buy or 0) + (_put_sell or 0) + (_put_buy or 0) + (_call_sell or 0)
-            _flow_ratio = round(((_call_buy or 0) + (_put_sell or 0)) / _total_flow, 2) if _total_flow > 0 else None
+            _sym_key = st.session_state.get("symbol")
+            _, _, _flow_ratio = flow_metrics(
+                _atm_svc.get_ticker_call_buy(_sym_key) if _atm_svc else None,
+                _atm_svc.get_ticker_call_sell(_sym_key) if _atm_svc else None,
+                _atm_svc.get_ticker_put_buy(_sym_key) if _atm_svc else None,
+                _atm_svc.get_ticker_put_sell(_sym_key) if _atm_svc else None,
+            )
             # Absorption for Telegram header
             _absorption = _atm_svc.get_ticker_absorption(st.session_state.get("symbol")) if _atm_svc else None
             notify_alerts(
@@ -652,8 +644,6 @@ def check_alerts(analytics: dict, spot: float):
                 symbol=st.session_state.get("symbol"),
                 spot=spot,
                 gex=analytics.get("net_gex"),
-                rv=rv if rv > 0 else None,
-                iv_rank=st.session_state.get("iv_rank"),
                 wall_zone=_wall_zone, pw=_pw, cw=_cw,
                 wall_mark=analytics.get("call_wall_mark") if _wall_zone == "Resistance" else analytics.get("put_wall_mark"),
                 flow_ratio=_flow_ratio,
@@ -846,7 +836,7 @@ def render_candlesticks_frag():
         
         with row2:
             indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "Anchored VWAP", "Half Trend", "Volume", "Andean Squeeze"]
-            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "EMA 50", "Half Trend", "Anchored VWAP"], label_visibility="collapsed")
+            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "EMA 20", "EMA 50", "Half Trend", "Anchored VWAP"], label_visibility="collapsed")
         
         # Refresh the cache from the API when the existing on-disk bars are
         # stale relative to the user's chosen timeframe. The chart fragment
@@ -858,7 +848,7 @@ def render_candlesticks_frag():
         # couple bars behind); for D/W/M, refresh when the last bar is more
         # than 10 minutes old.
         try:
-            _probe = load_candle_cache(symbol, timeframe)
+            _probe = client_mod.load_last_cached_timestamp(symbol, timeframe)
         except Exception:
             _probe = pd.DataFrame()
         forced_refresh = False
@@ -936,7 +926,7 @@ def render_candlesticks_frag():
                 _all_tickers = s.get("ticker_history", [])
                 _stream_symbols = [_get_stream_symbol(t) for t in _all_tickers]
                 try:
-                    from client import fetch_quotes
+                    from scripts.client import fetch_quotes
                     quote_resp = run_async(fetch_quotes(s.client, _stream_symbols))
                     for disp_sym, stream_sym in zip(_all_tickers, _stream_symbols):
                         _disp_upper = _normalize_display_symbol(disp_sym)
@@ -1370,19 +1360,19 @@ def render_market_structure():
     gex_container = st.container()
     with gex_container:
         if ms_view == "GEX by Strike":
-            from charts import create_gex_histogram
+            from scripts.charts import create_gex_histogram
             fig = create_gex_histogram(strikes, s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), gamma_flip=s.analytics.get("gamma_flip"), )
             fig.update_layout(dragmode="zoom"); st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="gex_histogram")
         elif ms_view == "GEX by Expiration":
-            from charts import create_gex_by_expiration
+            from scripts.charts import create_gex_by_expiration
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="gex_exp_slider")
             fig = create_gex_by_expiration(s.by_exp_all, max_exps=mx, ); fig.update_layout(dragmode="zoom")
             st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="gex_by_exp")
         elif ms_view == "Gamma Surface":
-            from charts import create_gamma_surface
+            from scripts.charts import create_gamma_surface
             fig = create_gamma_surface(s.filtered_data, ); st.plotly_chart(fig, width='stretch', key="gamma_surface")
         else:
-            from charts import create_dealer_gamma_curve
+            from scripts.charts import create_dealer_gamma_curve
             dm = st.radio("Select", ["GEX", "VEX", "CEX"], horizontal=True, label_visibility="collapsed")
             _dc_strikes = _filter_strikes_near_atm(strikes, s.spot, n=20)
             fig = create_dealer_gamma_curve(_dc_strikes, s.spot, mode=dm.lower(), gamma_flip=s.analytics.get("gamma_flip"), call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), vex_magnet=s.analytics.get("vex_magnet"), vex_repellent=s.analytics.get("vex_repellent"))
@@ -1406,9 +1396,9 @@ def render_positioning():
     
     raw_data = [e for e in s.data if e["expiration"] in selected_expirations] if selected_expirations else list(s.data)
     if not s.get("show_itm", True):
-        raw_data = [e for e in raw_data if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
+        raw_data = [e for e in raw_data if is_otm_or_atm(e, s.spot)]
     if not s.get("show_otm", True):
-        raw_data = [e for e in raw_data if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
+        raw_data = [e for e in raw_data if is_itm_or_atm(e, s.spot)]
     
     if not raw_data:
         st.info("No positioning data available")
@@ -1422,21 +1412,29 @@ def render_positioning():
         st.info("No positioning data available")
         return
 
+    # Schwab's option-chain REST API zeroes totalVolume after the close
+    # (open interest persists; thinkorswim shows leftover volume from its own
+    # streaming session). Defuse the "empty chart" and hint at OI instead.
+    if selected_view_type == "Volume":
+        if not any(e["call_volume"] or e["put_volume"] for e in positioning_data):
+            st.caption("Volume is 0: Schwab's chain API reports 0 for every contract after the close "
+                       "(thinkorswim keeps its own streaming counter). This view fills while the market session is live.")
+
     if selected_view_type == "Open Interest":
-        from charts import create_oi_by_strike
+        from scripts.charts import create_oi_by_strike
         with st.container():
             fig = create_oi_by_strike(
-                positioning_data, s.spot, mode="oi", 
+                positioning_data, s.spot, mode="oi",
             )
             fig.update_layout(dragmode="zoom")
             st.plotly_chart(
                 fig, config={"scrollZoom": True}, width="stretch", key="oi_chart"
             )
     elif selected_view_type == "Volume":
-        from charts import create_oi_by_strike
+        from scripts.charts import create_oi_by_strike
         with st.container():
             fig = create_oi_by_strike(
-                positioning_data, s.spot, mode="volume", 
+                positioning_data, s.spot, mode="volume",
             )
             fig.update_layout(dragmode="zoom")
             st.plotly_chart(
@@ -1451,7 +1449,7 @@ def render_volatility():
 
     st.subheader("Volatility")
 
-    from charts import create_iv_by_strike, create_iv_richness_by_strike
+    from scripts.charts import create_iv_by_strike, create_iv_richness_by_strike
 
     _rv = s.get("underlying_20d_rv", 0.0)
     _ssvi_surf = s.analytics.get("ssvi_surface") if s.get("analytics") else None
@@ -1464,11 +1462,11 @@ def render_volatility():
     )
 
     if vol_view == "IV by Expiration":
-        from charts import create_atm_iv_histogram, create_vrp_chart
+        from scripts.charts import create_atm_iv_histogram, create_vrp_chart
         mo = st.radio("View", ["ATM IV", "VRP"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
         mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="iv_exp_slider")
         ivd = s.by_exp_all[:mx]
-        if mo == "ATM IV": st.plotly_chart(create_atm_iv_histogram(ivd, rv=_rv, ssvi_surface=_ssvi_surf, spot=s.spot).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="atm_iv_chart")
+        if mo == "ATM IV": st.plotly_chart(create_atm_iv_histogram(ivd, rv=_rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="atm_iv_chart")
         elif _rv > 0:
             legend_items = [
                 ("#27AE60", "≤ -10"),
@@ -1504,14 +1502,14 @@ def render_volatility():
 
         se = s.get("selected_expiration", []); se = [] if isinstance(se, str) else se
         raw = [e for e in s.data if e["expiration"] in se] if se else list(s.data)
-        if not s.get("show_itm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
-        if not s.get("show_otm", True): raw = [e for e in raw if (e["type"]=="CALL" and e["strike"]<=s.spot) or (e["type"]=="PUT" and e["strike"]>=s.spot)]
+        if not s.get("show_itm", True): raw = [e for e in raw if is_otm_or_atm(e, s.spot)]
+        if not s.get("show_otm", True): raw = [e for e in raw if is_itm_or_atm(e, s.spot)]
         raw = _filter_strikes_near_atm(raw, s.spot, n=20)
         vk = aggregate_by_strike(raw, s.spot, show_calls=s.show_calls, show_puts=s.show_puts)
         _ssvi_tte = _tte_from_dtes([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
         if tm == "IV":
             if vk:
-                st.plotly_chart(create_iv_by_strike(vk, s.spot, rv=_rv, iv_rank=s.get("iv_rank"), ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
+                st.plotly_chart(create_iv_by_strike(vk, s.spot, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
             else:
                 st.info("No strike data")
         elif tm == "IV Richness (pp)":
@@ -1555,7 +1553,7 @@ def render_heatmaps():
 
     st.subheader("Heatmaps")
 
-    from charts import create_heatmap, create_vol_surface_2d
+    from scripts.charts import create_heatmap, create_vol_surface_2d
 
     om = st.radio("Select", ["Open Interest", "Volume", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="hm_oi_vol_radio")
 
@@ -1566,7 +1564,7 @@ def render_heatmaps():
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
             fl = _filter_strikes_near_atm(fl, s.spot, n=20)
-            otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
+            otm = [e for e in fl if is_otm_or_atm(e, s.spot)]
             fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_oi_chart")
 
@@ -1577,7 +1575,7 @@ def render_heatmaps():
             ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
             fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
             fl = _filter_strikes_near_atm(fl, s.spot, n=20)
-            otm = [e for e in fl if (e["type"]=="CALL" and e["strike"]>=s.spot) or (e["type"]=="PUT" and e["strike"]<=s.spot)]
+            otm = [e for e in fl if is_otm_or_atm(e, s.spot)]
             fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_v_chart")
 
@@ -1640,12 +1638,6 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
         selected_expirations = []
     filtered_data = _get_filtered_data_for_walls(data, selected_expirations)
     analytics = compute_analytics(filtered_data, spot, r=r, q=q, data_full=data)
-
-    # Set filtered data for order flow display with exact 20 strikes below, ATM, 20 above
-    # This enables accurate wall calculations and displays correct support/resistance in the ATM order flow grid
-    from analytics import get_filtered_strikes_for_analysis
-    filtered_flow_data = get_filtered_strikes_for_analysis(filtered_data, spot, n=20)
-    analytics["filtered_flow_data"] = filtered_flow_data
 
     # Update ATM service with walls so the Order Flow grid displays them
     atm_svc = st.session_state.get("atm_option_service")
@@ -2001,7 +1993,6 @@ def _get_filtered_data_for_walls(data: list[dict], selected_expirations: list[st
         return data
     
     # Step 4: Filter to strikes near ATM (±20 strikes, including ATM)
-    # like get_filtered_strikes_for_analysis with n=20 (40 strikes total)
     strike_set = sorted(set(e["strike"] for e in filtered))
     if not strike_set:
         return data
@@ -2173,11 +2164,6 @@ def render_news_frag():
         )
 
 
-def _format_uw_exp(exp: str | None) -> str:
-    """Format an expiration date as 'MM-DD (Nd)' for the scanner table."""
-    return format_expiration(exp)
-
-
 def _infer_uw_side(bid: float, ask: float, mark: float) -> str:
     """Infer the aggressor side (ASK/BID/MID) from the mark's position
     within the bid-ask spread.
@@ -2325,7 +2311,7 @@ def render_unusual_trades():
     m4.metric("Calls / Puts", f"{_calls} / {_puts}")
 
     df = results_df.head(3000).copy()
-    df["Expiration"] = df["Expiration"].map(_format_uw_exp)
+    df["Expiration"] = df["Expiration"].map(format_expiration)
 
     def _row_style(row):
         is_call = row["Type"] == "CALL"

@@ -12,8 +12,8 @@ import asyncio
 import logging
 from typing import List
 
-from client import fetch_quotes
-from _constants import INDEX_QUOTE_MAP, INDEX_SPOT_MAX_RETRIES, INDEX_SPOT_RETRY_BACKOFF, INDEX_SPOT_UNEXPECTED_BACKOFF_MULTIPLIER
+from scripts.client import fetch_quotes
+from scripts._constants import INDEX_QUOTE_MAP, INDEX_SPOT_MAX_RETRIES, INDEX_SPOT_RETRY_BACKOFF, INDEX_SPOT_UNEXPECTED_BACKOFF_MULTIPLIER
 
 logger = logging.getLogger(__name__)
 
