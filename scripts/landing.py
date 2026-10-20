@@ -358,21 +358,19 @@ def _auth_card() -> None:
     ) or "Log in"
     if mode == "Log in":
         with st.form("gh_login_form", clear_on_submit=False):
-            identifier = st.text_input("Username or email",
-                                       key="gh_login_user").strip()
+            email = st.text_input("Email", key="gh_login_email").strip()
             password = st.text_input("Password", type="password",
                                      key="gh_login_pass")
             if st.form_submit_button("Log in", width="stretch"):
                 try:
-                    user = auth_db.verify_user(identifier, password)
+                    user = auth_db.verify_user(email, password)
                     st.session_state["gex_user"] = user
                     st.rerun()
                 except auth_db.AuthError as exc:
                     st.error(str(exc))
     else:
         with st.form("gh_signup_form", clear_on_submit=True):
-            username = st.text_input("Username", key="gh_su_user")
-            email = st.text_input("Email (optional)", key="gh_su_email")
+            email = st.text_input("Email", key="gh_su_email")
             c1, c2 = st.columns(2)
             password = c1.text_input("Password", type="password", key="gh_su_pass")
             confirm = c2.text_input("Confirm", type="password", key="gh_su_conf")
@@ -381,9 +379,9 @@ def _auth_card() -> None:
                     st.error("Passwords don't match")
                 else:
                     try:
-                        new_id = auth_db.create_user(username, email, password)
+                        new_id = auth_db.create_user(email, password)
                         st.session_state["gex_user"] = auth_db.get_user(new_id) or {
-                            "username": username.strip(), "email": email.strip(),
+                            "email": email.strip(),
                         }
                         st.rerun()
                     except auth_db.AuthError as exc:
@@ -400,8 +398,7 @@ def render_landing() -> None:
 <div class="auth-wrap" id="open-account">
   <div class="auth-title">
     <h2>Open your GammaEx account</h2>
-    <p>Local account, SQLite storage. Passwords are salted scrypt hashes.</p>
-  </div>
+    <p>Local account, SQLite storage. Passwords are salted scrypt hashes.</p>  </div>
 </div>
 """,
         unsafe_allow_html=True,
