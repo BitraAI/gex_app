@@ -280,7 +280,12 @@ class AtmOptionVolumeService:
             )
 
     def get_candles(self) -> pd.DataFrame:
-        """Return snapshot of completed 1s bars plus the live incomplete bar."""
+        """Return snapshot of completed 1s bars plus the live incomplete bar.
+
+        The returned DataFrame is indexed by ``datetime`` (int64 epoch
+        milliseconds, UTC) so consumers can floor/merge the buckets against
+        the chart's ms-based candle timestamps.
+        """
         with self._lock:
             columns = [
                 "call_buy_vol", "call_sell_vol",
@@ -294,7 +299,8 @@ class AtmOptionVolumeService:
             cur = self._current_bar
             if cur is not None:
                 rows = [*rows, cur]
-            out = pd.DataFrame(rows, columns=columns)
+            out = pd.DataFrame(rows, columns=["datetime", *columns])
+            out = out.set_index("datetime")
             out.index.name = "datetime"
             return out
 
@@ -1423,6 +1429,7 @@ class AtmOptionVolumeService:
 
             self._current_bucket = bucket
             self._current_bar = {
+                "datetime": bucket,
                 "call_buy_vol": cbv,
                 "call_sell_vol": csv,
                 "put_buy_vol": pbv,

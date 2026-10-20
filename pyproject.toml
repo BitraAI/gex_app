@@ -1,0 +1,25 @@
+# Packaging: makes `from email_service import send_email` work with a bare
+# venv interpreter. `pip install -e .` exposes ONLY the scripts/email_service
+# module at the top level — no other scripts/* names get installed, so they
+# can never shadow third-party packages in site-packages.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "email-service"
+version = "1.0.0"
+description = "gex_app's SMTP email_service module exposed at the top level"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+package-dir = { "" = "scripts" }
+py-modules = ["email_service"]
+
+# Test runner (previously lived in pyproject.toml before it was dropped):
+# makes `pytest` import repo roots and default to the tests/ dir.
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+

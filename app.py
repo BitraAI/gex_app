@@ -1209,7 +1209,8 @@ def render_candlesticks_frag():
                         atm_df["datetime"] = atm_df["datetime"].astype("int64")
                         # Floor ATM 1-second bucket timestamps to the chart's
                         # timeframe boundary so they match chart_df["datetime"].
-                        atm_df = floor_dataframe_timestamps(atm_df, "datetime", timeframe)
+                        _tf_min_atm = (client_mod.TIMEFRAMES.get(timeframe) or {}).get("minutes")
+                        atm_df = floor_dataframe_timestamps(atm_df, "datetime", timeframe, _tf_min_atm)
                         atm_agg = atm_df.groupby("datetime").agg({
                             "call_buy_vol": "sum", "call_sell_vol": "sum",
                             "put_buy_vol": "sum", "put_sell_vol": "sum",
