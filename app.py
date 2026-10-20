@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
+from scripts import auth_db, landing
 from scripts import client as client_mod
 from scripts._constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
 from scripts._utils import compute_strike_increment, floor_dataframe_timestamps, compute_current_bucket, format_expiration, flow_metrics, is_otm_or_atm, is_itm_or_atm
@@ -123,6 +124,17 @@ if not st.session_state.ticker_history:
     st.session_state.ticker_history = _load_ticker_history()
 
 st.markdown(_get_css(), unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Landing / auth gate
+#
+# While nobody is signed in, show the Robinhood-style landing page (hero,
+# feature cards, trust band) with the Log in / Sign up card on it. The landing
+# module calls st.stop(), so the main dashboard below never renders until a
+# session is established. Signing out clears the key and reruns back to here.
+# ---------------------------------------------------------------------------
+if not st.session_state.get("gex_user"):
+    landing.render_landing()
 
 
 def sync_index_poller() -> None:
@@ -715,6 +727,13 @@ def compute_iv_rank(symbol: str) -> float | None:
 def render_sidebar():
     with st.sidebar:
         st.markdown("## GammaEx")
+
+        _user = st.session_state.get("gex_user")
+        if _user:
+            st.caption(f"Signed in as **{_user['username']}**")
+            if st.button("Log out", width="stretch"):
+                st.session_state.pop("gex_user", None)
+                st.rerun()
 
         st.markdown("---")
 

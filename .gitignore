@@ -1,3 +1,4 @@
 config.toml
 __pycache__/
 *.pyc
+static/landing/
