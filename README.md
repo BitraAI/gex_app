@@ -309,7 +309,7 @@ gex_app/
 
 The app opens on a Robinhood-style landing page (promo bar, sticky nav, hero with a live ticker tape, feature cards built from the screenshots in `assets/`, a dark flow band, trust cards, and a legal footer). Nobody reaches the dashboard until they sign in or create an account on the page:
 
-- **Accounts live in SQLite** at `~/.local/share/gex_app/app.db` (WAL mode; override the path with the `GEX_APP_DB` env var). One `users` table: unique case-insensitive username, optional unique email, salted **scrypt** password hash (stdlib `hashlib`), `created_at` / `last_login` stamps.
+- **Accounts live in SQLite** at `~/.local/share/gex_app/app.db` (WAL mode; override the path with the `GEX_APP_DB` env var). One `users` table keyed by **email only**: unique case-insensitive address + salted **scrypt** password hash (stdlib `hashlib`), `created_at` / `last_login` stamps. Ledger databases created with the earlier username+email schema are migrated automatically on first use.
 - **The signed-in user** is kept in `st.session_state["gex_user"]`; **Log out** (top of the sidebar) clears it and returns to the landing page.
 - The landing screenshots are copied at render time from `assets/` into `static/landing/` (git-ignored) and served by Streamlit's static handler.
 

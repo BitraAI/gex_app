@@ -730,7 +730,7 @@ def render_sidebar():
 
         _user = st.session_state.get("gex_user")
         if _user:
-            st.caption(f"Signed in as **{_user['username']}**")
+            st.caption(f"Signed in as **{_user['email']}**")
             if st.button("Log out", width="stretch"):
                 st.session_state.pop("gex_user", None)
                 st.rerun()
