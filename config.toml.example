@@ -9,3 +9,13 @@ enabled = true                     # set false to mute alerts without removing s
 BOT_TOKEN = "YOUR_BOT_TOKEN"       # from @BotFather
 CHAT_ID = "YOUR_CHAT_ID"           # from @userinfobot (or a negative group id, or @channelname)
 
+# Password-reset email delivery (Forgot password). Omitted/blank smtp_host
+# disables email: reset links are then written to the app log instead.
+[email]
+smtp_host = "smtp.gmail.com"
+smtp_port = 587              # 465 implies use_ssl
+smtp_user = "your-account@gmail.com"
+smtp_password = "your-16-character-app-password"  # https://myaccount.google.com/apppasswords
+from_addr = "your-account@gmail.com"
+use_ssl = false
+link_base = "http://localhost:8501"   # app URL the emailed link points to

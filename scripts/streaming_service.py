@@ -106,7 +106,7 @@ class StreamingService:
     @property
     def has_data(self) -> bool:
         with self._lock:
-            return self._current_bar is not None or not self._bars
+            return self._current_bar is not None or bool(self._bars)
 
     @property
     def last_error(self) -> str | None:
@@ -114,7 +114,12 @@ class StreamingService:
             return self._last_error
 
     def get_candles(self) -> pd.DataFrame:
-        """Return snapshot of completed 1s bars plus the live incomplete bar."""
+        """Return snapshot of completed 1s bars plus the live incomplete bar.
+
+        The returned DataFrame is indexed by ``datetime`` (int64 epoch
+        milliseconds, UTC) so consumers can floor/merge the buckets against
+        the chart's ms-based candle timestamps.
+        """
         with self._lock:
             if not self._bars and self._current_bar is None:
                 return pd.DataFrame()
@@ -124,7 +129,8 @@ class StreamingService:
             cur = self._current_bar
             if cur is not None:
                 rows = [*rows, cur]
-            out = pd.DataFrame(rows, columns=columns)
+            out = pd.DataFrame(rows, columns=["datetime", *columns])
+            out = out.set_index("datetime")
             out.index.name = "datetime"
             return out
 
@@ -190,6 +196,7 @@ class StreamingService:
             bv = size if direction == "buy" else 0
             sv = size if direction == "sell" else 0
             self._current_bar = {
+                "datetime": bucket,
                 "open": price,
                 "high": price,
                 "low": price,

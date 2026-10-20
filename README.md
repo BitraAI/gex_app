@@ -93,6 +93,10 @@ $ source .venv/bin/activate
 (gex_venv) $ python -m pip install -U pip
 (gex_venv) $ python -m pip install -U uv
 (gex_venv) $ uv pip install -r requirements.txt
+
+# Optional: exposes scripts/email_service.py for `from email_service import ...`
+# with a bare interpreter (also enables pytest config below)
+(gex_venv) $ python -m pip install --no-build-isolation -e .
 ```
 
 ### Create a Schwab Developer Portal Account
@@ -278,6 +282,8 @@ gex_app/
 │   ├── client.py                       # Schwab API client wrapper (auth, quotes, chains, candles, rate-limit retries)
 │   ├── auth_db.py                       # SQLite account store for the landing page (users table, salted scrypt password hashing)
 │   ├── landing.py                       # Robinhood-style landing page with Log in / Sign up (gates the app before sign-in)
+│   ├── mailer.py                        # Password-reset email via SMTP ([email] config, one retry on transient drops)
+│   ├── email_service.py                 # Alternate config-driven SMTP sender (send_email + send_password_reset_email, 3-attempt retry)
 │   ├── config.py                       # Application configuration (single-parse of config.toml at repo root)
 │   ├── schwab_auth.py                  # OAuth authentication script (run as python3 scripts/schwab_auth.py)
 │   ├── _constants.py                   # Static symbol maps (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS, MAX_BAR_ROWS, flow/stream/polling constants, chart layout)
@@ -291,13 +297,9 @@ gex_app/
 │   └── telegram_notifier.py            # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
 ├── config.toml                         # Schwab credentials and settings (NOT committed — see .gitignore)
 ├── requirements.txt                   # Python dependencies
-├── pyproject.toml                     # Project metadata + pytest config (pythonpath=., testpaths=tests)
+├── pyproject.toml                       # Exposes scripts/email_service.py as top-level `email_service` on `pip install -e .` + pytest config (pythonpath=., testpaths=tests)
 ├── assets/                            # Screenshots of charts and dashboard panels
-├── tests/                             # Unit tests
-│   ├── conftest.py                    # Shared pytest fixtures (svc, ticker, fixed_now)
-│   ├── test_calculations.py           # Unit tests for calculations
-│   ├── test_option_streaming.py       # Unit tests for option streaming service
-│   └── test_flow_alerts.py            # Unit tests for wall-buffer, conviction, and alert helpers in flow.py
+├── tests/                             # Unit tests (pytest config placeholders — no test files yet)
 ├── CANDLESTICS.md                     # Candlestick chart internals (indicators, dual-axis pan/zoom, Y-range persistence)
 ├── FLOW.md                            # ATM order-flow architecture (streaming, absorption, liquidity, net flow, conviction-gated alerts)
 ├── SIGNALS.md                         # Strategy-signal logic (scoring, filters, market bias)
@@ -311,7 +313,7 @@ The app opens on a Robinhood-style landing page (promo bar, sticky nav, hero wit
 
 - **Accounts live in SQLite** at `~/.local/share/gex_app/app.db` (WAL mode; override the path with the `GEX_APP_DB` env var). One `users` table keyed by **email only**: unique case-insensitive address + salted **scrypt** password hash (stdlib `hashlib`), `created_at` / `last_login` stamps. Ledger databases created with the earlier username+email schema are migrated automatically on first use.
 - **The signed-in user** is kept in `st.session_state["gex_user"]`; **Log out** (top of the sidebar) clears it and returns to the landing page.
-- **Forgot password**: the auth card offers a "Forgot password?" view that emails a single-use reset link (30-minute expiry) after asking for the account email. SMTP settings live under `[email]` in `config.toml` (`smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `from_addr`, `use_ssl`, `link_base`); without `smtp_host` the link is written to the app log instead. Tokens are stored only as SHA-256 hashes in a `password_resets` table; a new request invalidates any pending link, and the emailed `…/?reset=<token>` URL opens the app in reset mode.
+- **Forgot password**: the auth card offers a "Forgot password?" view that emails a single-use reset link (30-minute expiry) after asking for the account email. SMTP settings live under `[email]` in `config.toml` (`smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `from_addr`, `use_ssl`, `link_base`), with `GEX_SMTP_USER` / `GEX_SMTP_PASSWORD` env overrides; without `smtp_host` the link is written to the app log instead. **Gmail requires a 16-character App Password** (Google accounts reject plain account passwords for SMTP — `myaccount.google.com` → Security → 2-Step Verification → App passwords). Transient server disconnects (Gmail briefly jails IPs after bursts of failed auths) are retried automatically. Tokens are stored only as SHA-256 hashes in a `password_resets` table; a new request invalidates any pending link, and the emailed `…/?reset=<token>` URL opens the app in reset mode. Delivery is handled by `scripts/mailer.py` (app flow); `scripts/email_service.py` (`send_email()` / `send_password_reset_email()`) is the same config-driven sender with its own API — import it as `scripts.email_service`, or as top-level `email_service` after `pip install -e .`.
 - The landing screenshots are copied at render time from `assets/` into `static/landing/` (git-ignored) and served by Streamlit's static handler.
 
 ### Calculation Details

@@ -38,7 +38,14 @@ def _connect() -> smtplib.SMTP:
 
 
 def send_reset_email(to_email: str, reset_link_url: str) -> None:
-    """Send the password-reset email; raise MailError on any failure."""
+    """Send the password-reset email; raise MailError on any failure.
+
+    Transient SMTP drops (Gmail occasionally severs connections after bursts
+    of auth attempts) are retried once after a short pause before the error
+    surfaces.
+    """
+    import time
+
     if not smtp_configured():
         raise MailError("Email delivery is not configured ([email] in config.toml)")
 
@@ -55,15 +62,33 @@ def send_reset_email(to_email: str, reset_link_url: str) -> None:
         f"current password keeps working and the link expires on its own.\n"
     )
 
-    try:
-        with _connect() as server:
-            server.ehlo()
-            if not config.SMTP_USE_SSL and server.has_extn("starttls"):
-                server.starttls()
+    retryable = (
+        smtplib.SMTPServerDisconnected, ConnectionError,
+        BrokenPipeError, TimeoutError,
+    )
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            with _connect() as server:
                 server.ehlo()
-            if config.SMTP_USER:
-                server.login(config.SMTP_USER, config.SMTP_PASSWORD)
-            server.send_message(msg)
-    except (smtplib.SMTPException, OSError) as exc:
-        log.error("SMTP send to %s failed: %s", to_email, exc)
-        raise MailError(f"Couldn't reach the mail server: {exc}") from exc
+                if not config.SMTP_USE_SSL and server.has_extn("starttls"):
+                    server.starttls()
+                    server.ehlo()
+                if config.SMTP_USER:
+                    server.login(config.SMTP_USER, config.SMTP_PASSWORD)
+                server.send_message(msg)
+            return
+        except retryable as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(2)
+            continue
+        except smtplib.SMTPResponseException as exc:
+            log.error("SMTP send to %s rejected: %s %s", to_email, exc.smtp_code, exc.smtp_error)
+            raise MailError(f"SMTP rejected auth: {exc.smtp_error}") from exc
+        except (smtplib.SMTPException, OSError) as exc:
+            log.error("SMTP send to %s failed: %s", to_email, exc)
+            raise MailError(f"Couldn't reach the mail server: {exc}") from exc
+
+    log.error("SMTP send to %s failed after retry: %s", to_email, last_exc)
+    raise MailError(f"Couldn't reach the mail server: {last_exc}") from last_exc
