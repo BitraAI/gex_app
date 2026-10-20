@@ -1574,7 +1574,7 @@ def render_heatmaps():
 
     from scripts.charts import create_heatmap, create_vol_surface_2d
 
-    om = st.radio("Select", ["Open Interest", "Volume", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="hm_oi_vol_radio")
+    om = st.radio("Select", ["Open Interest", "Volume", "IV Richness (pp)", "VRP"], horizontal=True, label_visibility="collapsed", key="hm_oi_vol_radio")
 
     if om == "Open Interest":
         oi_container = st.container()
@@ -1617,6 +1617,23 @@ def render_heatmaps():
                 st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_ir_chart")
             else:
                 st.info("SSVI surface not calibrated yet")
+
+    elif om == "VRP":
+        vrp_container = st.container()
+        with vrp_container:
+            mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_vrp_slider")
+            ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
+            vd = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
+            vd = _filter_strikes_near_atm(vd, s.spot, n=20)
+            smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
+            _rvv = s.get("underlying_20d_rv", 0.0)
+            if not vd:
+                st.info("No strike data")
+            elif _rvv <= 0:
+                st.info("No RV data")
+            else:
+                fig = create_vol_surface_2d(vd, _rvv, smi, sma, s.spot, mode="vrp")
+                st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_vrp_chart")
 
 
 def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
