@@ -149,7 +149,7 @@ Environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` override `conf
 Run the auth script to perform the OAuth browser flow and save a token:
 
 ```bash
-(gex_venv) $ uv run schwab_auth.py
+(gex_venv) $ uv run scripts/schwab_auth.py
 ```
 
 This opens a browser for Schwab login. The token is automatically refreshed by the client library.
@@ -159,7 +159,7 @@ This opens a browser for Schwab login. The token is automatically refreshed by t
 1. Open VS Code Settings, uncheck **Remote.SSH: Use Exec Server**
 2. Add new SSH Host and login to the remote host
 3. Update `client_id` and `client_secret` in `gex_app/config.toml`
-4. Run `uv run schwab_auth.py`
+4. Run `uv run scripts/schwab_auth.py`
 5. A browser will open to log in to Schwab. Once complete, a message will be displayed:
 
    ```
@@ -269,26 +269,25 @@ journalctl --user -u gex-app.service -f
 ```
 gex_app/
 ├── app.py                              # Main Streamlit application
-├── flow.py                             # Shared ATM Order Flow rendering (grid, market status indicator, wall-zone alerts, conviction scoring, session defaults, market-hours check)
-├── analytics.py                        # Analytical calculations (walls, flip, skew, etc.)
-├── calculations.py                     # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
-├── charts.py                           # Plotly chart generators
-├── chart_component.py                  # Lightweight Charts HTML/JS component (custom indicators, dual-axis pan/zoom, VPVR overlay, Y-range persistence across streaming re-renders)
-├── client.py                           # Schwab API client wrapper (auth, quotes, chains, candles, rate-limit retries)
-├── config.py                           # Application configuration (single-parse of config.toml)
+├── scripts/                            # Application modules (imported by app.py as scripts.*)
+│   ├── flow.py                         # Shared ATM Order Flow rendering (grid, market status indicator, wall-zone alerts, conviction scoring, session defaults, market-hours check)
+│   ├── analytics.py                    # Analytical calculations (walls, flip, skew, etc.)
+│   ├── calculations.py                 # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
+│   ├── charts.py                       # Plotly chart generators
+│   ├── chart_component.py             # Lightweight Charts HTML/JS component (custom indicators, dual-axis pan/zoom, VPVR overlay, Y-range persistence across streaming re-renders)
+│   ├── client.py                       # Schwab API client wrapper (auth, quotes, chains, candles, rate-limit retries)
+│   ├── config.py                       # Application configuration (single-parse of config.toml at repo root)
+│   ├── schwab_auth.py                  # OAuth authentication script (run as python3 scripts/schwab_auth.py)
+│   ├── _constants.py                   # Static symbol maps (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS, MAX_BAR_ROWS, flow/stream/polling constants, chart layout)
+│   ├── _utils.py                       # Shared utilities (JSON I/O, nested dict access, timestamp flooring, strike increment computation)
+│   ├── index_spot_poller.py           # Background poller for index symbol REST quotes ($SPX/$RUT/$NDX → proxy ETF spots)
+│   ├── news_service.py                # RSS news fetching + sentiment tagging
+│   ├── option_streaming_service.py    # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, per-ticker expiration, 1s aggregation with buy/sell split and delta-weighted Net Flow — shares the equity StreamClient)
+│   ├── streaming_service.py           # Schwab WebSocket streaming (Level 1 + Level 2 options books, O(1) list-based bar accumulator converted to DataFrame on demand)
+│   ├── signals.py                      # Strategy signals engine (scoring, recommendations, bias)
+│   ├── svi.py                          # SSVI volatility surface (Raw SVI + SSVI surface calibration)
+│   └── telegram_notifier.py            # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
 ├── config.toml                         # Schwab credentials and settings (NOT committed — see .gitignore)
-├── config.toml.example                 # Example configuration template
-├── schwab_auth.py                      # OAuth authentication script
-├── _constants.py                       # Static symbol maps (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS, MAX_BAR_ROWS, flow/stream/polling constants, chart layout)
-├── _utils.py                           # Shared utilities (JSON I/O, nested dict access, timestamp flooring, strike increment computation)
-├── index_spot_poller.py               # Background poller for index symbol REST quotes ($SPX/$RUT/$NDX → proxy ETF spots)
-├── news_service.py                    # RSS news fetching + sentiment tagging
-├── option_streaming_service.py        # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, per-ticker expiration, 1s aggregation with buy/sell split and delta-weighted Net Flow — shares the equity StreamClient)
-├── streaming_service.py               # Schwab WebSocket streaming (Level 1 + Level 2 options books, O(1) list-based bar accumulator converted to DataFrame on demand)
-├── signals.py                         # Strategy signals engine (scoring, recommendations, bias)
-├── svi.py                             # SSVI volatility surface (Raw SVI + SSVI surface calibration)
-├── telegram_notifier.py               # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
-├── run.sh                             # Convenience run script
 ├── requirements.txt                   # Python dependencies
 ├── pyproject.toml                     # Project metadata + pytest config (pythonpath=., testpaths=tests)
 ├── assets/                            # Screenshots of charts and dashboard panels

@@ -18,7 +18,7 @@ import shutil
 
 import streamlit as st
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root (this module lives in scripts/; static/ must sit next to app.py for Streamlit static serving)
 _ROOT_ID = "lwc_candlestick"
 _STATIC_LIB_DIR = os.path.join(_BASE_DIR, "static")
 _STATIC_LIB_PATH = os.path.join(_STATIC_LIB_DIR, "_lwc_lib.js")
@@ -557,6 +557,17 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             savePosition(false);
         });
 
+        // Enforce the right blank margin even when a restored pan/zoom (or a
+        // stale saved range) left the last candle flush against the edge.
+        // Runs after subscriptions so the guarded geometry is captured by
+        // savePosition() for subsequent rebuilds.
+        let _csCount0 = 0;
+        const _serList0 = d.series || [];
+        for (let i = 0; i < _serList0.length; i++) {
+            if (_serList0[i].type === 'Candlestick') { _csCount0 = (_serList0[i].data || []).length; break; }
+        }
+        __cwRightMarginGuard(chart, _csCount0 ? _csCount0 - 1 : 0, 5);
+
         let ySavePending = false;
         function scheduleYSave() {
             if (ySavePending) return;
@@ -847,6 +858,26 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         return JSON.stringify([d.symbol || '', keys, d.heights || null, walls]);
     }
 
+    // Keeps at least `minGap` bars of blank space between the last candle and
+    // the right edge (the base rightOffset option only governs the initial
+    // fit and LWC's auto-shift; a restored pan/zoom or a flush user view
+    // would otherwise sit the last candle on the right border forever).
+    // Skipped when the user has scrolled left past the last bar — that view
+    // is deliberate and must not be hijacked.
+    function __cwRightMarginGuard(chart, lastIndex, minGap) {
+        try {
+            const ts = chart.timeScale();
+            const r = ts.getVisibleLogicalRange();
+            if (!r || r.to == null || r.from == null) return;
+            if (r.to < lastIndex) return;
+            if (r.to - lastIndex >= minGap) return;
+            const newTo = lastIndex + minGap;
+            let newFrom = r.from + (newTo - r.to);
+            if (newFrom < 0) newFrom = 0;
+            ts.setVisibleLogicalRange({from: newFrom, to: newTo});
+        } catch (_) {}
+    }
+
     function tryUpdate(ser, row) {
         if (!row) return true;
         try {
@@ -924,7 +955,13 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             for (let i = 0; i < serList.length; i++) {
                 if (serList[i].type === 'Candlestick') { cs = serList[i].data; break; }
             }
-            if (cs) __applyRows(cur.candleSeries, cs);
+            if (cs) {
+                const prevCsN = cur.candleSeries.__cwN || 0;
+                __applyRows(cur.candleSeries, cs);
+                // A new bar was appended: re-assert the 5-bar right margin.
+                // Value-only refreshes never move the view.
+                if (cs.length > prevCsN) __cwRightMarginGuard(cur.chart, cs.length - 1, 5);
+            }
             __applyList(cur.byKey, serList);
             __applyList(cur.byKey, init.volume_series);
             __applyList(cur.byKey, init.andean_series);
@@ -972,6 +1009,44 @@ def _convert_time(t, et_offset):
     return int(t) + et_offset
 
 
+def _build_volume_maps(candles: list[dict], et_offset: int) -> tuple[dict, dict, dict]:
+    """Per-bar timestamp -> (total, buy, sell) volume maps for the volume-type
+    indicators (Volume / Volume Profile / Anchored VWAP share the same build)."""
+    vol_map: dict = {}
+    buy_map: dict = {}
+    sell_map: dict = {}
+    for c in candles:
+        t = _convert_time(c["datetime"], et_offset)
+        raw_vol = c.get("volume", 0)
+        if raw_vol is None or raw_vol != raw_vol:
+            raw_vol = 0
+        vol_map[t] = float(raw_vol)
+        if "buy_vol" in c and c.get("buy_vol") is not None:
+            buy_map[t] = int(c.get("buy_vol", 0) or 0)
+        if "sell_vol" in c and c.get("sell_vol") is not None:
+            sell_map[t] = int(c.get("sell_vol", 0) or 0)
+    return vol_map, buy_map, sell_map
+
+
+def _bar_volume_split(c: dict, vol: float, buy_map: dict, sell_map: dict) -> tuple[int, int]:
+    """Buy/sell volume for one bar, using the streamed split when available
+    and otherwise estimating it from the close's position in the bar range."""
+    t = c["time"]
+    if t in buy_map and t in sell_map:
+        bv = buy_map[t]
+        sv = sell_map[t]
+    else:
+        hl = c["high"] - c["low"]
+        if hl > 0:
+            bv = round(vol * (c["close"] - c["low"]) / hl)
+            sv = round(vol * (c["high"] - c["close"]) / hl)
+        else:
+            bv = sv = round(vol * 0.5)
+    bv = 0 if (bv is None or bv != bv) else bv
+    sv = 0 if (sv is None or sv != sv) else sv
+    return bv, sv
+
+
 def build_init_data(
     candles: list[dict],
     indicators: list[str] | None = None,
@@ -979,7 +1054,7 @@ def build_init_data(
     put_wall: float | None = None,
     last_close: float | None = None,
 ) -> dict:
-    from charts import _get_est_offset, _sma, _ema, _half_trend, _andean_oscillator, _anchored_vwap, _squeeze_detector, INDICATORS
+    from scripts.charts import _get_est_offset, _sma, _ema, _half_trend, _andean_oscillator, _anchored_vwap, _squeeze_detector, INDICATORS
 
     try:
         et_offset = _get_est_offset()
@@ -1051,35 +1126,12 @@ def build_init_data(
             if cfg is None:
                 continue
             if name == "Volume":
-                vol_map = {}
-                buy_map = {}
-                sell_map = {}
-                for c in candles:
-                    t = _convert_time(c["datetime"], et_offset)
-                    raw_vol = c.get("volume", 0)
-                    if raw_vol is None or raw_vol != raw_vol:
-                        raw_vol = 0
-                    vol_map[t] = float(raw_vol)
-                    if "buy_vol" in c and c.get("buy_vol") is not None:
-                        buy_map[t] = int(c.get("buy_vol", 0) or 0)
-                    if "sell_vol" in c and c.get("sell_vol") is not None:
-                        sell_map[t] = int(c.get("sell_vol", 0) or 0)
+                vol_map, buy_map, sell_map = _build_volume_maps(candles, et_offset)
                 buy_vol = []
                 sell_vol = []
                 for c in cd:
                     vol = vol_map.get(c["time"], 0)
-                    if c["time"] in buy_map and c["time"] in sell_map:
-                        bv = buy_map[c["time"]]
-                        sv = sell_map[c["time"]]
-                    else:
-                        hl = c["high"] - c["low"]
-                        if hl > 0:
-                            bv = round(vol * (c["close"] - c["low"]) / hl)
-                            sv = round(vol * (c["high"] - c["close"]) / hl)
-                        else:
-                            bv = sv = round(vol * 0.5)
-                    bv = 0 if (bv is None or bv != bv) else bv
-                    sv = 0 if (sv is None or sv != sv) else sv
+                    bv, sv = _bar_volume_split(c, vol, buy_map, sell_map)
                     buy_vol.append({"time": c["time"], "value": bv, "color": "#26a69a"})
                     sell_vol.append({"time": c["time"], "value": sv, "color": "#ef5350"})
                 volume_series = [
@@ -1122,7 +1174,7 @@ def build_init_data(
                                 "position": "inBar",
                                 "shape": "circle",
                                 "color": _sqzStateColor.get(_st, "#ff9800"),
-                                "size": 0.05,
+                                "size": 0.5,
                             })
                             break
                 andean_series = [
@@ -1148,46 +1200,17 @@ def build_init_data(
                     series_list.append({"type": "Line", "key": "ema50", "data": ema50_data, "options": {"color": cfg.get("color", "#ab63fa"), "lineWidth": cfg.get("lineWidth", 2), "lastValueVisible": False, "priceLineVisible": False}})
                 continue
             if name == "Volume Profile":
-                vol_map = {}
-                buy_map = {}
-                sell_map = {}
-                for c in candles:
-                    t = _convert_time(c["datetime"], et_offset)
-                    raw_vol = c.get("volume", 0)
-                    if raw_vol is None or raw_vol != raw_vol:
-                        raw_vol = 0
-                    vol_map[t] = float(raw_vol)
-                    if "buy_vol" in c and c.get("buy_vol") is not None:
-                        buy_map[t] = int(c.get("buy_vol", 0) or 0)
-                    if "sell_vol" in c and c.get("sell_vol") is not None:
-                        sell_map[t] = int(c.get("sell_vol", 0) or 0)
+                vol_map, buy_map, sell_map = _build_volume_maps(candles, et_offset)
                 vp_vols = []
                 for c in cd:
                     vol = vol_map.get(c["time"], 0)
                     if vol is None or vol != vol:
                         vol = 0
-                    if c["time"] in buy_map and c["time"] in sell_map:
-                        bv = buy_map[c["time"]]
-                        sv = sell_map[c["time"]]
-                    else:
-                        hl = c["high"] - c["low"]
-                        if hl > 0:
-                            bv = round(vol * (c["close"] - c["low"]) / hl)
-                            sv = round(vol * (c["high"] - c["close"]) / hl)
-                        else:
-                            bv = sv = round(vol * 0.5)
-                    bv = 0 if (bv is None or bv != bv) else bv
-                    sv = 0 if (sv is None or sv != sv) else sv
+                    bv, sv = _bar_volume_split(c, vol, buy_map, sell_map)
                     vp_vols.append({"time": c["time"], "high": c["high"], "low": c["low"], "buy": float(bv), "sell": float(sv)})
                 continue
             if name == "Anchored VWAP":
-                vol_map = {}
-                for c in candles:
-                    t = _convert_time(c["datetime"], et_offset)
-                    raw_vol = c.get("volume", 0)
-                    if raw_vol is None or raw_vol != raw_vol:
-                        raw_vol = 0
-                    vol_map[t] = float(raw_vol)
+                vol_map, _bw, _sw = _build_volume_maps(candles, et_offset)
                 vw_times = [c["time"] for c in cd]
                 vw_highs = [c["high"] for c in cd]
                 vw_lows = [c["low"] for c in cd]
@@ -1253,7 +1276,7 @@ def _build_iv_skew_data(iv_skew_history: list, et_offset: int) -> dict | None:
     if not iv_skew_history:
         return None
     try:
-        from charts import _get_est_offset
+        from scripts.charts import _get_est_offset
         try:
             et_offset = _get_est_offset()
         except Exception:
@@ -1333,7 +1356,7 @@ def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_c
 
     # Try to get ET offset for consistent time conversion
     try:
-        from charts import _get_est_offset
+        from scripts.charts import _get_est_offset
         et_offset = _get_est_offset()
     except Exception:
         et_offset = 0

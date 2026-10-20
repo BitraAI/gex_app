@@ -15,10 +15,10 @@ async def get_gex_analytics(symbol: str = "SPY") -> str:
     when the index chain is unavailable, exactly as the app does.
     """
     try:
-        from analytics import compute_analytics
-        from calculations import parse_option_chain
-        from client import fetch_option_chain
-        from _constants import INDEX_SYMBOLS
+        from scripts.analytics import compute_analytics
+        from scripts.calculations import parse_option_chain
+        from scripts.client import fetch_option_chain
+        from scripts._constants import INDEX_SYMBOLS
 
         sym = symbol.upper()
         client = await _get_client()
@@ -28,7 +28,7 @@ async def get_gex_analytics(symbol: str = "SPY") -> str:
             raw = await fetch_option_chain(client, cc_sym, strike_count=75, include_quotes=True)
         data, spot = parse_option_chain(raw, r=r, q=q)
         if (not data or spot <= 0) and sym in INDEX_SYMBOLS:
-            from _constants import STREAM_SYMBOL_MAP
+            from scripts._constants import STREAM_SYMBOL_MAP
             etf = STREAM_SYMBOL_MAP.get(sym, sym)
             async with _schwab_sem:
                 fb_raw = await fetch_option_chain(client, etf, strike_count=75, include_quotes=True)

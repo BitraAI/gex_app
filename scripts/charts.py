@@ -765,30 +765,17 @@ def create_dealer_gamma_curve(
 def create_atm_iv_histogram(
     by_exp: list[dict[str, Any]],
     rv: float = 0.0,
-    ssvi_surface: Any = None,
-    spot: float = 0.0,
 ) -> go.Figure:
     """Create a bar chart of ATM IV by expiration date.
 
     Bars are colored by IV magnitude using a color scale.
     A horizontal line at RV is included.
-    When ``ssvi_surface`` and ``spot`` are provided, a SSVI ATM IV line is
-    overlaid.
     """
-    from datetime import datetime
-
     tmpl = TEMPLATE
     fig = go.Figure()
 
-    # Filter to entries that have expiration dates (weekdays)
-    weekdays = []
-    for e in by_exp:
-        try:
-            dt = datetime.strptime(e["expiration"], "%Y-%m-%d")
-            if dt.weekday() < 5:
-                weekdays.append(e)
-        except (ValueError, TypeError):
-            weekdays.append(e)
+    # Filter to entries that have expiration dates (weekdays), sort, label
+    weekdays, labels = _weekday_exp_chart_data(by_exp)
 
     if not weekdays:
         fig.add_annotation(
@@ -804,51 +791,11 @@ def create_atm_iv_histogram(
         )
         return fig
 
-    # Sort by expiration date
-    weekdays.sort(key=lambda e: e["expiration"])
-
-    # Format expiration labels as short date strings
-    labels = []
-    for e in weekdays:
-        try:
-            dt = datetime.strptime(e["expiration"], "%Y-%m-%d")
-            labels.append(dt.strftime("%m/%d"))
-        except (ValueError, TypeError):
-            labels.append(e["expiration"])
-
     atm_ivs = [e.get("atm_iv", 0.0) or 0.0 for e in weekdays]
     dtes = [e.get("dte", 0) or 0 for e in weekdays]
 
-    # Build a color scale based on IV magnitude
-    min_iv = min(atm_ivs) if atm_ivs else 0
-    max_iv = max(atm_ivs) if atm_ivs else 1
-    iv_range = max_iv - min_iv if max_iv > min_iv else 1
-
-    # Normalize IVs to [0, 1] for color mapping
-    norm_ivs = [(v - min_iv) / iv_range for v in atm_ivs]
-
-    # Create colors using a Viridis-like scale (greens for low, yellows for mid, reds for high)
-    colors = []
-    for n in norm_ivs:
-        if n < 0.33:
-            # Green range
-            t = n / 0.33
-            r = int(0 + t * 50)
-            g = int(200 - t * 30)
-            b = int(100 + t * 50)
-        elif n < 0.66:
-            # Yellow-orange range
-            t = (n - 0.33) / 0.33
-            r = int(50 + t * 205)
-            g = int(170 - t * 70)
-            b = int(150 - t * 100)
-        else:
-            # Red range
-            t = (n - 0.66) / 0.34
-            r = int(255)
-            g = int(100 - t * 70)
-            b = int(50 - t * 30)
-        colors.append(f"rgb({max(0, min(255, r))},{max(0, min(255, g))},{max(0, min(255, b))})")
+    # Build a color scale based on IV magnitude (greens for low, yellows for mid, reds for high)
+    colors = _iv_color_scale(atm_ivs)
 
     hover_template = (
         "<b>Expiration: %{x}</b><br>"
@@ -915,19 +862,11 @@ def create_vrp_chart(
     by_exp: list[dict[str, Any]],
     rv: float,
 ) -> go.Figure:
-    from datetime import datetime
 
     tmpl = TEMPLATE
     fig = go.Figure()
 
-    weekdays = []
-    for e in by_exp:
-        try:
-            dt = datetime.strptime(e["expiration"], "%Y-%m-%d")
-            if dt.weekday() < 5:
-                weekdays.append(e)
-        except (ValueError, TypeError):
-            weekdays.append(e)
+    weekdays, labels = _weekday_exp_chart_data(by_exp)
 
     if not weekdays or rv <= 0:
         fig.add_annotation(
@@ -942,15 +881,6 @@ def create_vrp_chart(
             font_color=tmpl["font_color"],
         )
         return fig
-
-    weekdays.sort(key=lambda e: e["expiration"])
-    labels = []
-    for e in weekdays:
-        try:
-            dt = datetime.strptime(e["expiration"], "%Y-%m-%d")
-            labels.append(dt.strftime("%m/%d"))
-        except (ValueError, TypeError):
-            labels.append(e["expiration"])
 
     atm_ivs = [e.get("atm_iv", 0.0) or 0.0 for e in weekdays]
     vals = [iv - rv for iv in atm_ivs]
@@ -1006,8 +936,6 @@ def create_vrp_chart(
 def create_iv_by_strike(
     strikes: list[dict[str, Any]],
     spot: float,
-    rv: float = 0.0,
-    iv_rank: float | None = None,
     ssvi_surface: Any = None,
     ssvi_tte: float | None = None,
 ) -> go.Figure:
@@ -1029,28 +957,7 @@ def create_iv_by_strike(
         for i, s in enumerate(strikes_sorted)
     ]
 
-    min_iv = min(iv) if iv else 0
-    max_iv = max(iv) if iv else 1
-    iv_range = max_iv - min_iv if max_iv > min_iv else 1
-    norm_ivs = [(v - min_iv) / iv_range for v in iv]
-    colors = []
-    for n in norm_ivs:
-        if n < 0.33:
-            t = n / 0.33
-            r = int(0 + t * 50)
-            g = int(200 - t * 30)
-            b = int(100 + t * 50)
-        elif n < 0.66:
-            t = (n - 0.33) / 0.33
-            r = int(50 + t * 205)
-            g = int(170 - t * 70)
-            b = int(150 - t * 100)
-        else:
-            t = (n - 0.66) / 0.34
-            r = int(255)
-            g = int(100 - t * 70)
-            b = int(50 - t * 30)
-        colors.append(f"rgb({max(0, min(255, r))},{max(0, min(255, g))},{max(0, min(255, b))})")
+    colors = _iv_color_scale(iv)
 
     # Moneyness tags for hover ("ATM", "OTM Call", "OTM Put") and bar edge styling
     otm_call_edge = "#1f77b4"   # blue edge for OTM calls (strikes above spot)
@@ -1253,7 +1160,17 @@ INDICATORS = {
 
 
 def _sma(values: list[float], period: int) -> list[float]:
-    return [sum(values[i-period+1:i+1]) / period for i in range(period-1, len(values))]
+    # Sliding running sum: O(n) instead of re-summing every window (O(n·period)).
+    out: list[float] = []
+    window = 0.0
+    start = period - 1
+    for i, v in enumerate(values):
+        window += v
+        if i >= period:
+            window -= values[i - period]
+        if i >= start:
+            out.append(window / period)
+    return out
 
 
 def _ema(values: list[float], period: int) -> list[float]:
@@ -1262,6 +1179,59 @@ def _ema(values: list[float], period: int) -> list[float]:
     for v in values[period:]:
         ema.append(v * k + ema[-1] * (1 - k))
     return ema
+
+
+def _weekday_exp_chart_data(by_exp: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Weekday-listed expirations sorted by date, with short MM/DD labels.
+
+    Entries with unparseable expirations are kept rather than dropped
+    (shared by the ATM-IV and VRP charts)."""
+    from datetime import datetime
+
+    weekdays = []
+    for e in by_exp:
+        try:
+            dt = datetime.strptime(e["expiration"], "%Y-%m-%d")
+            if dt.weekday() < 5:
+                weekdays.append(e)
+        except (ValueError, TypeError):
+            weekdays.append(e)
+
+    weekdays.sort(key=lambda e: e["expiration"])
+
+    labels = []
+    for e in weekdays:
+        try:
+            dt = datetime.strptime(e["expiration"], "%Y-%m-%d")
+            labels.append(dt.strftime("%m/%d"))
+        except (ValueError, TypeError):
+            labels.append(e["expiration"])
+    return weekdays, labels
+
+
+def _iv_color_scale(values: list[float]) -> list[str]:
+    """Map IVs onto a green → yellow-orange → red ramp, normalized to the
+    min/max of the given values (shared by the ATM-IV and IV-by-strike bars)."""
+    min_iv = min(values) if values else 0
+    max_iv = max(values) if values else 1
+    iv_range = max_iv - min_iv if max_iv > min_iv else 1
+    colors = []
+    for v in values:
+        n = (v - min_iv) / iv_range
+        if n < 0.33:
+            # Green range
+            t = n / 0.33
+            r, g, b = int(t * 50), int(200 - t * 30), int(100 + t * 50)
+        elif n < 0.66:
+            # Yellow-orange range
+            t = (n - 0.33) / 0.33
+            r, g, b = int(50 + t * 205), int(170 - t * 70), int(150 - t * 100)
+        else:
+            # Red range
+            t = (n - 0.66) / 0.34
+            r, g, b = 255, int(100 - t * 70), int(50 - t * 30)
+        colors.append(f"rgb({max(0, min(255, r))},{max(0, min(255, g))},{max(0, min(255, b))})")
+    return colors
 
 
 def _half_trend(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -56,6 +56,49 @@ def compute_strike_increment(options_data: list[dict]) -> float | None:
     if len(strikes) >= 2:
         return min(strikes[i + 1] - strikes[i] for i in range(len(strikes) - 1))
     return None
+
+
+_NY_TZ = ZoneInfo("America/New_York")
+_secs_since_930_cache: tuple[tuple[int, int], float] | None = None  # ((hh, mm), secs)
+
+
+def secs_since_market_open() -> float:
+    """Seconds elapsed since 09:30 ET today, clamped to the 09:30-16:00
+    session (0..23400).  Cached per minute — recomputed for thousands of
+    options per chain parse, and minute granularity is sufficient."""
+    global _secs_since_930_cache
+    now = datetime.now(_NY_TZ)
+    key = (now.hour, now.minute)
+    if _secs_since_930_cache is not None and _secs_since_930_cache[0] == key:
+        return _secs_since_930_cache[1]
+    secs = max(0, min(now.hour * 3600 + now.minute * 60 + now.second - 34200, 23400))
+    _secs_since_930_cache = (key, secs)
+    return secs
+
+
+def is_otm_or_atm(e: dict, spot: float) -> bool:
+    """True for OTM-or-ATM options relative to ``spot`` (shared moneyness filter)."""
+    return (e["type"] == "CALL" and e["strike"] >= spot) or (e["type"] == "PUT" and e["strike"] <= spot)
+
+
+def is_itm_or_atm(e: dict, spot: float) -> bool:
+    """True for ITM-or-ATM options relative to ``spot`` (shared moneyness filter)."""
+    return (e["type"] == "CALL" and e["strike"] <= spot) or (e["type"] == "PUT" and e["strike"] >= spot)
+
+
+def flow_metrics(call_buy, call_sell, put_buy, put_sell) -> tuple[int, int, float | None]:
+    """(net_flow, total_flow, flow_ratio) from the streamed per-side volumes.
+
+    ``None`` inputs count as 0; ``flow_ratio`` is None when there is no flow
+    at all yet (Telegram headers omit it, the Order Flow grid maps it to 0)."""
+    cb = call_buy or 0
+    cs = call_sell or 0
+    pb = put_buy or 0
+    ps = put_sell or 0
+    total = cb + ps + pb + cs
+    ratio = round((cb + ps) / total, 2) if total > 0 else None
+    net = cb + ps - pb - cs
+    return net, total, ratio
 
 
 def format_expiration(exp: str | None) -> str:

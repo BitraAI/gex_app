@@ -1,13 +1,13 @@
 import logging
 from typing import Any, Optional
 import numpy as np
-from calculations import (
+from scripts.calculations import (
     aggregate_by_strike,
     aggregate_by_expiration,
     compute_totals,
 )
-from svi import calibrate as calibrate_ssvi
-from svi import skew_for_tte as ssvi_skew_for_tte
+from scripts.svi import calibrate as calibrate_ssvi
+from scripts.svi import skew_for_tte as ssvi_skew_for_tte
 
 logger = logging.getLogger(__name__)
 
@@ -41,60 +41,6 @@ def _filter_strikes_near_atm(data: list[dict[str, Any]], spot: float, n: int = 2
     above = sorted([s for s in strikes if s > atm_strike], key=lambda x: abs(x - atm_strike))[:n]
     selected = below + [atm_strike] + above
     return [e for e in data if e["strike"] in selected]
-def get_filtered_strikes_for_analysis(
-    data: list[dict[str, Any]], spot: float, n: int = 20
-) -> list[tuple[float, float, float, float, float, float, float, float, str, str | None]]:
-    """Get filtered strikes for order flow support and resistance calculation.
-    
-    Returns:
-        A list of strikes in the order: 20 strikes below ATM, ATM strike, 20 strikes above ATM.
-        Each strike is returned as a tuple containing:
-        (strike, call_gex, put_gex, call_oi, put_oi, call_iv, put_iv, net_gex, expiration, dte)
-        
-    Args:
-        data: List of option data dictionaries
-        spot: Current spot price
-        n: Number of strikes to include below and above ATM (default: 20)
-    """
-    if not data:
-        return []
-    
-    strikes = sorted(set(e["strike"] for e in data))
-    
-    if not strikes:
-        return []
-    
-    atm_strike = min(strikes, key=lambda k: abs(k - spot))
-    
-    strike_map: dict[float, dict[str, Any]] = {}
-    for e in data:
-        strike_map[e["strike"]] = e
-
-    below_strikes = [s for s in strikes if s < atm_strike]
-    below_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
-
-    above_strikes = [s for s in strikes if s > atm_strike]
-    above_strikes.sort(key=lambda x: (abs(x - atm_strike), x))
-
-    selected_below = below_strikes[:n]
-    selected_above = above_strikes[:n]
-
-    def _row(strike: float) -> tuple:
-        d = strike_map.get(strike, {})
-        return (
-            strike,
-            d.get("call_gex", 0),
-            d.get("put_gex", 0),
-            d.get("call_oi", 0),
-            d.get("put_oi", 0),
-            d.get("call_iv", d.get("iv", 0)),
-            d.get("put_iv", d.get("iv", 0)),
-            d.get("net_gex", 0),
-            d.get("expiration"),
-            d.get("days_to_exp") or d.get("dte"),
-        )
-
-    return [_row(s) for s in selected_below] + [_row(atm_strike)] + [_row(s) for s in selected_above]
 
 
 def compute_analytics(
@@ -173,13 +119,11 @@ def compute_analytics(
     try:
         ssvi_res = calibrate_ssvi(_full, spot, r=r, q=q)
         analytics["ssvi_surface"] = ssvi_res["surface"]
-        analytics["ssvi_skew"] = ssvi_res["skew"]
         if analytics.get("atm_iv") is None and ssvi_res["atm_iv"] is not None:
             analytics["atm_iv"] = round(ssvi_res["atm_iv"], 4)
     except Exception as exc:
         logger.warning("SSVI calibration failed: %s", exc, exc_info=True)
         analytics["ssvi_surface"] = None
-        analytics["ssvi_skew"] = None
 
     # Compute the skew on the full (untruncated) chain so every strike for the
     # selected expiration is available — ``data`` may be ATM-range limited.

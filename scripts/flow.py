@@ -18,25 +18,25 @@ from collections import deque
 from datetime import datetime
 from functools import partial
 from zoneinfo import ZoneInfo
-from _constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT,
+from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT,
                         FLOW_WATCHDOG_STALE_SECONDS,
                         ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE)
-from _utils import compute_strike_increment, format_expiration
-from option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol, _ABSORPTION_MIN_VOL
-from client import fetch_quotes
-from calculations import calculate_atm_strike
+from scripts._utils import compute_strike_increment, format_expiration, flow_metrics
+from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol, _ABSORPTION_MIN_VOL
+from scripts.client import fetch_quotes
+from scripts.calculations import calculate_atm_strike
 
-from analytics import compute_analytics
-from calculations import build_greeks_lookup, parse_option_chain
-from client import (
+from scripts.analytics import compute_analytics
+from scripts.calculations import build_greeks_lookup, parse_option_chain
+from scripts.client import (
     compute_iv_rank,
     fetch_option_chain,
     get_20d_rv,
     get_interest_rate,
     get_yield,
 )
-from signals import build_strategy_alerts
-from telegram_notifier import diff_alerts, notify_alerts
+from scripts.signals import build_strategy_alerts
+from scripts.telegram_notifier import diff_alerts, notify_alerts
 
 
 # Per-ticker analytics cache + event-driven trigger tracking
@@ -572,15 +572,6 @@ _WALL_ZONE_ALERT_COOLDOWN = 600.0  # min seconds between consecutive alerts per 
 _ABSORPTION_HIGH = 1000.0  # heavy flow absorbed, price pinned
 _ABSORPTION_LOW = 300.0    # price drifting on thin flow
 
-# Number of consecutive samples spot must stay *past* a broken wall (beyond
-# the near-wall margin) before a "wall broke" alert fires.  Confirmation stops
-# jitter right at the level from being misreported as a break.
-_WALL_BREAK_CONFIRM = 2
-
-# Minimum contracts absorbed for a meaningful wall break (avoids noise from
-# insignificant breaks with negligible flow).
-_MIN_WALL_BREAK_CONTRACTS = 100
-
 # Conviction gate for Telegram trend alerts: only reversals (bullish/bearish)
 # are surfaced as alerts now; the plain up/down direction no longer fires a
 # Telegram alert. Reversals need _ALERT_MIN_CONVICTION_REVERSAL metric
@@ -616,51 +607,6 @@ def _wall_price_marks(
         _call_p = wall_prices.get("put_wall_call_price") or opt_prices.get("call_price")
         _put_p = wall_prices.get("put_wall_put_price") or opt_prices.get("put_price")
     return _call_p, _put_p
-
-
-def _opt_mark_at_wall(
-    buy_side: str,
-    wall_strike: float | None,
-    call_wall: float | None,
-    put_wall: float | None,
-    wall_prices: dict,
-) -> float | None:
-    """Return the CALL/PUT option mark at a specific wall strike."""
-    if buy_side == "CALL":
-        return (
-            wall_prices.get("call_wall_call_price")
-            if wall_strike == call_wall
-            else wall_prices.get("put_wall_call_price")
-        )
-    return (
-        wall_prices.get("call_wall_put_price")
-        if wall_strike == call_wall
-        else wall_prices.get("put_wall_put_price")
-    )
-
-
-def _front_exp_tag(front_exp: str | None) -> str:
-    """Format a 'YYYY-MM-DD' expiration as a ' mm/dd' suffix ('' if missing)."""
-    if front_exp and len(front_exp) >= 10 and front_exp[4] == "-":
-        return f" {front_exp[5:7]}/{front_exp[8:10]}"
-    return ""
-
-
-def _trade_line(
-    buy_side: str,
-    wall_strike: float | None,
-    call_wall: float | None,
-    put_wall: float | None,
-    wall_prices: dict,
-    front_exp: str | None,
-) -> str:
-    """Build a '🟢 BUY CALL @ $strike dd/mm $price' trade-suggestion line used
-    by both the wall-broke and wall-reversal alerts."""
-    _trade_emoji = "🟢" if buy_side == "CALL" else "🔴"
-    _strike_tag = f" @ ${wall_strike:,.2f}" if wall_strike is not None else ""
-    _opt_price = _opt_mark_at_wall(buy_side, wall_strike, call_wall, put_wall, wall_prices)
-    _price_tag = f" ${_opt_price:,.2f}" if _opt_price is not None else ""
-    return f"{_trade_emoji} BUY {buy_side}{_strike_tag}{_front_exp_tag(front_exp)}{_price_tag}"
 
 
 def _conviction_score(
@@ -888,17 +834,15 @@ def maybe_fire_wall_zone_alerts() -> None:
             next_state["_last_alert_texts"] = new_alerts
             state[t_upper] = next_state
             _cache = _ticker_analytics_cache.get(t_upper.split(":")[0]) or {}
-            _rv = _cache.get("rv", 0.0)
             # Flow ratio for Telegram header
-            _call_buy = atm_svc.get_ticker_call_buy(t_upper) if atm_svc else 0
-            _call_sell = atm_svc.get_ticker_call_sell(t_upper) if atm_svc else 0
-            _put_buy = atm_svc.get_ticker_put_buy(t_upper) if atm_svc else 0
-            _put_sell = atm_svc.get_ticker_put_sell(t_upper) if atm_svc else 0
-            _total_flow = (_call_buy or 0) + (_put_sell or 0) + (_put_buy or 0) + (_call_sell or 0)
-            _flow_ratio = round(((_call_buy or 0) + (_put_sell or 0)) / _total_flow, 2) if _total_flow > 0 else None
+            _, _, _flow_ratio = flow_metrics(
+                atm_svc.get_ticker_call_buy(t_upper) if atm_svc else None,
+                atm_svc.get_ticker_call_sell(t_upper) if atm_svc else None,
+                atm_svc.get_ticker_put_buy(t_upper) if atm_svc else None,
+                atm_svc.get_ticker_put_sell(t_upper) if atm_svc else None,
+            )
             notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
-                          gex=_cache.get("net_gex"), rv=_rv if _rv > 0 else None,
-                          iv_rank=_cache.get("iv_rank"),
+                          gex=_cache.get("net_gex"),
                           wall_zone=wall_zone, pw=put_wall, cw=call_wall,
                           wall_mark=analytics.get("call_wall_mark") if wall_zone == "Resistance" else analytics.get("put_wall_mark"),
                           trend_alert=_trend_signal,
@@ -991,7 +935,6 @@ async def _compute_for_symbol(client, symbol: str) -> dict | None:
                     analytics[key] = etf_analytics[key]
         if analytics.get("ssvi_surface") is None and etf_analytics.get("ssvi_surface") is not None:
             analytics["ssvi_surface"] = etf_analytics["ssvi_surface"]
-            analytics["ssvi_skew"] = etf_analytics["ssvi_skew"]
         if analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
             analytics["atm_iv"] = etf_analytics["atm_iv"]
 
@@ -1178,12 +1121,12 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
 
         if tg_alerts and now_ts - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
             # Flow ratio for Telegram header
-            _call_buy = atm_svc.get_ticker_call_buy(display_key) if atm_svc else 0
-            _call_sell = atm_svc.get_ticker_call_sell(display_key) if atm_svc else 0
-            _put_buy = atm_svc.get_ticker_put_buy(display_key) if atm_svc else 0
-            _put_sell = atm_svc.get_ticker_put_sell(display_key) if atm_svc else 0
-            _total_flow = (_call_buy or 0) + (_put_sell or 0) + (_put_buy or 0) + (_call_sell or 0)
-            _flow_ratio = round(((_call_buy or 0) + (_put_sell or 0)) / _total_flow, 2) if _total_flow > 0 else None
+            _, _, _flow_ratio = flow_metrics(
+                atm_svc.get_ticker_call_buy(display_key) if atm_svc else None,
+                atm_svc.get_ticker_call_sell(display_key) if atm_svc else None,
+                atm_svc.get_ticker_put_buy(display_key) if atm_svc else None,
+                atm_svc.get_ticker_put_sell(display_key) if atm_svc else None,
+            )
             # Absorption for Telegram header
             _absorption = atm_svc.get_ticker_absorption(display_key) if atm_svc else None
             next_sym_state["last_alert_ts"] = now_ts
@@ -1192,7 +1135,7 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                 notify_alerts, tg_alerts,
                 symbol=api_symbol, spot=spot,
                 gex=analytics.get("net_gex"),
-                iv_rank=iv_rank, wall_zone=_wall_zone, pw=_pw, cw=_cw,
+                wall_zone=_wall_zone, pw=_pw, cw=_cw,
                     flow_ratio=_flow_ratio,
                     absorption=_absorption,
                     disable_notification=False,
@@ -1204,7 +1147,7 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
             os.makedirs(_BASE_DIR, exist_ok=True)
             tmp = _ALERT_STATE_FILE + ".tmp"
             with open(tmp, "w") as f:
-                json.dump(state, f, indent=2)
+                json.dump(state, f)
             os.replace(tmp, _ALERT_STATE_FILE)
         except Exception as exc:
             logger.error("failed to persist alert state: %s", exc)
@@ -1291,14 +1234,6 @@ def render_market_status():
         f'<span style="font-size:22px;font-weight:500;">{_label}</span></div>',
         unsafe_allow_html=True,
     )
-
-
-def _format_expiration(exp: str | None) -> str:
-    """Format expiration date into MM-DD (X days) for display.
-    
-    Returns empty string for None/invalid input.
-    """
-    return format_expiration(exp)
 
 
 def render_flow_legend_and_style():
@@ -1441,13 +1376,13 @@ def render_atm_order_flow_grid():
                 _trend_state[t_upper] = {"candidate": _candidate, "streak": _streak, "display": _display}
                 trend_display = _display
 
-            _call_buy = atm_svc.get_ticker_call_buy(t_upper) if atm_svc else 0
-            _call_sell = atm_svc.get_ticker_call_sell(t_upper) if atm_svc else 0
-            _put_buy = atm_svc.get_ticker_put_buy(t_upper) if atm_svc else 0
-            _put_sell = atm_svc.get_ticker_put_sell(t_upper) if atm_svc else 0
-            _net_flow = _call_buy + _put_sell - _put_buy - _call_sell
-            _total_flow = _call_buy + _put_sell + _put_buy + _call_sell
-            _flow_ratio = round((_call_buy + _put_sell) / _total_flow, 2) if _total_flow > 0 else 0.0
+            _net_flow, _total_flow, _flow_ratio = flow_metrics(
+                atm_svc.get_ticker_call_buy(t_upper) if atm_svc else None,
+                atm_svc.get_ticker_call_sell(t_upper) if atm_svc else None,
+                atm_svc.get_ticker_put_buy(t_upper) if atm_svc else None,
+                atm_svc.get_ticker_put_sell(t_upper) if atm_svc else None,
+            )
+            _flow_ratio = _flow_ratio or 0.0
             rows.append({
                 "Ticker": t_upper,
                 "Spot": spot,
@@ -1496,34 +1431,6 @@ def render_atm_order_flow_grid():
     # HTML table instead: `table-layout: fixed` distributes the tab width
     # evenly across the columns and the headers wrap onto multiple lines
     # (see render_flow_legend_and_style for the `.flow-grid` CSS).
-    def _book_imbalance_color(val):
-        """Color the book imbalance value based on magnitude."""
-        if val is None:
-            return ""
-        if val > 0.3:
-            return "color: #00cc96; font-weight: bold;"
-        if val < -0.3:
-            return "color: #ef5350; font-weight: bold;"
-        return "color: #ff9800; font-weight: bold;"
-
-    def _flow_speed_color(val):
-        if val is None:
-            return ""
-        if val > 0:
-            return "color: #00cc96; font-weight: bold;"
-        if val < 0:
-            return "color: #ef5350; font-weight: bold;"
-        return "color: #ff9800; font-weight: bold;"
-
-    def _flow_acceleration_color(val):
-        if val is None:
-            return ""
-        if val > 0:
-            return "color: #00cc96; font-weight: bold;"
-        if val < 0:
-            return "color: #ef5350; font-weight: bold;"
-        return "color: #ff9800; font-weight: bold;"
-
     def _absorption_color(val):
         """Color order absorption (contracts per $1): green = heavy flow
         absorbed with little price move, red = price drifting on thin flow."""
@@ -1567,102 +1474,21 @@ def render_atm_order_flow_grid():
         return "color: #ff9800; font-weight: bold;"
 
     def _spot_bg(row):
-        """Background color for the Spot cell based on wall break/reversal alerts and zone membership."""
-        s = st.session_state
+        """Background color for the Spot cell based on support/resistance zone membership."""
         spot = row["Spot"]
         support = row["Support"]
         resistance = row["Resistance"]
-        
+
         # GREEN if spot is in support zone (between support - buffer and support + buffer)
         if support is not None and spot is not None:
             if support - _wall_buffer(support) <= spot <= support + _wall_buffer(support):
                 return "background-color: #ccffcc; font-weight: bold;"  # GREEN for support zone
-        
+
         # RED if spot is in resistance zone (between resistance - buffer and resistance + buffer)
         if resistance is not None and spot is not None:
             if resistance - _wall_buffer(resistance) <= spot <= resistance + _wall_buffer(resistance):
                 return "background-color: #ffcccc; font-weight: bold;"  # RED for resistance zone
-        
-        # Check for wall break alerts (overrides zone-based colors)
-        if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
-            alert = s._wall_break_alerts[row["Ticker"]]
-            if alert.get("zone") == "Support":
-                return "background-color: #b71c1c; color: #ffffff; font-weight: bold;"  # DARK RED for Support wall broke
-            if alert.get("zone") == "Resistance":
-                return "background-color: #1b5e20; color: #ffffff; font-weight: bold;"  # DARK GREEN for Resistance wall broke
-        
-        # Check for wall reversal alerts (lower priority)
-        if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
-            alert = s._wall_reversal_alerts[row["Ticker"]]
-            if alert.get("zone") == "Support":
-                return "background-color: #ccffcc;"  # GREEN for Support wall reversal
-            if alert.get("zone") == "Resistance":
-                return "background-color: #ffcccc;"  # RED for Resistance wall reversal
-        
-        return ""
 
-    def _support_bg(row):
-        """Background for the Support cell: RED when Support wall broke, GREEN when Support wall reversal occurred."""
-        spot = row["Spot"]
-        support = row["Support"]
-        # RED if Support wall broke in this ticker
-        if spot is not None and support is not None:
-            if spot <= support + _wall_buffer(support):
-                # Check if this is a wall break event
-                s = st.session_state
-                if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
-                    alert = s._wall_break_alerts[row["Ticker"]]
-                    if alert.get("zone") == "Support":
-                        return "background-color: #ffcccc;"  # RED for Support wall broke
-                # GREEN if this is a reversal event
-                if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
-                    alert = s._wall_reversal_alerts[row["Ticker"]]
-                    if alert.get("zone") == "Support":
-                        return "background-color: #ccffcc;"  # GREEN for Support wall reversal
-        return ""
-
-    def _resistance_bg(row):
-        """Background for the Resistance cell: GREEN when Resistance wall broke, RED when Resistance wall reversal occurred."""
-        spot = row["Spot"]
-        resistance = row["Resistance"]
-        # GREEN if Resistance wall broke, RED if Resistance wall reversal in this ticker
-        if spot is not None and resistance is not None:
-            if spot >= resistance - _wall_buffer(resistance):
-                s = st.session_state
-                # Check for Resistance wall break event
-                if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
-                    alert = s._wall_break_alerts[row["Ticker"]]
-                    if alert.get("zone") == "Resistance":
-                        return "background-color: #ccffcc;"  # GREEN for Resistance wall broke
-                # Check for Resistance wall reversal event
-                if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
-                    alert = s._wall_reversal_alerts[row["Ticker"]]
-                    if alert.get("zone") == "Resistance":
-                        return "background-color: #ffcccc;"  # RED for Resistance wall reversal
-        return ""
-
-    def _call_price_bg(row):
-        """Background for the Call Price cell: GREEN for Resistance wall broke
-        or reversal at Support wall."""
-        s = st.session_state
-        if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
-            if s._wall_break_alerts[row["Ticker"]].get("zone") == "Resistance":
-                return "background-color: #ccffcc;"
-        if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
-            if s._wall_reversal_alerts[row["Ticker"]].get("zone") == "Support":
-                return "background-color: #ccffcc;"
-        return ""
-
-    def _put_price_bg(row):
-        """Background for the Put Price cell: GREEN for Support wall broke
-        or reversal at Resistance wall."""
-        s = st.session_state
-        if hasattr(s, "_wall_break_alerts") and row["Ticker"] in s._wall_break_alerts:
-            if s._wall_break_alerts[row["Ticker"]].get("zone") == "Support":
-                return "background-color: #ccffcc;"
-        if hasattr(s, "_wall_reversal_alerts") and row["Ticker"] in s._wall_reversal_alerts:
-            if s._wall_reversal_alerts[row["Ticker"]].get("zone") == "Resistance":
-                return "background-color: #ccffcc;"
         return ""
 
     def _fmt_money(v):
@@ -1674,37 +1500,6 @@ def render_atm_order_flow_grid():
     def _fmt_commas(v):
         return f"{v:,.0f}" if v is not None else ""
 
-    def _trend_color(row):
-        """Color the Trend label (up/down/flat/bullish/bearish/EMA 50 UP/DOWN) by direction.
-
-        Reversal labels (bullish/bearish) are bolded to surface the flip;
-        up/down are green/red; flat is amber.
-        EMA 50 UP/DOWN use the same colors as up/down.
-
-        When spot leaves the support zone (upwards), trend shows UP in GREEN.
-        """
-        val = row["Trend"]
-        spot = row["Spot"]
-        support = row["Support"]
-        
-        if val is None:
-            return ""
-        
-        # When spot leaves support zone (moves away from support wall), show UP in GREEN
-        # This indicates bullish sentiment as spot moves away from support
-        if spot is not None and support is not None:
-            if spot > support + _wall_buffer(support):  # Spot has left support zone upwards
-                return "color: #00cc96; font-weight: bold;"
-        
-        val_l = val.lower()
-        if val_l in ("bearish", "down"):
-            return "color: #ef5350; font-weight: bold;"
-        if val_l in ("bullish", "up", "ema 50 up"):
-            return "color: #00cc96; font-weight: bold;"
-        if val_l == "ema 50 down":
-            return "color: #ef5350; font-weight: bold;"
-        return "color: #ff9800; font-weight: bold;"
-
     def _mk_color(col_name, color_fn):
         def _c(row):
             return color_fn(row[col_name])
@@ -1713,11 +1508,11 @@ def render_atm_order_flow_grid():
     cols = [
         ("Ticker", "left", lambda v: html.escape(str(v)) if v is not None else "", None),
         ("Spot", "center", _fmt_money, _spot_bg),
-        ("Expiration", "center", lambda v: html.escape(_format_expiration(v)), None),
-        ("Support", "right", _fmt_money, _support_bg),
-        ("Resistance", "right", _fmt_money, _resistance_bg),
-        ("Call Price", "right", _fmt_money, _call_price_bg),
-("Put Price", "right", _fmt_money, _put_price_bg),
+        ("Expiration", "center", lambda v: html.escape(format_expiration(v)), None),
+        ("Support", "right", _fmt_money, None),
+        ("Resistance", "right", _fmt_money, None),
+        ("Call Price", "right", _fmt_money, None),
+        ("Put Price", "right", _fmt_money, None),
         ("Flow Ratio", "right", lambda v: f"{v:.2f}", _mk_color("Flow Ratio", _flow_ratio_color)),
         ("Net Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Net Flow", _net_flow_color)),
         ("Liquidity Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Liquidity Flow", _liquidity_flow_color)),

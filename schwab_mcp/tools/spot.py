@@ -11,7 +11,7 @@ async def get_spot(symbols: list[str]) -> str:
     where the OAuth API requires it (SPX -> $SPX is handled internally).
     """
     try:
-        from client import fetch_quotes
+        from scripts.client import fetch_quotes
         async with _schwab_sem:
             quotes = await fetch_quotes(await _get_client(), symbols)
         out = {}

@@ -22,7 +22,7 @@ async def get_option_chain(
     lastPrice, volume, openInterest, delta, gamma, theta, vega.
     """
     try:
-        from client import fetch_option_chain
+        from scripts.client import fetch_option_chain
         from_date = date.today().isoformat()
         to_date = (date.today() + timedelta(days=420)).isoformat()
         async with _schwab_sem:

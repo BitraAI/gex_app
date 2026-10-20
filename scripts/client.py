@@ -6,12 +6,12 @@ import pandas as pd
 from schwab import auth
 from schwab.client import AsyncClient
 
-from config import (
+from scripts.config import (
     CLIENT_ID,
     CLIENT_SECRET,
     TOKEN_PATH,
 )
-from _utils import to_json as _to_json, load_json, save_json
+from scripts._utils import to_json as _to_json, load_json, save_json
 
 CANDLE_CACHE_DIR = Path.home() / ".local" / "share" / "gex_app" / "candles"
 
@@ -196,18 +196,18 @@ def historical_volatility(prices: list[float], length: int = 20) -> float:
        HV = stdev(log(close_i / close_{i-1}), length) * sqrt(252)
        using rolling sample standard deviation (ddof=1).
     """
-    import math, statistics
+    import math
+    # Only the final `length` log-return window is ever returned, so build just
+    # that one instead of every rolling window over the full history.
     if len(prices) < length + 1:
         return 0.0
-    log_returns = [
-        math.log(prices[i] / prices[i - 1])
-        for i in range(1, len(prices))
-    ]
-    rolling_stdevs = [
-        statistics.pstdev(log_returns[i - length:i])
-        for i in range(length, len(log_returns) + 1)
-    ]
-    return rolling_stdevs[-1] * math.sqrt(252 * length / (length - 1))
+    tail = prices[-(length + 1):]
+    log_returns = [math.log(tail[i] / tail[i - 1]) for i in range(1, len(tail))]
+    if len(log_returns) < length:
+        return 0.0
+    mean = sum(log_returns) / length
+    var = sum((x - mean) ** 2 for x in log_returns) / length  # population stdev
+    return math.sqrt(var) * math.sqrt(252 * length / (length - 1))
 
 
 TIMEFRAMES = {
@@ -314,6 +314,19 @@ def load_candle_cache(symbol: str, timeframe: str) -> pd.DataFrame:
     if p.exists():
         try:
             return pd.read_parquet(p)
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
+def load_last_cached_timestamp(symbol: str, timeframe: str) -> pd.DataFrame:
+    """Timestamp-only freshness probe: reads just the ``datetime`` column of
+    the Parquet cache (columnar read) instead of the full frame.  The candle
+    fragment calls this every tick to decide whether the cache is stale."""
+    p = _cache_path(symbol, timeframe)
+    if p.exists():
+        try:
+            return pd.read_parquet(p, columns=["datetime"])
         except Exception:
             pass
     return pd.DataFrame()

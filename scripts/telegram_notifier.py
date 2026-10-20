@@ -23,9 +23,9 @@ import urllib.error
 import urllib.request
 from typing import Any, Iterable, Optional
 
-import config
+from scripts import config
 
-from _constants import FLOW_RATIO_GREEN_THRESHOLD, FLOW_RATIO_RED_THRESHOLD
+from scripts._constants import FLOW_RATIO_GREEN_THRESHOLD, FLOW_RATIO_RED_THRESHOLD
 
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,6 @@ def notify_alerts(
     symbol: Optional[str] = None,
     spot: Optional[float] = None,
     gex: Optional[float] = None,
-    iv_rank: Optional[float] = None,
     wall_zone: Optional[str] = None,
     pw: Optional[float] = None,
     cw: Optional[float] = None,
@@ -114,7 +113,6 @@ def notify_alerts(
     absorption: Optional[float] = None,
     absorbed_at_wall: Optional[float] = None,
     net_flow: Optional[float] = None,
-    rv: Optional[float] = None,
     flow_ratio: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
@@ -132,17 +130,17 @@ def notify_alerts(
     # actionable when the market is closed, and stale quotes would only
     # re-fire dupes overnight.
     try:
-        from flow import is_market_open
+        from scripts.flow import is_market_open
         if not is_market_open():
             logger.debug("market closed — suppressing Telegram alerts for %s",
                           symbol or "?")
             return False
     except Exception as exc:  # noqa: BLE001 — never block alerts on import error
         logger.warning("is_market_open check failed: %s", exc)
-    text = _format(alerts, symbol=symbol, spot=spot, gex=gex, iv_rank=iv_rank,
+    text = _format(alerts, symbol=symbol, spot=spot, gex=gex,
                     wall_zone=wall_zone, pw=pw, cw=cw, wall_mark=wall_mark, trend_alert=trend_alert,
                     absorption=absorption, absorbed_at_wall=absorbed_at_wall,
-                    net_flow=net_flow, rv=rv, flow_ratio=flow_ratio)
+                    net_flow=net_flow, flow_ratio=flow_ratio)
     return send_telegram(text, disable_notification=disable_notification)
 
 
@@ -217,7 +215,7 @@ def diff_alerts(
     return new_alerts, cur
 
 
-def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, iv_rank: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None, rv: Optional[float] = None, flow_ratio: Optional[float] = None) -> str:
+def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None, flow_ratio: Optional[float] = None) -> str:
     """Build an HTML-formatted message from a list of alert strings."""
     # Trend alerts carry the flow-metric signal line, so those metrics are
     # folded into it instead of duplicated as separate header rows.
@@ -227,8 +225,6 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         header_lines.append(f"<b>{_escape_html(symbol)}</b>")
     if spot is not None:
         header_lines.append(f"Price: <code>{spot:,.2f}</code>")
-    if iv_rank is not None:
-        pass  # Remove IV Rank line
     if gex is not None:
         emoji = "🟢" if gex > 0 else "🔴"
         header_lines.append(f"{emoji} GEX: <code>{gex:,.0f}</code>")
