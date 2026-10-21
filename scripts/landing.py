@@ -11,7 +11,6 @@ pill CTAs, and huge tight serif-free headlines.
 """
 import logging
 import os
-import shutil
 
 import streamlit as st
 
@@ -22,37 +21,27 @@ log = logging.getLogger("gex.landing")
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _STATIC_DIR = os.path.join(_BASE, "static")
 _LANDING_DIR = os.path.join(_STATIC_DIR, "landing")
-_ASSETS_DIR = os.path.join(_BASE, "assets")
 
-_HERO_IMAGE = "CandleSticks.png"
+_HERO_IMAGE = "Candlesticks.png"
 _FEATURES = [
-    ("CandleSticks.png", "Candlesticks", "Institutional charts: live streaming bars, Andean oscillator, Half Trend, VPVR — pan both axes, zoom anything."),
+    ("Candlesticks.png", "Candlesticks", "Institutional charts: live streaming bars, Andean oscillator, Half Trend, VPVR — pan both axes, zoom anything."),
     ("OrderFlow.png", "Order Flow", "Real-time ATM flow grid: book imbalance, absorption, conviction scoring, and wall-zone alerts, second by second."),
-    ("OpenInterest.png", "Walls & Levels", "Call and put walls by strike and by expiration — the dealer positioning map for every ticker you track."),
     ("TradeSignals.png", "Signals", "A strategy engine that scores every expiration and hands you ranked trade cards with reasoning attached."),
     ("Metrics.png", "Metrics", "GEX by strike, by expiration, flip points, and delta-weighted net flow — refreshed while the market breathes."),
-    ("VolatilitySurface.png", "Volatility", "SSVI surface calibration, IV skew, and ATM histograms rendered straight from the live chain."),
-    ("GEXbyStrike.png", "Market Structure", "GEX by strike with Call Wall / Put Wall / Gamma Flip overlays, an expandable gamma surface, and a dealer curve across GEX / VEX / CEX."),
+    ("Volatility.png", "Volatility", "ATM implied vol by expiration and by strike, benchmarked against realized vol, with a variance-risk-premium view and an expiration-range slider."),
+    ("MarketStructure.png", "Market Structure", "GEX by strike and by expiration, an expandable gamma surface, and the dealer curve — Call Wall and Put Wall strikes pinned right on the chart."),
     ("OptionsData.png", "Options Data", "A sortable full-chain grid: gamma, OI, volume, SSVI IV and richness per strike — ATM row, wall strikes, and max-pain highlighted, CSV export built in."),
-    ("Volume.png", "Positioning", "Open interest and volume laid out across strikes and expirations — automatic ±20-strike ATM window on the nearest 4 active expirations."),
+    ("Positioning.png", "Positioning", "Call vs put open interest across every strike with the spot line drawn through — one toggle swaps the whole layout to volume."),
+    ("UnusualTrades.png", "Unusual Trades", "A scanner across all tracked tickers: min volume, Vol/OI, premium, and DTE filters that surface the options activity that doesn't belong."),
 ]
 
-def _ensure_landing_assets() -> bool:
-    """Copy the screenshots used on the landing page into static/landing/."""
+def _ensure_landing_images() -> bool:
+    """Verify every screenshot referenced by the landing page exists."""
     try:
-        os.makedirs(_LANDING_DIR, exist_ok=True)
-        copied = False
         for name in [_HERO_IMAGE] + [f for f, _, _ in _FEATURES]:
-            src = os.path.join(_ASSETS_DIR, name)
-            dst = os.path.join(_LANDING_DIR, name)
-            if not os.path.exists(src):
-                continue
-            if not os.path.exists(dst) or (
-                os.path.getmtime(src) != os.path.getmtime(dst)
-                or os.path.getsize(src) != os.path.getsize(dst)
-            ):
-                shutil.copy2(src, dst)
-                copied = True
+            if not os.path.exists(os.path.join(_LANDING_DIR, name)):
+                log.warning("Landing image missing: static/landing/%s", name)
+                return False
         return True
     except Exception:
         return False
@@ -431,7 +420,7 @@ def _auth_card() -> None:
 
 def render_landing() -> None:
     """Draw the full Robinhood-style landing page and block sign-in state."""
-    _ensure_landing_assets()
+    _ensure_landing_images()
     st.markdown(_shell_html(), unsafe_allow_html=True)
 
     st.markdown(
