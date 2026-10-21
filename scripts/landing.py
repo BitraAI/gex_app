@@ -1,9 +1,9 @@
 """Robinhood-style landing page for GammaEx (gex_app).
 
 Rendered while no user is signed in: promo bar, sticky nav, oversized
-tight-tracked hero, live-feel ticker tape, feature cards built from the app's
-real screenshots, a dark band, trust cards, the Log in / Sign up card
-(Streamlit widgets so validation just works), and a legal footer.
+tight-tracked hero, feature cards built from the app's real screenshots,
+a dark band, trust cards, the Log in / Sign up card (Streamlit widgets so
+validation just works), and a legal footer.
 
 Brand tokens lifted from robinhood.com's stylesheet: primary green
 ``--rh__primary-base`` = #00c805, ink #040d14, neutral greys #f4f4f5/#e6e6e6,
@@ -32,21 +32,10 @@ _FEATURES = [
     ("TradeSignals.png", "Signals", "A strategy engine that scores every expiration and hands you ranked trade cards with reasoning attached."),
     ("Metrics.png", "Metrics", "GEX by strike, by expiration, flip points, and delta-weighted net flow — refreshed while the market breathes."),
     ("VolatilitySurface.png", "Volatility", "SSVI surface calibration, IV skew, and ATM histograms rendered straight from the live chain."),
+    ("GEXbyStrike.png", "Market Structure", "GEX by strike with Call Wall / Put Wall / Gamma Flip overlays, an expandable gamma surface, and a dealer curve across GEX / VEX / CEX."),
+    ("OptionsData.png", "Options Data", "A sortable full-chain grid: gamma, OI, volume, SSVI IV and richness per strike — ATM row, wall strikes, and max-pain highlighted, CSV export built in."),
+    ("Volume.png", "Positioning", "Open interest and volume laid out across strikes and expirations — automatic ±20-strike ATM window on the nearest 4 active expirations."),
 ]
-
-_TICKER_ITEMS = [
-    ("SPY", "+0.42%", "up"), ("QQQ", "+0.31%", "up"), ("$SPX", "+0.47%", "up"),
-    ("IWM", "-0.18%", "down"), ("VIX", "-1.24%", "down"), ("NVDA", "+1.62%", "up"),
-    ("AAPL", "+0.55%", "up"), ("TSLA", "-0.84%", "down"), ("AMZN", "+0.27%", "up"),
-    ("META", "+0.91%", "up"), ("MSFT", "+0.36%", "up"), ("AMD", "-0.66%", "down"),
-    ("GME", "+2.31%", "up"), ("PLTR", "+1.05%", "up"), ("RUT", "+0.21%", "up"),
-]
-
-_TICKER_HTML = "".join(
-    f'<span class="tk-sym">{sym}</span><span class="tk-price {cls}">{chg}</span>'
-    for sym, chg, cls in _TICKER_ITEMS
-)
-
 
 def _ensure_landing_assets() -> bool:
     """Copy the screenshots used on the landing page into static/landing/."""
@@ -96,7 +85,7 @@ def _shell_html() -> str:
       <div class="nav-links">
         <a href="#features">Product</a>
         <a href="#trust">Security</a>
-        <a href="#learn">Learn</a>
+        <a href="#open-account">Account</a>
       </div>
       <div class="nav-cta">
         <a class="nav-login" href="#open-account">Log in</a>
@@ -122,12 +111,6 @@ def _shell_html() -> str:
       </div>
     </div>
 
-    <div class="tape" aria-hidden="true">
-      <div class="tape-track">
-        <span class="tape-set">{_TICKER_HTML}</span>
-        <span class="tape-set">{_TICKER_HTML}</span>
-      </div>
-    </div>
   </section>
 
   <section class="section" id="features">
@@ -165,7 +148,7 @@ def _shell_html() -> str:
     </div>
   </section>
 
-  <div id="learn"></div>
+  </div>
 </div>
 """
 
@@ -175,12 +158,12 @@ def _footer_html() -> str:
 <div class="gh-rh-footer">
   <div class="footer-inner">
     <div class="footer-disc">
-      <p><b>GexApp is a local analytics tool, not a broker.</b> It reads your own
-      Schwab API credential and shows analytics derived from that data. Nothing
-      here is investment advice and no orders are routed by this application.
-      Options trading entails significant risk and is not appropriate for all
-      customers. Review the Characteristics and Risks of Standardized Options
-      before trading.</p>
+      <p><b>GammaEx is a local analytics tool, not a broker.</b> It reads your
+      own Schwab API credentials and shows analytics derived from that data.
+      Nothing here is investment advice and no orders are routed by this
+      application. Options trading entails significant risk and is not
+      appropriate for all customers. Review the Characteristics and Risks of
+      Standardized Options before trading.</p>
       <p class="footer-copy">&copy; 2026 GammaEx Analytics. All rights reserved.</p>
     </div>
   </div>
@@ -194,8 +177,6 @@ def _css() -> str:
 :root {
   --gh-green: #00c805;
   --gh-green-hover: #00b302;
-  --gh-up: #21ce99;
-  --gh-down: #ff5000;
   --gh-ink: #040d14;
   --gh-mut: #5e6a72;
   --gh-bg: #ffffff;
@@ -272,20 +253,6 @@ header[data-testid="stHeader"] { background: transparent; }
   box-shadow: 0 30px 60px rgba(4,13,20,0.18), 0 4px 14px rgba(4,13,20,0.10);
   border: 1px solid var(--gh-line);
 }
-
-/* ---- ticker tape ---- */
-.tape {
-  overflow: hidden; border-top: 1px solid var(--gh-line);
-  border-bottom: 1px solid var(--gh-line);
-  margin: 48px -24px 0; padding: 12px 0; background: #fff;
-}
-.tape-track { display: flex; width: max-content; animation: ghtape 42s linear infinite; }
-.tape-set { display: flex; gap: 34px; align-items: center; padding-right: 34px; }
-.tk-sym, .tk-price { font-size: 14px; font-variant-numeric: tabular-nums; }
-.tk-sym { font-weight: 700; color: var(--gh-ink); }
-.tk-price.up { color: var(--gh-up); }
-.tk-price.down { color: var(--gh-down); }
-@keyframes ghtape { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
 /* ---- sections ---- */
 .section { padding: 72px 24px 0; }

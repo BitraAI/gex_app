@@ -168,6 +168,30 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Main (right-side) panel shown after the landing/login page: pull the
+# dashboard content up to the top of the viewport. Modern Streamlit renders
+# the content block as stMainBlockContainer (the legacy ".main
+# .block-container" wrapper class no longer exists), so both are tightened
+# here. Streamlit 1.6x overlays a 3.75rem stHeader (Deploy / Get help / ...)
+# on an absolute 0.25rem top gap, so 4rem clears the toolbar while saving
+# 2rem versus the 6rem default. The landing page re-supplies its own
+# later-in-DOM rules for the same selectors, so its hero layout is untouched.
+st.markdown(
+    """
+    <style>
+    [data-testid="stMainBlockContainer"] {
+        padding-top: 4rem !important;
+        padding-bottom: 1rem !important;
+    }
+    .main .block-container {
+        padding-top: 4rem !important;
+        padding-bottom: 1rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ---------------------------------------------------------------------------
 # Landing / auth gate
 #
@@ -771,12 +795,7 @@ def render_sidebar():
     with st.sidebar:
         st.markdown("## GammaEx")
 
-        _user = st.session_state.get("gex_user")
-        if _user:
-            st.caption(f"Signed in as **{_user['email']}**")
-            if st.button("Log out", width="stretch"):
-                st.session_state.pop("gex_user", None)
-                st.rerun()
+        st.markdown("&nbsp;")
 
         st.markdown("---")
 
@@ -830,6 +849,9 @@ def render_sidebar():
             # Signal render_candlesticks_frag to force a refresh on next tick
             st.session_state["_force_candle_refresh"] = symbol
 
+        # Blank row so the Expiration section doesn't crowd the Refresh button
+        st.markdown("&nbsp;")
+
         st.markdown("### Expiration")
         all_exps = st.session_state.expirations
         active_exps = sorted(set(
@@ -852,6 +874,9 @@ def render_sidebar():
             )
             st.session_state.selected_expiration = sel
 
+        # Blank rows so sections don't crowd each other
+        st.markdown("&nbsp;")
+
         st.markdown("### Alerts")
         if st.session_state.alerts:
             for alert in st.session_state.alerts[:10]:
@@ -861,11 +886,22 @@ def render_sidebar():
         else:
             st.caption("No alerts yet")
 
+        st.markdown("&nbsp;")
+
         st.markdown("### Display")
         st.session_state.show_calls = st.checkbox("Show Calls", value=True)
         st.session_state.show_puts = st.checkbox("Show Puts", value=True)
         st.session_state.show_itm = st.checkbox("Show ITM", True)
         st.session_state.show_otm = st.checkbox("Show OTM", True)
+
+        _user = st.session_state.get("gex_user")
+        if _user:
+            st.markdown("&nbsp;")
+            st.markdown("---")
+            st.caption(f"Signed in as **{_user['email']}**")
+            if st.button("Log out", width="stretch"):
+                st.session_state.pop("gex_user", None)
+                st.rerun()
 
 
 TIMEFRAMES = {

@@ -4,6 +4,7 @@ client_secret = "YOUR_CLIENT_SECRET"
 callback_url = "https://127.0.0.1:8182/"
 token_file = "~/.local/share/gex_app/schwab_token.json"
 max_token_age_days = 7
+ 
 [telegram]
 enabled = true                     # set false to mute alerts without removing secrets
 BOT_TOKEN = "YOUR_BOT_TOKEN"       # from @BotFather
