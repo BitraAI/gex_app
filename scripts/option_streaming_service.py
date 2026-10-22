@@ -758,6 +758,51 @@ class AtmOptionVolumeService:
                 # _maybe_invalidate_walls_on_strike_change takes effect.
                 self._wall_refresh_ts[norm] = _time_mod.monotonic()
 
+    # Minimum spacing between wall-cross resets: oscillation right around a
+    # wall would otherwise churn the counters (and the ratio) every tick.
+    _WALL_CROSS_RESET_COOLDOWN_SECS = 60.0
+
+    def _maybe_reset_flow_on_wall_cross(self, ticker: dict,
+                                        prev_spot: float, new_spot: float) -> None:
+        """Zero the cumulative Flow Ratio / Net Flow counters on a wall break.
+
+        Called from the L1 tick handler with ``self._lock`` held, whenever a
+        ticker's spot got refreshed.  Spot crossing strictly above the Call
+        Wall (resistance) or below the Put Wall (support) ends the regime
+        whose flow accumulated since the last reset — the pre-cross order
+        flow describes a level that is no longer in play, and without a
+        reset the Flow Ratio would stay pinned to a stale extreme while the
+        Net Flow keeps carrying the old book's weight.
+
+        Only the four cumulative contract-bucket counters behind the grid's
+        Flow Ratio / Net Flow columns are zeroed.  ``bullish`` / ``bearish``
+        totals and their ``vol_history`` (Absorption diffs), and the
+        delta-weighted ``exec_history`` (alerts), stay continuous so those
+        metrics keep their meaning.
+        """
+        cw = ticker.get("call_wall")
+        pw = ticker.get("put_wall")
+        crossed = None
+        if isinstance(cw, (int, float)) and cw > 0 and prev_spot <= cw < new_spot:
+            crossed = "CALL"
+        elif isinstance(pw, (int, float)) and pw > 0 and prev_spot >= pw > new_spot:
+            crossed = "PUT"
+        if crossed is None:
+            return
+        now = _time_mod.time()
+        if now - ticker.get("last_flow_reset_ts", 0.0) < self._WALL_CROSS_RESET_COOLDOWN_SECS:
+            return
+        for k in ("cumulative_call_buy", "cumulative_call_sell",
+                  "cumulative_put_buy", "cumulative_put_sell"):
+            ticker[k] = 0
+        ticker["last_flow_reset_ts"] = now
+        ticker["last_flow_reset_cause"] = f"{crossed.lower()}_wall"
+        logger.info(
+            "%s: flow counters reset — spot crossed %s wall (%s -> %.2f)",
+            ticker.get("stream_symbol", "?"), crossed.lower(),
+            prev_spot, new_spot,
+        )
+
     def set_ticker_atm_deltas(self, display_symbol: str,
                               call_delta: float | None,
                               put_delta: float | None):
@@ -1143,6 +1188,7 @@ class AtmOptionVolumeService:
                 # the index quote ($SPX etc.).
                 for _td, _tk in matched:
                     _is_idx = _td.upper().lstrip("$") in STREAM_SYMBOL_MAP
+                    _prev_spot = _tk.get("spot")
                     if contract_type in ("CALL", "C"):
                         if underlying is not None and not _is_idx:
                             _tk["spot"] = float(underlying)
@@ -1165,6 +1211,14 @@ class AtmOptionVolumeService:
                             _tk["current_bid_size"] = float(bid_size)
                         if ask_size is not None:
                             _tk["current_ask_size"] = float(ask_size)
+                    # Fresh spot: zero the cumulative Flow Ratio / Net Flow
+                    # counters when price broke through a wall — flow
+                    # measured before the break describes the old regime
+                    # and would keep the ratio pinned to a stale extreme.
+                    if underlying is not None and not _is_idx and isinstance(_prev_spot, (int, float)):
+                        self._maybe_reset_flow_on_wall_cross(
+                            _tk, float(_prev_spot), float(underlying),
+                        )
 
                 # Maintain cross-ticker bid/ask consistency for the primary symbol
                 if ticker and is_primary:
