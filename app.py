@@ -437,6 +437,10 @@ def fetch_data(symbol: str) -> bool:
             atm_svc = st.session_state.get("atm_option_service")
             if atm_svc:
                 atm_svc.set_ticker_expiration(_sym, expirations[0])
+                # Second-nearest expiration feeds the rolling Flow Ratio
+                # / Net Flow (two ATM pairs per ticker).
+                if len(expirations) > 1:
+                    atm_svc.set_ticker_expiration2(_sym, expirations[1])
     # Store Put Wall (support) and Call Wall (resistance) for the grid
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
@@ -1794,6 +1798,10 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
             atm_svc = st.session_state.get("atm_option_service")
             if atm_svc:
                 atm_svc.set_ticker_expiration(_sym, expirations[0])
+                # Second-nearest expiration feeds the rolling Flow Ratio
+                # / Net Flow (two ATM pairs per ticker).
+                if len(expirations) > 1:
+                    atm_svc.set_ticker_expiration2(_sym, expirations[1])
     # Store Put Wall (support) and Call Wall (resistance) for the grid
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
