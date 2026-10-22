@@ -15,14 +15,15 @@ BOT_TOKEN = ""
 CHAT_ID = ""
 TELEGRAM_ENABLED = True
 
-# Email (password-reset delivery) — see [email] in config.toml.
+# Email (magic-link login + approval delivery) — see [email] in config.toml.
 SMTP_HOST = ""
 SMTP_PORT = 587
 SMTP_USER = ""
 SMTP_PASSWORD = ""
 SMTP_FROM = "gex_app@localhost"
 SMTP_USE_SSL = False
-RESET_LINK_BASE = "http://localhost:8501"
+SMTP_OPERATOR = ""  # who receives access requests; falls back to SMTP_FROM
+LINK_BASE = "http://localhost:8501"
 
 if _CONFIG_PATH.exists():
     with open(_CONFIG_PATH, "rb") as f:
@@ -41,8 +42,9 @@ if _CONFIG_PATH.exists():
     CHAT_ID = str(_tg.get("CHAT_ID", CHAT_ID))
     TELEGRAM_ENABLED = bool(_tg.get("enabled", TELEGRAM_ENABLED))
 
-    # Email (password-reset delivery). Everything optional: without an
-    # smtp_host the app falls back to logging reset links to the app log.
+    # Email (magic-link login + approval delivery). Everything optional:
+    # without an smtp_host the app falls back to logging links in the app
+    # log. Access requests go to operator_addr (default: from_addr).
     _email = _raw.get("email", {})
     SMTP_HOST = str(_email.get("smtp_host", ""))
     SMTP_PORT = int(_email.get("smtp_port", 587))
@@ -50,7 +52,8 @@ if _CONFIG_PATH.exists():
     SMTP_PASSWORD = _email.get("smtp_password", "")
     SMTP_FROM = str(_email.get("from_addr", SMTP_USER or "gex_app@localhost"))
     SMTP_USE_SSL = bool(_email.get("use_ssl", SMTP_PORT == 465))
-    RESET_LINK_BASE = str(_email.get("link_base", "http://localhost:8501")).rstrip("/")
+    SMTP_OPERATOR = str(_email.get("operator_addr", ""))
+    LINK_BASE = str(_email.get("link_base", "http://localhost:8501")).rstrip("/")
 
 # Environment overrides work whether or not config.toml exists.
 SMTP_USER = os.environ.get("GEX_SMTP_USER", SMTP_USER)

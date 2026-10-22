@@ -2,7 +2,7 @@
 
 Rendered while no user is signed in: promo bar, sticky nav, oversized
 tight-tracked hero, feature cards built from the app's real screenshots,
-a dark band, trust cards, the Log in / Sign up card (Streamlit widgets so
+a dark band, trust cards, the magic-link log-in card (Streamlit widgets so
 validation just works), and a legal footer.
 
 Brand tokens lifted from robinhood.com's stylesheet: primary green
@@ -130,7 +130,7 @@ def _shell_html() -> str:
       </div>
       <div class="trust-grid">
         <div class="trust-card"><h3>Your broker stays yours</h3><p>Credentials live in one local config file — they are never sent anywhere but Schwab.</p></div>
-        <div class="trust-card"><h3>Hashed, never stored</h3><p>Passwords are salted scrypt hashes in SQLite. Nothing reversible, ever.</p></div>
+        <div class="trust-card"><h3>No passwords, ever</h3><p>Logins are one-time magic links — single-use, 30-minute tokens stored only as hashes in SQLite.</p></div>
         <div class="trust-card"><h3>SQLite-backed accounts</h3><p>One file, WAL journaling, strict constraints. Portable and auditable.</p></div>
         <div class="trust-card"><h3>Local-first analytics</h3><p>Tokens, candles, and flow state all stay on your own machine.</p></div>
       </div>
@@ -290,7 +290,6 @@ header[data-testid="stHeader"] { background: transparent; }
   border: none; border-radius: 999px; font-weight: 800; font-size: 16px; padding: 10px 0;
 }
 [data-testid="stFormSubmitButton"] > button:hover { background: var(--gh-green-hover) !important; }
-[data-testid="stSegmentedControl"] { justify-content: center; margin-bottom: 12px; }
 .auth-title { text-align: center; margin: 0 0 4px; }
 .auth-title h2 { font-size: 28px; letter-spacing: -0.02em; color: var(--gh-ink); margin: 0; font-weight: 800; }
 .auth-title p { color: var(--gh-mut); margin: 6px 0 0; font-size: 15px; }
@@ -310,112 +309,115 @@ header[data-testid="stHeader"] { background: transparent; }
 """
 
 
-def _set_mode(mode: str):
-    """on_click callback factory: switch the auth card's segmented control."""
-    def _cb():
-        st.session_state["gh_auth_mode"] = mode
-    return _cb
+def _smtp_notice() -> None:
+    """Hint for the operator when SMTP isn't set up: links land in the log."""
+    st.caption(
+        "Email delivery isn't configured. Add `smtp_host`, "
+        "`smtp_port`, `smtp_user`, `smtp_password` under "
+        "`[email]` in config.toml to send these links; the "
+        "link was captured in the app log meanwhile."
+    )
+
+
+def _send_login_email(email: str) -> None:
+    """Email a magic link for an account, or ask the admin to approve access.
+
+    Unknown addresses never get a link directly — their request goes to the
+    operator as an invitation e-mail. The same success wording is used both
+    ways so the page doesn't reveal which emails are registered.
+    """
+    email = (email or "").strip()
+    try:
+        token = auth_db.create_login_token(email)
+        if token is not None:
+            link = mailer.magic_link(token)
+            try:
+                mailer.send_magic_link(email, link)
+                st.success(f"Magic link sent to {email}. It is valid for 30 minutes.")
+            except mailer.MailError as exc:
+                # No SMTP / send failure: write the link to the app log so
+                # the operator can still log the user in by hand.
+                log.error("Magic link for %s: %s", email, link)
+                st.error(str(exc))
+                _smtp_notice()
+        else:
+            approval = auth_db.request_access(email)
+            link = mailer.approve_link(approval)
+            try:
+                mailer.send_approval_request(email, link)
+            except mailer.MailError as exc:
+                # No SMTP / send failure: the administrator can pick the
+                # approval link out of the app log and open it by hand.
+                log.error("Approval link for %s: %s", email, link)
+                st.error(str(exc))
+                _smtp_notice()
+            st.success(
+                f"If {email} has an account, a magic link is on its way. "
+                "Otherwise the administrator has been asked to approve your "
+                "access — once approved, a login link will be emailed to you."
+            )
+    except auth_db.AuthError as exc:
+        st.error(str(exc))
 
 
 def _auth_card() -> None:
-    # First-class reset-completion notice (survives the query-param rerun).
-    if st.session_state.pop("gh_reset_done", False):
-        st.success("Password updated. Log in with your new password.")
-
-    # `?reset=<token>` from the emailed link takes over the card entirely.
-    reset_token = st.query_params.get("reset")
-    if reset_token:
-        email = auth_db.validate_reset_token(reset_token)
-        if email:
-            with st.form("gh_reset_form"):
-                st.markdown(f"**Reset the password for {email}**")
-                p1 = st.text_input("New password", type="password", key="gh_rs_pass")
-                p2 = st.text_input("Confirm new password", type="password", key="gh_rs_conf")
-                if st.form_submit_button("Reset password", width="stretch"):
-                    if p1 != p2:
-                        st.error("Passwords don't match")
-                    else:
-                        try:
-                            auth_db.reset_password(reset_token, p1)
-                            st.session_state["gh_reset_done"] = True
-                            st.session_state["gh_auth_mode"] = "Log in"
-                            try:
-                                del st.query_params["reset"]
-                            except Exception:
-                                pass
-                            st.rerun()
-                        except auth_db.AuthError as exc:
-                            st.error(str(exc))
+    # `?approve=<token>` — administrator approval of an access request.
+    #   Creates the account and emails the user a magic link.
+    approve_token = st.query_params.get("approve")
+    if approve_token:
+        try:
+            approved_email = auth_db.approve_request(approve_token)
+        except auth_db.AuthError as exc:
+            st.error(str(exc))
         else:
-            st.error("This reset link is invalid or has expired. Request a new one below.")
-        st.button("Back to log in", key="gh_reset_back",
-                  on_click=_set_mode("Log in"), width="stretch")
+            try:
+                del st.query_params["approve"]
+            except Exception:
+                pass
+            login_token = auth_db.create_login_token(approved_email)
+            link = mailer.magic_link(login_token) if login_token else None
+            if link:
+                try:
+                    mailer.send_magic_link(approved_email, link)
+                    st.success(
+                        f"Approved! An account was created for "
+                        f"**{approved_email}** — a login link is on its way "
+                        "to them (valid for 30 minutes)."
+                    )
+                except mailer.MailError as exc:
+                    # No SMTP / send failure: the login link is in the app
+                    # log to hand over by hand.
+                    log.error("Magic link for %s: %s", approved_email, link)
+                    st.error(str(exc))
+                    _smtp_notice()
+                    st.success(
+                        f"Approved! An account was created for "
+                        f"**{approved_email}**. The login link was captured "
+                        "in the app log."
+                    )
         return
 
-    mode = st.segmented_control(
-        "Log in or sign up", ["Log in", "Sign up", "Forgot password"],
-        key="gh_auth_mode", label_visibility="collapsed",
-    ) or "Log in"
-    if mode == "Log in":
-        with st.form("gh_login_form", clear_on_submit=False):
-            email = st.text_input("Email", key="gh_login_email").strip()
-            password = st.text_input("Password", type="password",
-                                     key="gh_login_pass")
-            if st.form_submit_button("Log in", width="stretch"):
-                try:
-                    user = auth_db.verify_user(email, password)
-                    st.session_state["gex_user"] = user
-                    st.rerun()
-                except auth_db.AuthError as exc:
-                    st.error(str(exc))
-        st.button("Forgot password?", key="gh_forgot_btn",
-                  on_click=_set_mode("Forgot password"), width="stretch")
-    elif mode == "Forgot password":
-        with st.form("gh_forgot_form", clear_on_submit=True):
-            email = st.text_input("Account email", key="gh_fp_email")
-            if st.form_submit_button("Send reset link", width="stretch"):
-                token = auth_db.create_reset_token(email)
-                if token is not None:
-                    link = mailer.reset_link(token)
-                    try:
-                        mailer.send_reset_email(email, link)
-                        st.success(f"Reset link sent to {email}. It is valid for 30 minutes.")
-                    except mailer.MailError as exc:
-                        # No SMTP / send failure: write the link to the app log
-                        # so the operator can still finish the reset by hand.
-                        log.error("Password-reset link for %s: %s", email, link)
-                        st.error(str(exc))
-                        if not mailer.smtp_configured():
-                            st.caption(
-                                "Email delivery isn't configured. Add `smtp_host`, "
-                                "`smtp_port`, `smtp_user`, `smtp_password` under "
-                                "`[email]` in config.toml to send these links; the "
-                                "link was captured in the app log meanwhile."
-                            )
-                else:
-                    # Same wording as the success path to avoid revealing
-                    # whether the address is registered.
-                    st.success(f"If {email} has an account, a reset link is on its way.")
-        st.button("Back to log in", key="gh_forgot_back",
-                  on_click=_set_mode("Log in"), width="stretch")
-    else:
-        with st.form("gh_signup_form", clear_on_submit=True):
-            email = st.text_input("Email", key="gh_su_email")
-            c1, c2 = st.columns(2)
-            password = c1.text_input("Password", type="password", key="gh_su_pass")
-            confirm = c2.text_input("Confirm", type="password", key="gh_su_conf")
-            if st.form_submit_button("Create account", width="stretch"):
-                if password != confirm:
-                    st.error("Passwords don't match")
-                else:
-                    try:
-                        new_id = auth_db.create_user(email, password)
-                        st.session_state["gex_user"] = auth_db.get_user(new_id) or {
-                            "email": email.strip(),
-                        }
-                        st.rerun()
-                    except auth_db.AuthError as exc:
-                        st.error(str(exc))
+    # `?login=<token>` — one-time magic link sent to an account's email.
+    login_token = st.query_params.get("login")
+    if login_token:
+        try:
+            user = auth_db.login_with_token(login_token)
+        except auth_db.AuthError as exc:
+            st.error(str(exc))
+        else:
+            try:
+                del st.query_params["login"]
+            except Exception:
+                pass
+            st.session_state["gex_user"] = user
+            st.rerun()
+            return
+
+    with st.form("gh_login_form", clear_on_submit=True):
+        email = st.text_input("Email", key="gh_login_email",
+                              placeholder="you@example.com")
+        if st.form_submit_button("Send magic link", width="stretch"):
+            _send_login_email(email)
 
 
 def render_landing() -> None:
@@ -427,8 +429,10 @@ def render_landing() -> None:
         """
 <div class="auth-wrap" id="open-account">
   <div class="auth-title">
-    <h2>Open your GammaEx account</h2>
-    <p>Local account, SQLite storage. Passwords are salted scrypt hashes.</p>  </div>
+    <h2>Log in to GammaEx</h2>
+    <p>One-time magic links, no password needed. First time? We'll ask
+    the administrator to approve you.</p>
+  </div>
 </div>
 """,
         unsafe_allow_html=True,
