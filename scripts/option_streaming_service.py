@@ -1240,8 +1240,12 @@ class AtmOptionVolumeService:
                         self._aggregate_tick(
                             int(t), float(price), int(size), opt_type,
                         )
-                except Exception:
-                    pass
+                except Exception as e:
+                    # A per-tick failure used to be swallowed silently,
+                    # which hid a real bug (missing delta accumulation on
+                    # call buys) in production for a long time.  Log at
+                    # least enough to see it in the app log.
+                    logger.warning("Option trade tick processing failed: %r", e)
 
     def _make_handler(self):
         return self._option_handler
@@ -1477,8 +1481,10 @@ class AtmOptionVolumeService:
         (buying calls and selling puts -> buy; selling calls and buying
         puts -> sell).  Separately, each trade is weighted by its
         front-month ATM delta (call > 0, put < 0) into ``delta_buy`` /
-        ``delta_sell`` so the Net Flow column shows net_delta = delta_buy
-        - delta_sell."""
+        ``delta_sell``; that delta-weighted cumulative net
+        (delta_buy - delta_sell) feeds the 60 s executed-flow window
+        behind alerts.  The Order Flow grid's Net Flow column is the raw
+        contract-bucket difference computed by ``flow_metrics``."""
         if ticker is None:
             return
         if opt_type == "CALL":
@@ -1490,6 +1496,15 @@ class AtmOptionVolumeService:
             _d = ticker.get("put_delta")
             _d = _d if isinstance(_d, (int, float)) and _d else -0.5
 
+        # Delta-weighted signed flow: buy calls / sell puts carry positive
+        # delta (bullish), sell calls / buy puts negative.  Computed here so
+        # EVERY branch has a value — downstream reads it unconditionally.
+        signed = 0.0
+        if direction == "buy":
+            signed = _d * size
+        elif direction == "sell":
+            signed = -_d * size
+
         if direction == "buy":
             if opt_type == "CALL":
                 ticker["bullish"] += size
@@ -1499,7 +1514,6 @@ class AtmOptionVolumeService:
                 ticker["bearish"] += size
                 ticker["sell_vol"] = ticker.get("sell_vol", 0) + size
                 ticker["cumulative_put_buy"] = ticker.get("cumulative_put_buy", 0) + size
-                signed = _d * size
         elif direction == "sell":
             if opt_type == "CALL":
                 ticker["bearish"] += size
@@ -1509,7 +1523,6 @@ class AtmOptionVolumeService:
                 ticker["bullish"] += size
                 ticker["buy_vol"] = ticker.get("buy_vol", 0) + size
                 ticker["cumulative_put_sell"] = ticker.get("cumulative_put_sell", 0) + size
-            signed = -_d * size
         else:
             # Unknown direction — split evenly between bullish and bearish
             half = size // 2
