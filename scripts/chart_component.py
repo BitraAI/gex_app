@@ -1179,7 +1179,18 @@ def build_init_data(
                             break
                 andean_series = [
                     {"type": "Histogram", "key": "andean_osc", "data": _oscd, "options": {"priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
-                    {"type": "Line", "key": "andean_signal", "data": [{"time": cd[i]["time"], "value": signal[i]} for i in range(len(cd))], "options": {"color": "#ffa15a", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
+                    # Signal line with slope-aware per-point coloring (same
+                    # mechanism as Half Trend / EMA 200): green while the
+                    # signal is rising, its default #ffa15a otherwise. The
+                    # first bar has no previous value to compare against.
+                    {"type": "Line", "key": "andean_signal", "data": [
+                        {
+                            "time": cd[i]["time"],
+                            "value": signal[i],
+                            "color": "#26a69a" if (i > 0 and signal[i] > signal[i - 1]) else "#ffa15a",
+                        }
+                        for i in range(len(cd))
+                    ], "options": {"color": "#ffa15a", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
                     {
                         "type": "Line", "key": "andean_zero",
                         "data": [{"time": cd[i]["time"], "value": 0} for i in range(len(cd))],
@@ -1255,7 +1266,23 @@ def build_init_data(
             if len(closes) < period: continue
             vals = _ema(closes, period) if name.startswith("EMA") else _sma(closes, period)
             offset = period - 1
-            if name in ("EMA 200", "EMA 20", "SMA 50", "SMA 20"):
+            if name == "EMA 200":
+                # Rising EMA (current value above the previous one) renders
+                # green, falling keeps the default #FF4D6D line color — the
+                # same up/down per-point coloring the Half Trend line uses.
+                ema_pts = []
+                for i in range(offset, len(cd)):
+                    vi = vals[i - offset]
+                    prev = vals[i - offset - 1] if i > offset else None
+                    color = "#26a69a" if (prev is not None and vi > prev) else cfg["color"]
+                    ema_pts.append({"time": cd[i]["time"], "value": vi, "color": color})
+                series_list.append({
+                    "type": "Line", "key": "ma_EMA 200", "data": ema_pts,
+                    # Default color only covers points without a per-point one.
+                    "options": {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False},
+                })
+                continue
+            if name in ("EMA 20", "SMA 50", "SMA 20"):
                 opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False}
             else:
                 opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name}
