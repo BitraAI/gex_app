@@ -1,0 +1,8 @@
+[server]
+enableStaticServing = true
+# Keep websockets alive through the tailscale inverse proxy on quiet links,
+# and let a dropped connection reconnect into the SAME server session
+# (state and all) instead of starting a fresh one, by holding the session
+# for 6 hours after the websocket goes away (default: only 2 minutes).
+websocketPingInterval = 15
+disconnectedSessionTTL = 21600
