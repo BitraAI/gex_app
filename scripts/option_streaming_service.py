@@ -518,7 +518,7 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return None, None
             now = _time_mod.time()
-            fh = ticker.setdefault("flow_history", deque())
+            fh = ticker.setdefault("atm_flow_history", deque())
             while fh and fh[0][0] < now - 60:
                 fh.popleft()
             if len(fh) < 2:
@@ -1591,7 +1591,10 @@ class AtmOptionVolumeService:
         # contract buckets — differenced over the window by
         # get_ticker_flow_metrics_60s to yield the rolling 1-minute
         # Net Flow and Flow Ratio of the Order Flow grid.
-        fh = ticker.setdefault("flow_history", deque())
+        # (NOT the pre-existing "flow_history" list key several ticker
+        # dicts already carry — that one is a plain list from other
+        # initializers and cannot popleft.)
+        fh = ticker.setdefault("atm_flow_history", deque())
         fh.append((now, ticker["bullish"], ticker["bearish"]))
         while fh and fh[0][0] < now - 60:
             fh.popleft()
