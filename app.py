@@ -8,7 +8,7 @@ import streamlit as st
 from scripts import auth_db, landing, persistent_session
 from scripts import client as client_mod
 from scripts._constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
-from scripts._utils import compute_strike_increment, floor_dataframe_timestamps, compute_current_bucket, format_expiration, flow_metrics, is_otm_or_atm, is_itm_or_atm
+from scripts._utils import compute_strike_increment, floor_dataframe_timestamps, compute_current_bucket, format_expiration, is_otm_or_atm, is_itm_or_atm
 from scripts.client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from scripts.streaming_service import StreamingService
 from scripts.option_streaming_service import (AtmOptionVolumeService, _load_ticker_history, _save_ticker_history, _normalize_display_symbol, _get_stream_symbol)
@@ -717,15 +717,12 @@ def check_alerts(analytics: dict, spot: float):
                 _wall_zone = "Resistance"
             elif _pw is not None and _pw - _wall_buffer(_pw) <= spot <= _pw + _wall_buffer(_pw):
                 _wall_zone = "Support"
-            # Flow ratio for Telegram header
+            # Flow ratio for Telegram header: rolling 60 s share.
             _atm_svc = st.session_state.get("atm_option_service")
             _sym_key = st.session_state.get("symbol")
-            _, _, _flow_ratio = flow_metrics(
-                _atm_svc.get_ticker_call_buy(_sym_key) if _atm_svc else None,
-                _atm_svc.get_ticker_call_sell(_sym_key) if _atm_svc else None,
-                _atm_svc.get_ticker_put_buy(_sym_key) if _atm_svc else None,
-                _atm_svc.get_ticker_put_sell(_sym_key) if _atm_svc else None,
-            )
+            _flow_ratio = None
+            if _atm_svc is not None:
+                _flow_ratio = _atm_svc.get_ticker_flow_metrics_60s(_sym_key)[1]
             # Absorption for Telegram header
             _absorption = _atm_svc.get_ticker_absorption(st.session_state.get("symbol")) if _atm_svc else None
             notify_alerts(

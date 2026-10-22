@@ -498,6 +498,38 @@ class AtmOptionVolumeService:
                 net_60 = eh[-1][1] - eh[0][1]
             return buy, sell, net_60
 
+    def get_ticker_flow_metrics_60s(self, display_symbol: str) -> tuple[int | None, float | None]:
+        """Rolling 60 s (net_flow, flow_ratio) of raw contract buckets.
+
+        Returns the bullish-bearish contract difference and the bullish
+        share over the trailing 60 s of executed ATM trades — the rolling
+        1-minute values behind the Order Flow grid's Net Flow and Flow
+        Ratio columns. ``None`` when the ticker is untracked or the
+        window has fewer than two samples (no flow yet / quiet book).
+
+        Because the values are differenced over a sliding window they
+        redraw themselves every second and need no wall-cross reset: flow
+        measured against the old level simply ages out after a minute.
+        Samples record the cumulative buckets at each executed trade, so
+        the window measures trades between the oldest and newest samples
+        inside it — matching the absorption / executed-flow semantics."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None, None
+            now = _time_mod.time()
+            fh = ticker.setdefault("flow_history", deque())
+            while fh and fh[0][0] < now - 60:
+                fh.popleft()
+            if len(fh) < 2:
+                return None, None
+            bull_60 = fh[-1][1] - fh[0][1]
+            bear_60 = fh[-1][2] - fh[0][2]
+            total_60 = bull_60 + bear_60
+            if total_60 <= 0:
+                return None, None
+            return bull_60 - bear_60, round(bull_60 / total_60, 2)
+
     def get_ticker_call_buy(self, display_symbol: str) -> int | None:
         """Return cumulative call buy volume for a tracked ticker,
         or None if not tracked / no data yet."""
@@ -1555,6 +1587,14 @@ class AtmOptionVolumeService:
         eh.append((now, ticker.get("delta_buy", 0.0) - ticker.get("delta_sell", 0.0)))
         while eh and eh[0][0] < now - 60:
             eh.popleft()
+        # Rolling 60 s window of the raw cumulative bullish/bearish
+        # contract buckets — differenced over the window by
+        # get_ticker_flow_metrics_60s to yield the rolling 1-minute
+        # Net Flow and Flow Ratio of the Order Flow grid.
+        fh = ticker.setdefault("flow_history", deque())
+        fh.append((now, ticker["bullish"], ticker["bearish"]))
+        while fh and fh[0][0] < now - 60:
+            fh.popleft()
 
     def _infer_dir(self, price: float, bid: float | None, ask: float | None) -> str:
         if bid is not None and ask is not None:
