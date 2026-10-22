@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT,
                         FLOW_WATCHDOG_STALE_SECONDS,
                         ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE)
-from scripts._utils import compute_strike_increment, format_expiration, flow_metrics
+from scripts._utils import compute_strike_increment, format_expiration
 from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol, _ABSORPTION_MIN_VOL
 from scripts.client import fetch_quotes
 from scripts.calculations import calculate_atm_strike
@@ -837,13 +837,8 @@ def maybe_fire_wall_zone_alerts() -> None:
             next_state["_last_alert_texts"] = new_alerts
             state[t_upper] = next_state
             _cache = _ticker_analytics_cache.get(t_upper.split(":")[0]) or {}
-            # Flow ratio for Telegram header
-            _, _, _flow_ratio = flow_metrics(
-                atm_svc.get_ticker_call_buy(t_upper) if atm_svc else None,
-                atm_svc.get_ticker_call_sell(t_upper) if atm_svc else None,
-                atm_svc.get_ticker_put_buy(t_upper) if atm_svc else None,
-                atm_svc.get_ticker_put_sell(t_upper) if atm_svc else None,
-            )
+            # Flow ratio for Telegram header: rolling 60 s share.
+            _flow_ratio = atm_svc.get_ticker_flow_metrics_60s(t_upper)[1] if atm_svc else None
             notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
                           gex=_cache.get("net_gex"),
                           wall_zone=wall_zone, pw=put_wall, cw=call_wall,
@@ -1123,13 +1118,10 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         )]
 
         if tg_alerts and now_ts - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
-            # Flow ratio for Telegram header
-            _, _, _flow_ratio = flow_metrics(
-                atm_svc.get_ticker_call_buy(display_key) if atm_svc else None,
-                atm_svc.get_ticker_call_sell(display_key) if atm_svc else None,
-                atm_svc.get_ticker_put_buy(display_key) if atm_svc else None,
-                atm_svc.get_ticker_put_sell(display_key) if atm_svc else None,
-            )
+            # Flow ratio for Telegram header: rolling 60 s share.
+            _flow_ratio = atm_svc.get_ticker_flow_metrics_60s(
+                display_key,
+            )[1] if atm_svc else None
             # Absorption for Telegram header
             _absorption = atm_svc.get_ticker_absorption(display_key) if atm_svc else None
             next_sym_state["last_alert_ts"] = now_ts
@@ -1379,13 +1371,13 @@ def render_atm_order_flow_grid():
                 _trend_state[t_upper] = {"candidate": _candidate, "streak": _streak, "display": _display}
                 trend_display = _display
 
-            _net_flow, _total_flow, _flow_ratio = flow_metrics(
-                atm_svc.get_ticker_call_buy(t_upper) if atm_svc else None,
-                atm_svc.get_ticker_call_sell(t_upper) if atm_svc else None,
-                atm_svc.get_ticker_put_buy(t_upper) if atm_svc else None,
-                atm_svc.get_ticker_put_sell(t_upper) if atm_svc else None,
-            )
-            _flow_ratio = _flow_ratio or 0.0
+            _net_flow, _flow_ratio = None, None
+            if atm_svc is not None:
+                _net_flow, _flow_ratio = atm_svc.get_ticker_flow_metrics_60s(t_upper)
+            # Rolling 1-minute values: None until 60 s of flow exists
+            # (freshly started feed or quiet book shows an empty cell).
+            if _flow_ratio is None:
+                _flow_ratio = 0.0
             rows.append({
                 "Ticker": t_upper,
                 "Spot": spot,
