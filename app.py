@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
-from scripts import auth_db, landing
+from scripts import auth_db, landing, persistent_session
 from scripts import client as client_mod
 from scripts._constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
 from scripts._utils import compute_strike_increment, floor_dataframe_timestamps, compute_current_bucket, format_expiration, flow_metrics, is_otm_or_atm, is_itm_or_atm
@@ -199,9 +199,19 @@ st.markdown(
 # feature cards, trust band) with the Log in / Sign up card on it. The landing
 # module calls st.stop(), so the main dashboard below never renders until a
 # session is established. Signing out clears the key and reruns back to here.
-# ---------------------------------------------------------------------------
+#
+# st.session_state dies with the websocket (refresh, reconnect, restart), so
+# before landing on that page we try to sign the user back in from their
+# long-lived browser cookie (persistent sessions; see persistent_session.py).
+if not st.session_state.get("gex_user"):
+    persistent_session.restore()
 if not st.session_state.get("gex_user"):
     landing.render_landing()
+
+# A magic-link login queues a fresh token in session state; write the cookie
+# now that the dashboard is actually rendering (writes issued during the
+# landing run would be discarded by its st.rerun()).
+persistent_session.flush()
 
 
 def sync_index_poller() -> None:
@@ -900,6 +910,9 @@ def render_sidebar():
             st.markdown("---")
             st.caption(f"Signed in as **{_user['email']}**")
             if st.button("Log out", width="stretch"):
+                # Revoke the persistent session (and clear its cookie) too,
+                # otherwise the browser would sign straight back in.
+                persistent_session.end()
                 st.session_state.pop("gex_user", None)
                 st.rerun()
 

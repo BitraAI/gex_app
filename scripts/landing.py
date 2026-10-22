@@ -14,7 +14,7 @@ import os
 
 import streamlit as st
 
-from scripts import auth_db, mailer
+from scripts import auth_db, mailer, persistent_session
 
 log = logging.getLogger("gex.landing")
 
@@ -407,6 +407,9 @@ def _auth_card() -> None:
             except Exception:
                 pass
             st.session_state["gex_user"] = user
+            # Queue the persistent-session cookie: written on the next
+            # dashboard run (see persistent_session.flush() in app.py).
+            persistent_session.issue(user)
             st.rerun()
             return
 
