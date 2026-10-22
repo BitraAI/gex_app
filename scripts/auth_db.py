@@ -1,8 +1,10 @@
 """SQLite-backed account store for the GammaEx landing page.
 
 A single small database (WAL mode) holds the users of the web app. Accounts
-are identified by email only. Passwords are stored as salted scrypt hashes
-(stdlib only, no extra dependencies). Every call opens a short-lived
+are identified by email only and are passwordless: logins happen through a
+one-time magic link mailed to the account address, and first-time users get
+in after an administrator approves their access request. Tokens are stored
+only as SHA-256 hashes and are single-use. Every call opens a short-lived
 connection: Streamlit fragments run in several threads, and per-call
 connections sidestep sqlite3's cross-thread check while keeping the file
 safe against concurrent writes.
@@ -13,7 +15,6 @@ Location: ``~/.local/share/gex_app/app.db`` (override with GEX_APP_DB env var).
 """
 from contextlib import closing
 import hashlib
-import hmac
 import os
 import re
 import secrets
@@ -28,20 +29,26 @@ CREATE TABLE IF NOT EXISTS users (
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     last_login    TEXT
 );
-CREATE TABLE IF NOT EXISTS password_resets (
+CREATE TABLE IF NOT EXISTS login_tokens (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     email      TEXT    NOT NULL COLLATE NOCASE,
     token_hash TEXT    NOT NULL UNIQUE,
     expires_at TEXT    NOT NULL,
     used_at    TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_resets_email ON password_resets(email);
+CREATE TABLE IF NOT EXISTS signup_requests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    email      TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    token_hash TEXT    NOT NULL UNIQUE,
+    expires_at TEXT    NOT NULL,
+    used_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_login_tokens_email ON login_tokens(email);
+CREATE INDEX IF NOT EXISTS idx_requests_email ON signup_requests(email);
+DROP TABLE IF EXISTS password_resets;
 """
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-_MIN_PASSWORD = 8
-_MAX_PASSWORD = 128
 
 
 def _db_path() -> Path:
@@ -85,7 +92,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE users_legacy")
         conn.commit()
     else:
-        # Users table exists; make sure the resets table does too.
+        # Users table exists; make sure the token tables do too.
         conn.executescript(_SCHEMA)
 
 
@@ -97,7 +104,12 @@ _SCRYPT_MAXMEM = 128 * 1024 * 1024
 
 
 def hash_password(password: str) -> str:
-    """Salted scrypt hash: scrypt$n$r$p$salt_hex$hash_hex."""
+    """Salted scrypt hash: scrypt$n$r$p$salt_hex$hash_hex.
+
+    Accounts are passwordless; this only generates the placeholder hash a
+    new account starts with (unguessable, so nobody can ever log in with a
+    password against the users table).
+    """
     salt = secrets.token_bytes(16)
     key = hashlib.scrypt(
         password.encode("utf-8"), salt=salt, n=2 ** 15, r=8, p=1, dklen=32,
@@ -106,67 +118,10 @@ def hash_password(password: str) -> str:
     return f"scrypt${2 ** 15}$8$1${salt.hex()}${key.hex()}"
 
 
-def verify_password(password: str, stored: str) -> bool:
-    try:
-        scheme, n, r, p, salt_hex, key_hex = stored.split("$")
-        if scheme != "scrypt":
-            return False
-        key = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=bytes.fromhex(salt_hex),
-            n=int(n), r=int(r), p=int(p), dklen=len(key_hex) // 2,
-            maxmem=_SCRYPT_MAXMEM,
-        )
-        return hmac.compare_digest(key.hex(), key_hex)
-    except (ValueError, TypeError):
-        return False
-
-
 # ---------------- account operations ----------------
 
 class AuthError(Exception):
-    """User-facing signup/login failure."""
-
-
-def create_user(email: str, password: str) -> int:
-    """Create an account; raise AuthError with a friendly message on failure."""
-    email = (email or "").strip().lower()
-    if not _EMAIL_RE.match(email):
-        raise AuthError("Enter a valid email address")
-    if not (_MIN_PASSWORD <= len(password or "") <= _MAX_PASSWORD):
-        raise AuthError(f"Password must be {_MIN_PASSWORD}-{_MAX_PASSWORD} characters")
-    try:
-        with closing(_connect()) as conn:
-            _ensure_schema(conn)
-            cur = conn.execute(
-                "INSERT INTO users (email, password_hash) VALUES (?, ?)",
-                (email, hash_password(password)),
-            )
-            conn.commit()
-            return int(cur.lastrowid)
-    except sqlite3.IntegrityError as exc:
-        raise AuthError("An account with that email already exists") from exc
-
-
-def verify_user(email: str, password: str) -> dict:
-    """Log in with an email; returns the account row as a dict."""
-    email = (email or "").strip().lower()
-    if not email:
-        raise AuthError("Enter your email")
-    with closing(_connect()) as conn:
-        _ensure_schema(conn)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM users WHERE email = ?", (email,)
-        ).fetchone()
-    if row is None or not verify_password(password or "", row["password_hash"]):
-        raise AuthError("Incorrect email or password")
-    with closing(_connect()) as conn:
-        conn.execute(
-            "UPDATE users SET last_login = datetime('now') WHERE id = ?", (row["id"],)
-        )
-        conn.commit()
-    return {"id": row["id"], "email": row["email"]}
+    """User-facing login/approval failure."""
 
 
 def get_user(user_id: int) -> dict | None:
@@ -186,21 +141,38 @@ def user_count() -> int:
         return int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
 
-# ---------------- password reset tokens ----------------
+# ---------------- magic-link tokens & access requests ----------------
 
-_RESET_TTL_MINUTES = 30
+_TOKEN_TTL_MINUTES = 30
+_APPROVAL_TTL_HOURS = 72
 
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def create_reset_token(email: str) -> str | None:
-    """Create a single-use password-reset token; ``None`` for unknown emails.
+def _new_token(conn: sqlite3.Connection, table: str, email: str,
+               ttl_sql: str) -> str:
+    """Mint a single-use token for ``table``; supersedes any pending one.
 
     Only the SHA-256 hash of the token is stored, so the plaintext token can
-    only travel in the emailed link. Unused tokens for the address are
-    invalidated when a new one is requested.
+    only travel in the emailed link. ``table`` is always a module constant.
+    """
+    # A fresh request supersedes any pending link for this address.
+    conn.execute(f"DELETE FROM {table} WHERE email = ? AND used_at IS NULL", (email,))
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        f"INSERT INTO {table} (email, token_hash, expires_at) VALUES (?, ?, datetime('now', ?))",
+        (email, _token_hash(token), ttl_sql),
+    )
+    return token
+
+
+def create_login_token(email: str) -> str | None:
+    """Create a one-time magic-link login token; ``None`` for unknown emails.
+
+    Only known accounts get a link: unknown addresses are offered the
+    administrator-approval flow instead.
     """
     email = (email or "").strip().lower()
     if not _EMAIL_RE.match(email):
@@ -210,53 +182,94 @@ def create_reset_token(email: str) -> str | None:
         row = conn.execute(
             "SELECT id FROM users WHERE email = ?", (email,)
         ).fetchone()
-        if row is None:
-            return None
-        # A fresh request supersedes any pending link for this address.
-        conn.execute("DELETE FROM password_resets WHERE email = ? AND used_at IS NULL", (email,))
-        token = secrets.token_urlsafe(32)
-        conn.execute(
-            "INSERT INTO password_resets (email, token_hash, expires_at) VALUES (?, ?, datetime('now', ?))",
-            (email, _token_hash(token), f"+{_RESET_TTL_MINUTES} minutes"),
-        )
-        conn.commit()
-        return token
-
-
-def validate_reset_token(token: str) -> str | None:
-    """Return the account email if the token is unused and unexpired."""
-    if not token:
+    if row is None:
         return None
     with closing(_connect()) as conn:
         _ensure_schema(conn)
-        row = conn.execute(
-            "SELECT email FROM password_resets WHERE token_hash = ? AND used_at IS NULL "
-            "AND expires_at > datetime('now')",
-            (_token_hash(token),),
-        ).fetchone()
-    return row[0] if row else None
+        token = _new_token(conn, "login_tokens", email,
+                           f"+{_TOKEN_TTL_MINUTES} minutes")
+        conn.commit()
+    return token
 
 
-def reset_password(token: str, new_password: str) -> str:
-    """Consume a valid reset token and set the new password; return the email."""
-    if not (_MIN_PASSWORD <= len(new_password or "") <= _MAX_PASSWORD):
-        raise AuthError(f"Password must be {_MIN_PASSWORD}-{_MAX_PASSWORD} characters")
+def login_with_token(token: str) -> dict:
+    """Consume a valid magic-link token; return the account dict."""
     with closing(_connect()) as conn:
         _ensure_schema(conn)
         row = conn.execute(
-            "SELECT email FROM password_resets WHERE token_hash = ? AND used_at IS NULL "
+            "SELECT email FROM login_tokens WHERE token_hash = ? AND used_at IS NULL "
             "AND expires_at > datetime('now')",
             (_token_hash(token or ""),),
         ).fetchone()
         if row is None:
-            raise AuthError("This reset link is invalid or has expired. Request a new one.")
+            raise AuthError("This login link is invalid or has expired. Request a new one.")
         conn.execute(
-            "UPDATE users SET password_hash = ? WHERE email = ?",
-            (hash_password(new_password), row[0]),
-        )
-        conn.execute(
-            "UPDATE password_resets SET used_at = datetime('now') WHERE token_hash = ?",
+            "UPDATE login_tokens SET used_at = datetime('now') WHERE token_hash = ?",
             (_token_hash(token),),
         )
+        conn.execute(
+            "UPDATE users SET last_login = datetime('now') WHERE email = ?", (row[0],)
+        )
+        user = conn.execute(
+            "SELECT id FROM users WHERE email = ?", (row[0],)
+        ).fetchone()
         conn.commit()
-        return row[0]
+    return {"id": user[0], "email": row[0]}
+
+
+def request_access(email: str) -> str:
+    """File (or refresh) an access request for an address without an account.
+
+    Returns the single-use approval token for the administrator link. A new
+    request replaces the pending one for the address, so stale approval
+    links stop working.
+    """
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise AuthError("Enter a valid email address")
+    with closing(_connect()) as conn:
+        _ensure_schema(conn)
+        # Keep at most one live request per address; freeing the row also
+        # releases the UNIQUE(email) slot so re-requests stay possible.
+        conn.execute("DELETE FROM signup_requests WHERE email = ? AND used_at IS NULL", (email,))
+        token = secrets.token_urlsafe(32)
+        conn.execute(
+            "INSERT INTO signup_requests (email, token_hash, expires_at) VALUES (?, ?, datetime('now', ?))",
+            (email, _token_hash(token), f"+{_APPROVAL_TTL_HOURS} hours"),
+        )
+        conn.commit()
+    return token
+
+
+def approve_request(token: str) -> str:
+    """Consume a pending access request; create the account, return its email.
+
+    Called when the administrator opens the emailed approval link. The
+    caller then sends the new user a magic link — approval never logs
+    anyone in by itself, so the new account's ``last_login`` stays empty
+    until their first real login. The account is passwordless from birth:
+    the scrypt placeholder hash stores an unguessable secret nobody can
+    ever log in with.
+    """
+    with closing(_connect()) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT email FROM signup_requests WHERE token_hash = ? AND used_at IS NULL "
+            "AND expires_at > datetime('now')",
+            (_token_hash(token or ""),),
+        ).fetchone()
+        if row is None:
+            raise AuthError("This approval link is invalid or has already been used.")
+        conn.execute(
+            "UPDATE signup_requests SET used_at = datetime('now') WHERE token_hash = ?",
+            (_token_hash(token),),
+        )
+        if conn.execute(
+            "SELECT 1 FROM users WHERE email = ?", (row[0],)
+        ).fetchone() is None:
+            conn.execute(
+                "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+                (row[0], hash_password(secrets.token_urlsafe(32))),
+            )
+        conn.commit()
+    return row[0]
