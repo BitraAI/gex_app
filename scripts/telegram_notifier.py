@@ -201,12 +201,16 @@ def diff_alerts(
 
     prev_spot = prev.get("spot")
     if prev_spot is not None:
-        if cw is not None:
+        # Crossing checks compare spot against its own wall snapshot: a
+        # sample pair only counts as a cross when the strike itself did not
+        # move (prev_cw/prev_pw == cw/pw), so a wall refresh can't be
+        # mistaken for a price crossing (wall moves already alert above).
+        if cw is not None and prev_cw is not None and cw == prev_cw:
             if prev_spot <= cw and spot > cw:
                 new_alerts.append(f"Price crossed above Resistance (${cw:.2f})")
             elif prev_spot >= cw and spot < cw:
                 new_alerts.append(f"Price crossed below Resistance (${cw:.2f})")
-        if pw is not None:
+        if pw is not None and prev_pw is not None and pw == prev_pw:
             if prev_spot <= pw and spot > pw:
                 new_alerts.append(f"Price crossed above Support (${pw:.2f})")
             elif prev_spot >= pw and spot < pw:

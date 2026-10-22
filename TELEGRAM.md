@@ -67,12 +67,14 @@ selected symbol when the main page refreshes analytics.
 | **Dealer gamma flip** | Dealer position flipped Long Gamma ↔ Short Gamma |
 | **Call Wall moved** | Call wall strike value changed (e.g. `$495.00 → $500.00`) |
 | **Put Wall moved** | Put wall strike value changed (e.g. `$485.00 → $480.00`) |
-| **Price crossed above/below Resistance** | Spot pierced the Call Wall level |
-| **Price crossed above/below Support** | Spot pierced the Put Wall level |
+| **Price crossed above/below Resistance** | Spot pierced the Call Wall level (only between refreshes where the Call Wall strike itself is unchanged) |
+| **Price crossed above/below Support** | Spot pierced the Put Wall level (only between refreshes where the Put Wall strike itself is unchanged) |
 
-Wall-change alerts fire regardless of wall stability. Plain trend/reversal
-alerts additionally require `_wall_stable >= 2` consecutive refreshes to filter
-jittery moving walls.
+Wall-change alerts fire regardless of wall stability. Price-crossing alerts
+only fire between refreshes where the wall strike itself is unchanged, so a
+wall refresh can't be mistaken for a price break. Plain trend/reversal alerts
+additionally require conviction ≥ 2, `_wall_stable >= 2` consecutive
+refreshes, and spot inside a wall zone.
 
 ---
 
@@ -153,9 +155,11 @@ parameters:
 | Periodic recompute | `flow._recompute_symbol()` | `flow.py` — full recompute cadence, includes `absorption` |
 | Single-ticker in-app | `app.check_alerts()` | `app.py` — current symbol, includes `absorption` |
 
-All pass `symbol`, `spot`, `gex`, `iv_rank`, `wall_zone`, `pw`, `cw`,
-`wall_mark`, `flow_ratio`, `absorption`. `absorbed_at_wall`, `trend_alert`, and
-`net_flow` are supplied only where zone tracking is active.
+All pass `symbol`, `spot`, `gex`, `wall_zone`, `pw`, `cw`, `flow_ratio`, and
+`absorption` where available; `wall_mark` is supplied on the streaming and
+in-app paths. `absorbed_at_wall`, `trend_alert`, and `net_flow` come only
+from the streaming multi-ticker path (zone tracking). No path passes
+`iv_rank` — it exists only inside strategy recommendation text.
 
 ---
 
