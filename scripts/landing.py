@@ -62,8 +62,7 @@ def _shell_html() -> str:
     return f"""
 <div class="gh-rh-shell">
 
-  <div class="promo-bar">Session data is live. <b>Analytics in one place.</b>
-    <a href="#open-account">Get started &rarr;</a></div>
+  <div class="promo-bar">Session data is live. <b>Analytics in one place.</b></div>
 
   <nav class="rh-nav">
     <div class="nav-inner">
@@ -78,7 +77,6 @@ def _shell_html() -> str:
       </div>
       <div class="nav-cta">
         <a class="nav-login" href="#open-account">Log in</a>
-        <a class="btn-pill btn-dark" href="#open-account">Get started</a>
       </div>
     </div>
   </nav>
@@ -91,7 +89,6 @@ def _shell_html() -> str:
         flow, SSVI volatility, and ranked signals — stocks, ETFs, and index
         options, all in one place.</p>
         <div class="hero-cta">
-          <a class="btn-pill btn-green" href="#open-account">Get started</a>
           <a class="btn-pill btn-ghost" href="#features">Learn more</a>
         </div>
       </div>

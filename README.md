@@ -309,7 +309,7 @@ gex_app/
 
 ### Landing Page & Accounts
 
-The app opens on a Robinhood-style landing page (promo bar, sticky nav, hero with a live ticker tape, feature cards built from the screenshots in `assets/`, a dark flow band, trust cards, and a legal footer). Nobody reaches the dashboard until they log in on the page:
+The app opens on a Robinhood-style landing page (promo bar, sticky **Log in** nav, hero with a chart screenshot and a **Learn more** CTA, feature cards built from the screenshots in `assets/`, a dark flow band with an **Open your account** CTA, trust cards, and a legal footer; both CTAs scroll to the auth card, and no "Get started" buttons remain). Nobody reaches the dashboard until they log in on the page:
 
 - **Accounts live in SQLite** at `~/.local/share/gex_app/app.db` (WAL mode; override the path with the `GEX_APP_DB` env var). One `users` table keyed by **email only**: unique case-insensitive address + `created_at` / `last_login` stamps. Accounts are **passwordless** — they start with an unguessable scrypt placeholder hash nobody can ever log in with. Databases created with the earlier username+password schema are migrated automatically on first use; their users keep working (they can now log in by magic link).
 - **The signed-in user** is kept in `st.session_state["gex_user"]`; **Log out** (top of the sidebar) clears it and returns to the landing page.
