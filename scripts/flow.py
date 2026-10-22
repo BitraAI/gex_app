@@ -802,7 +802,7 @@ def maybe_fire_wall_zone_alerts() -> None:
         # *drives* the break trigger (see below), because raw cumulative volume
         # inflates with quiet time spent in the zone and produced wrong signals.
         _flow_b, _flow_br = atm_svc.get_ticker_flow(t_upper)
-        _flow_vol = (_flow_b or 0) + (_flow_br or 0) if _flow_b is not None else None
+        _flow_vol = None if _flow_b is None and _flow_br is None else (_flow_b or 0) + (_flow_br or 0)
         _prev_zone = (prev or {}).get("_wall_zone")
         if _prev_zone != wall_zone:
             next_state["_zone_entry_vol"] = _flow_vol if wall_zone is not None else None
@@ -828,7 +828,10 @@ def maybe_fire_wall_zone_alerts() -> None:
         if _break_alert:
             _send_gate = now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN
         else:
-            _send_gate = _fire_trend and _wall_stable >= 2 and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN
+            # Reversals only surface inside a wall zone, per the documented
+            # wall-reversal behavior — open-space reversals stay quiet.
+            _send_gate = (_fire_trend and wall_zone is not None and _wall_stable >= 2
+                          and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN)
         if _send_gate:
             next_state["last_alert_ts"] = now
             next_state["_last_alert_texts"] = new_alerts

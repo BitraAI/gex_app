@@ -134,24 +134,17 @@ The grid's **Trend column** shows `trend_reversal` if present (`bullish` /
 `flat`). The cell is colored green for `bullish` / `up`, red for `bearish` /
 `down`, amber for `flat`, and the label is always bolded.
 
-**Spot cell background coloring** is driven by wall events stored in session
-state by `maybe_fire_wall_zone_alerts` (`s._wall_break_alerts` /
-`s._wall_reversal_alerts`):
+**Spot cell background coloring** is driven by wall-zone membership in
+`flow.py` `_spot_bg` (no wall-break / reversal event state is kept):
 
 | Spot cell color | Condition |
 | --- | --- |
-| 🔴 red `#ffcccc` | Support wall **broke** (spot exited a Support zone after absorbing ≥ 100 contracts) |
-| 🟢 green `#ccffcc` | Resistance wall **broke** (spot exited a Resistance zone after absorbing ≥ 100 contracts) |
-| 🟢 green `#ccffcc` | Support wall **reversal** (L2 trend flipped while spot was inside a Support zone) |
-| 🔴 red `#ffcccc` | Resistance wall **reversal** (L2 trend flipped while spot was inside a Resistance zone) |
+| 🟢 green `#ccffcc` | spot inside the **Support** zone (put wall ± its wall buffer) |
+| 🔴 red `#ffcccc` | spot inside the **Resistance** zone (call wall ± its wall buffer) |
 
-When no wall event is active for a ticker, the Spot cell has no special
-background. The same wall-break / wall-reversal state also drives the
-background of the **Support**, **Resistance**, **Call Price** and **Put
-Price** cells — each colored green or red according to whether its associated
-wall broke (high-conviction move) or reversed at the wall. See `flow.py`
-`_spot_bg`, `_support_bg`, `_resistance_bg`, `_call_price_bg`,
-`_put_price_bg` for the full per-cell mapping.
+When spot is not inside either zone, the Spot cell has no special background.
+The Support / Resistance / Call Price / Put Price cells are not color-coded by
+wall events.
 
 
 ## Data pipeline
@@ -322,14 +315,15 @@ page (`fetch_data`) and by the Trade Signals tab scan.
 
 ### Trend alerts (Telegram)
 
-The `maybe_fire_wall_zone_alerts` function sends **wall-reversal trend alerts**,
-**wall-broke alerts**, **wall-change diff alerts** (Call/Put Wall move, Gamma Flip /
-Dealer flip changed, plus wall price-crossings), and **strategy recommendation
-blocks** to Telegram. Front expiration VRP is no longer passed as a header
-parameter to `notify_alerts`; it is excluded from the Telegram header but
-remains in the underlying strategy recommendation text.
+The `maybe_fire_wall_zone_alerts` function sends **wall-reversal trend alerts**
+and **diff alerts** (Wall moved, price crossings) to Telegram. Gamma Flip /
+Dealer-flip diffs fire only from the other two paths (periodic recompute and
+the in-app single-ticker `app.check_alerts`) — the streaming path pins
+`gamma_flip` / `dealer_position` to `None` in the analytics it hands to
+`diff_alerts`. Front expiration VRP is not passed to `notify_alerts`; it
+remains only in strategy recommendation text.
 
-**Wall-change diff alerts.** `telegram_notifier.diff_alerts()` now detects when
+**Wall-change diff alerts.** `telegram_notifier.diff_alerts()` detects when
 the Call Wall or Put Wall strike value changes between refreshes and emits:
 
 - `Call Wall moved: $<prev> → $<curr>`
@@ -338,12 +332,12 @@ the Call Wall or Put Wall strike value changes between refreshes and emits:
 These pass through unchanged (same treatment as Gamma Flip / Dealer flip changed)
 and fire regardless of wall stability, subject to the per-ticker cooldown.
 
-When the trend reversal fires inside a wall zone, it is emitted as a dedicated
-wall-reversal alert:
-
-    💥 {Resistance/Support} wall {BULLISH/BEARISH} REVERSAL after absorbing <n> contracts @ $<strike>
-
-The alert text is the literal `trend_reversal` (`bullish` / `bearish`). Telegram maps the direction to a trade suggestion:
+When a trend reversal fires **inside** a wall zone, `maybe_fire_wall_zone_alerts`
+sends it via `notify_alerts(..., trend_alert=...)`, which renders the compact
+signal line below — there is no dedicated `💥` wall-reversal message format.
+`Wall absorbed: <n> contracts` (contracts traded since spot entered the zone)
+appears as a separate header line, context only. The body uses the literal
+`trend_reversal` (`bullish` / `bearish`); Telegram maps the direction to a trade suggestion:
 
 | Trend alert body | Direction | Suggestion |
 | --- | --- | --- |
@@ -371,12 +365,12 @@ Reversals (`bullish` / `bearish`) clear with score ≥ 2. Weak / flat-ish
 trends that don't corroborate stay quiet. Thresholds are the tunable
 `_ALERT_MIN_CONVICTION_REVERSAL` constant in `flow.py`.
 
-**Wall-reversal alerts.** When a trend reversal fires **inside** a wall zone
+**Wall-reversal alerts.** A trend reversal fires only **inside** a wall zone
 (`wall_zone is not None` — spot trading within a wall buffer of a
-resistance/support level), `maybe_fire_wall_zone_alerts` sends a dedicated
-wall-reversal alert to Telegram:
-
-    💥 {Resistance/Support} wall {BULLISH/BEARISH} REVERSAL after absorbing <n> contracts @ $<strike>
+resistance/support level): the send gate requires `_fire_trend`(conviction
+≥ 2), `wall_zone is not None`, and `_wall_stable >= 2`, plus the per-ticker
+cooldown. There is no dedicated `💥` wall-reversal message format — the
+reversal is delivered through the compact signal line (see below).
 
 This replaces the previous behavior where trend alerts were *filtered*
 (suppressed) when spot was **away** from a wall. Now:
@@ -387,12 +381,12 @@ This replaces the previous behavior where trend alerts were *filtered*
   — the conviction gate and the wall-zone check ensure only meaningful L2
   signals at key levels surface.
 
-All diff-based alerts (wall zone, gamma flip, wall change, wall-broke)
-except wall-broke alerts, wall-reversal trend alerts, and strategy
-recommendation blocks are sent to Telegram. "Wall changed" alerts are
-passed through unchanged. Front expiration VRP is removed from the
-Telegram header (not passed to `notify_alerts`) but remains in strategy
-recommendation text.
+Diff-based alerts (wall change, gamma flip / dealer flip, price crossings) are
+sent to Telegram wherever they are generated. The periodic poller filters
+legacy "wall BROKE" / "wall REVERSAL" alert text out of its sends (legacy
+strings the pipeline no longer produces). "Wall moved" alerts are passed
+through unchanged. Front expiration VRP is not passed to `notify_alerts`;
+it remains only in strategy recommendation text.
 
 **Compact signal line.** When a wall-reversal alert fires, `notify_alerts(..., trend_alert=...)`
 renders a single dense signal line instead of repeating the flow-metric
@@ -507,18 +501,19 @@ level while the ETF entry's spot follows `UNDERLYING_PRICE`.
 
 **Wall absorption** in `flow.maybe_fire_wall_zone_alerts` snapshots the
 cumulative ATM volume when spot enters a wall zone and reports how many
-contracts were absorbed while spot stayed inside (Telegram
+contracts were traded while spot stayed inside (Telegram
 `Wall absorbed: <n> contracts`). This is reported as *context* only — it does
-**not** drive the broken-wall trigger.
+**not** drive any trigger.
 
-**Wall broke** is triggered by a **directional pierce**, not by leaving the
-zone: Resistance breaks when spot settles **above** the call wall, Support
-breaks when spot settles **below** the put wall. Each must persist past the
-wall by the near-wall buffer margin for `_WALL_BREAK_CONFIRM` consecutive
-samples (filters jitter at the level), and the ticker must have been observed
-holding the wall first (never after a session starts already past the wall),
-so a 💥 `Resistance/Support wall BROKE after absorbing <n> contracts` alert plus a
-`BUY CALL`/`BUY PUT` trade line only fires on a real, direction-correct break.
+**Wall crossings** are detected by `telegram_notifier.diff_alerts` from the
+previous vs current spot-and-wall snapshot: `Price crossed above/below
+Resistance/Support` fires when spot moves past a strike, but only between
+samples where that wall strike itself is unchanged (`cw == prev_cw` /
+`pw == prev_pw`), so wall refreshes cannot be mistaken for price breaks.
+Crossings are subject to the per-ticker `_WALL_ZONE_ALERT_COOLDOWN`
+(600 s) and market-hours suppression. There is no pierce/settle confirmation
+logic; the only extra gates apply to reversals (conviction ≥ 2,
+`_wall_stable >= 2`, spot inside a wall zone).
 
 ### Book pressure (L2 OPTIONS book)
 
