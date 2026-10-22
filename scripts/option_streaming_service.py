@@ -390,6 +390,9 @@ class AtmOptionVolumeService:
                     "cumulative_call_buy": 0,
                     "call_delta": None,
                     "put_delta": None,
+                    "expiration2": None,
+                    "exp2_call_delta": None,
+                    "exp2_put_delta": None,
                     "delta_buy": 0.0,
                     "delta_sell": 0.0,
                     "flow_history": [],
@@ -752,6 +755,26 @@ class AtmOptionVolumeService:
                 self._do_subscribe(sc), self._loop,
             )
 
+    def set_ticker_expiration2(self, display_symbol: str, expiration: str):
+        """Set the SECOND-nearest expiration for a tracked ticker.
+
+        The Order Flow Flow Ratio / Net Flow columns now measure the two
+        closest expirations' ATM contracts (front + second ATM pair), so
+        the rolling window sees the same trend across expiries instead of
+        a single contract pair. Triggers re-subscription if changed."""
+        sc = None
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is not None and expiration:
+                old_exp = ticker.get("expiration2")
+                ticker["expiration2"] = expiration
+                if old_exp != expiration and self._running and self._expiration:
+                    sc = self._stream_client
+        if sc is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._do_subscribe(sc), self._loop,
+            )
+
     def _maybe_invalidate_walls_on_strike_change(
         self, display_symbol: str, old_atm: float | None, new_atm: float,
     ) -> None:
@@ -807,6 +830,24 @@ class AtmOptionVolumeService:
                     ticker["call_delta"] = call_delta
                 if put_delta is not None:
                     ticker["put_delta"] = put_delta
+
+    def set_ticker_atm_deltas2(self, display_symbol: str,
+                               call_delta: float | None,
+                               put_delta: float | None):
+        """Store the SECOND-nearest expiration's ATM Call/Put deltas.
+
+        Delta-weighted executed flow (delta_buy / delta_sell) currently
+        weights every trade by the FRONT expiration's deltas, whether the
+        print came from the front or the second ATM pair — the contracts
+        live at the same strike, so the deltas are close; raw Net Flow /
+        Flow Ratio buckets are unaffected (they are pure counts)."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is not None:
+                if call_delta is not None:
+                    ticker["exp2_call_delta"] = call_delta
+                if put_delta is not None:
+                    ticker["exp2_put_delta"] = put_delta
 
     def set_ticker_option_prices(self, display_symbol: str,
                                   call_price: float | None,
@@ -988,6 +1029,9 @@ class AtmOptionVolumeService:
                     "cumulative_put_sell": 0,
                     "call_delta": None,
                     "put_delta": None,
+                    "expiration2": None,
+                    "exp2_call_delta": None,
+                    "exp2_put_delta": None,
                     "delta_buy": 0.0,
                     "delta_sell": 0.0,
                     "flow_history": [],
@@ -1351,6 +1395,24 @@ class AtmOptionVolumeService:
                 info["call_sym"] = call_sym
                 info["put_sym"] = put_sym
                 info["atm_strike"] = atm
+
+                # Second-nearest expiration: another ATM call/put pair on
+                # the same strike feeds the rolling Flow Ratio / Net Flow,
+                # so the metric reads the trend across the two closest
+                # expiries instead of a single contract pair.
+                exp2 = info.get("expiration2")
+                if exp2 and exp2 != exp:
+                    p2 = exp2.split("-")
+                    yymmdd2 = p2[0][2:] + p2[1] + p2[2]
+                    call_sym2 = _make_option_symbol(stream_sym, yymmdd2, "C", sub_atm)
+                    put_sym2 = _make_option_symbol(stream_sym, yymmdd2, "P", sub_atm)
+                    all_symbols.append(call_sym2)
+                    all_symbols.append(put_sym2)
+                    info["call_sym2"] = call_sym2
+                    info["put_sym2"] = put_sym2
+                else:
+                    info["call_sym2"] = None
+                    info["put_sym2"] = None
                 # Preserve per-ticker expiration — do NOT overwrite with
                 # the shared self._expiration here.
                 # For SPX/RUT/NDX index options the display symbol
@@ -1362,6 +1424,11 @@ class AtmOptionVolumeService:
                 self._sym_to_ticker[put_sym] = target_sym
                 self._sym_to_ticker[call_sym.replace(" ", "")] = target_sym
                 self._sym_to_ticker[put_sym.replace(" ", "")] = target_sym
+                if info.get("call_sym2"):
+                    self._sym_to_ticker[info["call_sym2"]] = target_sym
+                    self._sym_to_ticker[info["put_sym2"]] = target_sym
+                    self._sym_to_ticker[info["call_sym2"].replace(" ", "")] = target_sym
+                    self._sym_to_ticker[info["put_sym2"].replace(" ", "")] = target_sym
 
         if skipped_no_spot:
             # Only log when the set of skipped tickers actually changes, so we

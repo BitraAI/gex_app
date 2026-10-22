@@ -952,20 +952,22 @@ async def _compute_for_symbol(client, symbol: str) -> dict | None:
     return {"analytics": analytics, "spot": spot, "rv": rv, "data": data, "iv_rank": iv_rank}
 
 
-def _atm_deltas_for_symbol(data: list, atm_strike: float | None):
-    """Return the front-month ATM Call delta (>0) and Put delta (<0) from a
-    chain ``data`` list, or (None, None) if unavailable."""
+def _atm_deltas_for_symbol(data: list, atm_strike: float | None, idx: int = 0):
+    """Return the Call delta (>0) and Put delta (<0) of the ATM strike for
+    the ``idx``-th nearest expiration that lists the ATM strike (0 = front
+    month, 1 = second-nearest), from a chain ``data`` list, or
+    (None, None) if unavailable."""
     if not data or not atm_strike:
         return None, None
     atm_exps = sorted({
         e["expiration"] for e in data if abs(e["strike"] - atm_strike) < 1e-9
     })
-    if not atm_exps:
+    if len(atm_exps) <= idx:
         return None, None
-    front = atm_exps[0]
+    exp = atm_exps[idx]
     call_delta = put_delta = None
     for e in data:
-        if abs(e["strike"] - atm_strike) < 1e-9 and e["expiration"] == front:
+        if abs(e["strike"] - atm_strike) < 1e-9 and e["expiration"] == exp:
             if e["type"] == "CALL" and call_delta is None:
                 call_delta = e.get("delta")
             elif e["type"] == "PUT" and put_delta is None:
@@ -1005,6 +1007,11 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
             _exps = sorted(set(e["expiration"] for e in data))
             if _exps:
                 atm_svc.set_ticker_expiration(display_key, _exps[0])
+                # Second-nearest expiration: a second ATM pair feeds the
+                # rolling Flow Ratio / Net Flow so the trend spans both
+                # closest expiries.
+                if len(_exps) > 1:
+                    atm_svc.set_ticker_expiration2(display_key, _exps[1])
             # Call/put marks at the ATM strike (populates Call/Put Price columns)
             _atm_k = analytics.get("atm_strike")
             if _atm_k:
@@ -1022,6 +1029,11 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
             # Front ATM Call/Put deltas (weight trades -> Net Flow column).
             _atm_d = _atm_deltas_for_symbol(data, _atm_k)
             atm_svc.set_ticker_atm_deltas(display_key, _atm_d[0], _atm_d[1])
+            # Second-nearest expiration's ATM deltas (stored alongside; the
+            # front pair's deltas weight all prints for now — same strike,
+            # so the values are close).
+            _atm_d2 = _atm_deltas_for_symbol(data, _atm_k, idx=1)
+            atm_svc.set_ticker_atm_deltas2(display_key, _atm_d2[0], _atm_d2[1])
             # Option marks at the key wall strikes: CALL at the put wall
             # (support), PUT at the call wall (resistance), CALL at the
             # call wall (resistance), and PUT at the put wall (support).
@@ -1177,6 +1189,11 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
             _exps = sorted(set(e["expiration"] for e in data))
             if _exps:
                 atm_svc.set_ticker_expiration(display_key, _exps[0])
+                # Second-nearest expiration: a second ATM pair feeds the
+                # rolling Flow Ratio / Net Flow so the trend spans both
+                # closest expiries.
+                if len(_exps) > 1:
+                    atm_svc.set_ticker_expiration2(display_key, _exps[1])
             # Call/put marks at the ATM strike (populates Call/Put Price columns)
             _atm_k = analytics.get("atm_strike")
             if _atm_k:
@@ -1192,8 +1209,13 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
                                 _put_mark = e.get("mark")
                 atm_svc.set_ticker_option_prices(display_key, _call_mark, _put_mark)
             # Front ATM Call/Put deltas (weight trades -> Net Flow column).
-            _atm_d2 = _atm_deltas_for_symbol(data, _atm_k)
-            atm_svc.set_ticker_atm_deltas(display_key, _atm_d2[0], _atm_d2[1])
+            _atm_dx = _atm_deltas_for_symbol(data, _atm_k)
+            atm_svc.set_ticker_atm_deltas(display_key, _atm_dx[0], _atm_dx[1])
+            # Second-nearest expiration's ATM deltas (stored alongside; the
+            # front pair's deltas weight all prints for now — same strike,
+            # so the values are close).
+            _atm_d2 = _atm_deltas_for_symbol(data, _atm_k, idx=1)
+            atm_svc.set_ticker_atm_deltas2(display_key, _atm_d2[0], _atm_d2[1])
             # Option marks at the key wall strikes (Call/Put Price columns).
             atm_svc.set_ticker_wall_prices(
                 display_key,
