@@ -1181,16 +1181,16 @@ def build_init_data(
                     {"type": "Histogram", "key": "andean_osc", "data": _oscd, "options": {"priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
                     # Signal line with slope-aware per-point coloring (same
                     # mechanism as Half Trend / EMA 200): green while the
-                    # signal is rising, its default #ffa15a otherwise. The
-                    # first bar has no previous value to compare against.
+                    # signal is rising, red otherwise. The first bar has no
+                    # previous value to compare against.
                     {"type": "Line", "key": "andean_signal", "data": [
                         {
                             "time": cd[i]["time"],
                             "value": signal[i],
-                            "color": "#26a69a" if (i > 0 and signal[i] > signal[i - 1]) else "#ffa15a",
+                            "color": "#26a69a" if (i > 0 and signal[i] > signal[i - 1]) else "#ef5350",
                         }
                         for i in range(len(cd))
-                    ], "options": {"color": "#ffa15a", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
+                    ], "options": {"color": "#ef5350", "lineWidth": 2, "priceScaleId": "osc", "priceLineVisible": False, "lastValueVisible": False}},
                     {
                         "type": "Line", "key": "andean_zero",
                         "data": [{"time": cd[i]["time"], "value": 0} for i in range(len(cd))],
