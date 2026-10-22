@@ -43,8 +43,16 @@ CREATE TABLE IF NOT EXISTS signup_requests (
     expires_at TEXT    NOT NULL,
     used_at    TEXT
 );
+CREATE TABLE IF NOT EXISTS session_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash   TEXT    NOT NULL UNIQUE,
+    expires_at   TEXT    NOT NULL,
+    refreshed_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 CREATE INDEX IF NOT EXISTS idx_login_tokens_email ON login_tokens(email);
 CREATE INDEX IF NOT EXISTS idx_requests_email ON signup_requests(email);
+CREATE INDEX IF NOT EXISTS idx_session_tokens_user ON session_tokens(user_id);
 DROP TABLE IF EXISTS password_resets;
 """
 
@@ -145,6 +153,9 @@ def user_count() -> int:
 
 _TOKEN_TTL_MINUTES = 30
 _APPROVAL_TTL_HOURS = 72
+
+# Long-lived "remember me" sessions (persistent_session.py rides on these).
+SESSION_TTL_DAYS = 30
 
 
 def _token_hash(token: str) -> str:
@@ -273,3 +284,70 @@ def approve_request(token: str) -> str:
             )
         conn.commit()
     return row[0]
+
+
+# ---------------- persistent browser sessions ----------------
+
+def create_session(user_id: int) -> str:
+    """Mint a long-lived session bearer token for a user.
+
+    Unlike magic links these are reusable (the browser sends the cookie on
+    every request), expire after ``SESSION_TTL_DAYS``, and are stored only
+    as SHA-256 hashes. Expired tokens are swept here.
+    """
+    token = secrets.token_urlsafe(32)
+    with closing(_connect()) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            "DELETE FROM session_tokens WHERE expires_at < datetime('now')"
+        )
+        conn.execute(
+            "INSERT INTO session_tokens (user_id, token_hash, expires_at) "
+            "VALUES (?, ?, datetime('now', ?))",
+            (user_id, _token_hash(token), f"+{SESSION_TTL_DAYS} days"),
+        )
+        conn.commit()
+    return token
+
+
+def user_from_session(token: str) -> dict | None:
+    """Resolve a session token to the account dict; sliding-renews expiry.
+
+    Returns ``None`` for unknown, revoked, or expired tokens. The expiry is
+    pushed out to a full TTL again whenever a session that has been in use
+    for more than a day is validated, so active users are not logged out
+    after exactly 30 days while abandoned ones eventually are.
+    """
+    token = token or ""
+    if not token:
+        return None
+    with closing(_connect()) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT s.id, u.id, u.email FROM session_tokens s "
+            "JOIN users u ON u.id = s.user_id "
+            "WHERE s.token_hash = ? AND s.expires_at > datetime('now')",
+            (_token_hash(token),),
+        ).fetchone()
+        if row is None:
+            return None
+        session_id, user_id, email = row[0], row[1], row[2]
+        conn.execute(
+            "UPDATE session_tokens SET expires_at = datetime('now', ?), "
+            "refreshed_at = datetime('now') WHERE id = ? "
+            "AND refreshed_at < datetime('now', '-1 day')",
+            (f"+{SESSION_TTL_DAYS} days", session_id),
+        )
+        conn.commit()
+    return {"id": user_id, "email": email}
+
+
+def revoke_session(token: str) -> None:
+    """Delete one session token (used by the Log out button)."""
+    with closing(_connect()) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            "DELETE FROM session_tokens WHERE token_hash = ?",
+            (_token_hash(token or ""),),
+        )
+        conn.commit()
