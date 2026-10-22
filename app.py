@@ -920,7 +920,6 @@ def render_sidebar():
 TIMEFRAMES = {
     "1m": "1min", "2m": "2min", "5m": "5min", "15m": "15min",
     "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1D", "1w": "1W", "1M": "1ME",
-    "233t": "233t",
 }
 
 
@@ -947,7 +946,7 @@ def render_candlesticks_frag():
         
         with row2:
             indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "Anchored VWAP", "Half Trend", "Volume", "Andean Squeeze"]
-            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "EMA 20", "EMA 50", "Half Trend", "Anchored VWAP"], label_visibility="collapsed")
+            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "EMA 200", "Half Trend", "Anchored VWAP"], label_visibility="collapsed")
         
         # Refresh the cache from the API when the existing on-disk bars are
         # stale relative to the user's chosen timeframe. The chart fragment
