@@ -212,6 +212,51 @@ inline; always take the semaphore per API call; catch everything and return
 
 ---
 
+## HTTP / Open WebUI
+
+The server supports **Streamable HTTP** and **SSE** transports in addition to
+stdio, so you can connect it from **Open WebUI** (or any HTTP-based MCP
+client).
+
+### Start the server
+
+```bash
+nohup /path/to/venv/bin/python /path/to/gex_app/schwab_mcp/main.py \
+  --transport streamable-http --host 0.0.0.0 \
+  > /tmp/gex_mcp.log 2>&1 &
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--transport` | `stdio` | `stdio` (CLI agents), `sse`, or `streamable-http` (HTTP/SSE) |
+| `--host` | `0.0.0.0` | Network interface to bind |
+| `--port` | `8001` | TCP port |
+
+### Open WebUI connection
+
+In **Open WebUI → Settings → MCP → Add Server**:
+
+| Field | Value |
+|---|---|
+| **Base URL** | `http://localhost:8001/mcp` |
+
+The server returns `Access-Control-Allow-Origin: *` on every response so
+browsers and Open WebUI are not blocked by CORS.
+
+### Available transports
+
+```bash
+python main.py                              # stdio  (OpenCode, CLI agents)
+python main.py --transport sse              # SSE    at http://localhost:8001/sse
+python main.py --transport streamable-http  # HTTP   at http://localhost:8001/mcp
+```
+
+### Logging
+
+Logs are written to `/tmp/gex_mcp.log` when started via `nohup`.
+
+---
+
 ## Known behaviors & gotchas
 
 - **Schwab throttling**: sustained bursts beyond ~120 req/min don't return
