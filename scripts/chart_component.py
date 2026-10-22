@@ -210,7 +210,7 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
                 lockFirstTime: false,
                 allowScroll: true,
                 allowZoom: true,
-                rightOffset: 5,
+                rightOffset: 10,   // 10 bars of blank space on the right edge
             },
         });
 
