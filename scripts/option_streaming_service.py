@@ -21,7 +21,11 @@ _WALL_REFRESH_MIN_INTERVAL = 30.0
 
 # Order-absorption thresholds (price-impact absorption, contracts per $1):
 #   absorption = delta(cumulative ATM option volume over 60s) /
-#                max(|delta spot| over 60s, _ABSORPTION_MIN_SPOT_MOVE)
+#                max(spot path length over 60s, _ABSORPTION_MIN_SPOT_MOVE)
+# The denominator is the spot PATH LENGTH (sum of |delta| per sample), not
+# the net 2-point displacement: a tape that whipsaws ±$2 and closes flat has
+# travelled a lot and must not read as "pinned".  Only a price that stays
+# put — a genuine pin — produces a high ratio.
 # Below _ABSORPTION_MIN_VOL contracts the ratio is not meaningful (None).
 _ABSORPTION_MIN_VOL = 20
 _ABSORPTION_MIN_SPOT_MOVE = 0.05  # $ floor so a pinned price can't yield inf
@@ -445,7 +449,12 @@ class AtmOptionVolumeService:
     def get_ticker_absorption(self, display_symbol: str) -> float | None:
         """Return the current order absorption for a tracked ticker:
         cumulative ATM option volume over the trailing 60 s divided by the
-        spot displacement over the same window (contracts per $1).
+        spot *path length* over the same window (contracts per $1).
+
+        The denominator is the sum of absolute per-sample spot moves, not
+        the net displacement: a tape that whipsaws ±$2 and closes flat has
+        travelled a lot and must NOT read as pinned — only a price that
+        stays put (a genuine pin) yields a high ratio.
 
         High absorption means the book/level soaked up heavy flow with
         little price movement (price pinned); low absorption means the
@@ -476,8 +485,12 @@ class AtmOptionVolumeService:
             vol_60 = vh[-1][1] - vh[0][1]
             if vol_60 < _ABSORPTION_MIN_VOL:
                 return None
-            spot_move = abs(sh[-1][1] - sh[0][1])
-            return vol_60 / max(spot_move, _ABSORPTION_MIN_SPOT_MOVE)
+            # Chop-adjusted price movement: total path travelled by spot
+            # over the window (sum of |Δ| per sample), floored so a
+            # dead-flat feed cannot divide by zero.
+            spot_path = sum(abs(cur[1] - prev[1])
+                            for prev, cur in zip(sh, list(sh)[1:]))
+            return vol_60 / max(spot_path, _ABSORPTION_MIN_SPOT_MOVE)
 
     def get_ticker_executed_net60(self, display_symbol: str) -> float | None:
         """Return (buy_vol, sell_vol, net_60) for a tracked ticker:
