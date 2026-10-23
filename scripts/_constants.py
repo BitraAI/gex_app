@@ -18,6 +18,12 @@ MAX_BAR_ROWS = 200
 TICKER_RETRY_COUNT = 3
 FLOW_RATIO_GREEN_THRESHOLD = 0.2
 FLOW_RATIO_RED_THRESHOLD = 0.8
+
+# Order-absorption colour thresholds (contracts per $1 of spot path) shared
+# by the Order Flow grid (flow.py) and the Telegram header colouring
+# (telegram_notifier.py) so both use the exact same cutoffs.
+ABSORPTION_HIGH = 1000.0  # heavy flow absorbed, price pinned
+ABSORPTION_LOW = 300.0    # price drifting on thin flow
 ATM_SUBSCRIBE_BACKOFF_BASE = 0.5
 ATM_SUBSCRIBE_BACKOFF_RANGE = 1.0
 FLOW_WATCHDOG_STALE_SECONDS = 60

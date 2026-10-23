@@ -20,9 +20,10 @@ from functools import partial
 from zoneinfo import ZoneInfo
 from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT,
                         FLOW_WATCHDOG_STALE_SECONDS,
-                        ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE)
+                        ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE,
+                        ABSORPTION_HIGH, ABSORPTION_LOW)
 from scripts._utils import compute_strike_increment, format_expiration
-from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol, _ABSORPTION_MIN_VOL
+from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol
 from scripts.client import fetch_quotes
 from scripts.calculations import calculate_atm_strike
 
@@ -568,9 +569,16 @@ _WALL_ZONE_BUFFER = 0.0002  # 0.02 % — must match grid coloring in flow.py
 _WALL_ZONE_MIN_BUFFER = 0.05  # absolute buffer floor ($) for low-priced tickers
 _WALL_ZONE_ALERT_COOLDOWN = 600.0  # min seconds between consecutive alerts per ticker
 
-# Order-absorption grid colour thresholds (contracts per $1 of spot move).
-_ABSORPTION_HIGH = 1000.0  # heavy flow absorbed, price pinned
-_ABSORPTION_LOW = 300.0    # price drifting on thin flow
+# Order-absorption grid colour thresholds (contracts per $1 of spot path)
+# live in scripts/_constants.py (ABSORPTION_HIGH / ABSORPTION_LOW) so the
+# Telegram header colouring shares the exact same cutoffs.
+
+# Conviction gates for the liquidity-flow point of _conviction_score:
+# |liquidity_flow| must clear the absolute floor (contracts) or
+# _LIQUIDITY_FLOW_MIN_PCT of the current resting depth, whichever is
+# larger, to count as a real refill/drain rather than book churn.
+_LIQUIDITY_FLOW_MIN = 25.0
+_LIQUIDITY_FLOW_MIN_PCT = 0.02
 
 # Conviction gate for Telegram trend alerts: only reversals (bullish/bearish)
 # are surfaced as alerts now; the plain up/down direction no longer fires a
@@ -617,14 +625,17 @@ def _conviction_score(
     liquidity_flow: float | None,
     net_flow_60: float | None,
     absorption: float | None,
+    book_depth: float | None = None,
 ) -> int:
     """0-5 confidence that a trend signal is real, from metric agreement.
 
     Each agreeing metric adds one point against the expected direction:
     |book_imbalance| > 0.3, flow_speed and flow_acceleration sharing a sign,
-    liquidity_flow refilling the book (up) or draining it (down), a 60s net
-    flow matching the direction, and heavy absorption.  Weak/absent metrics
-    simply contribute nothing, so the score is a lower bound on agreement.
+    liquidity_flow refilling the book (up) or draining it (down) by a
+    meaningful magnitude (see the gates below), a 60s net flow matching the
+    direction, and HEAVY absorption (>= ABSORPTION_HIGH vol/$1: heavy flow
+    absorbed with the price pinned).  Weak/absent metrics simply contribute
+    nothing, so the score is a lower bound on agreement.
     """
     _up = direction in ("up", "bullish")
     if direction is None:
@@ -636,12 +647,19 @@ def _conviction_score(
         if (flow_speed > 0) == (flow_acceleration > 0) and flow_speed != 0:
             score += 1
     if liquidity_flow is not None:
-        if (_up and liquidity_flow > 0) or (not _up and liquidity_flow < 0):
-            score += 1
+        # Magnitude gate: a ±5-contract wobble on a 50k-contract book is
+        # churn, not a refill/drain.  Require the absolute floor or ~2 % of
+        # the current resting depth, whichever is larger.
+        _min_flow = _LIQUIDITY_FLOW_MIN
+        if book_depth is not None and book_depth > 0:
+            _min_flow = max(_min_flow, _LIQUIDITY_FLOW_MIN_PCT * book_depth)
+        if abs(liquidity_flow) >= _min_flow:
+            if (_up and liquidity_flow > 0) or (not _up and liquidity_flow < 0):
+                score += 1
     if net_flow_60 is not None:
         if (_up and net_flow_60 > 0) or (not _up and net_flow_60 < 0):
             score += 1
-    if absorption is not None and absorption >= _ABSORPTION_MIN_VOL:
+    if absorption is not None and absorption >= ABSORPTION_HIGH:
         score += 1
     return score
 
@@ -787,6 +805,7 @@ def maybe_fire_wall_zone_alerts() -> None:
                 ticker_data.get("liquidity_flow"),
                 _net_60,
                 _absorption_now,
+                book_depth=ticker_data.get("book_depth"),
             )
             _fire_trend = _conviction >= _ALERT_MIN_CONVICTION_REVERSAL
         else:
@@ -1453,9 +1472,9 @@ def render_atm_order_flow_grid():
         absorbed with little price move, red = price drifting on thin flow."""
         if val is None:
             return ""
-        if val >= _ABSORPTION_HIGH:
+        if val >= ABSORPTION_HIGH:
             return "color: #00cc96; font-weight: bold;"
-        if val < _ABSORPTION_LOW:
+        if val < ABSORPTION_LOW:
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 

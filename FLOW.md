@@ -20,9 +20,9 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Book Imbalance** | **Level 2** (OPTIONS_BOOK) | Live Level-2 order-book pressure (OPTIONS): Positive → bullish, Negative → bearish. Weighted ratio `(W_bid − W_ask) / (W_bid + W_ask)`, range [-1, 1], refreshed on every book update. Weights combine **depth proximity** (best bid/ask levels get full weight, exponential decay by level index — 3rd level halved) and **price-distance** (volume closer to the mid-price gets higher weight). See **Book pressure (L2 OPTIONS book)** below. |
 | **Flow Speed** | **Level 2** (OPTIONS_BOOK, derived) | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
 | **Flow Acceleration** | **Level 2** (OPTIONS_BOOK, derived) | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, and `mid` is the first sample at/after the window's **time** midpoint `mid_ts`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
-| **Absorption** | **Level 1** (ATM option volume + spot displacement) | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot displacement over the same window. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
+| **Absorption** | **Level 1** (ATM option volume + spot path) | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot **path length** (sum of \|Δ\| per sample) over the same window — chop-adjusted, so a whipsawing tape is not mistaken for a pinned price. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
 | **Net Flow** | **Level 1** (ATM option trades, delta-weighted by REST chain deltas) | Net executed **delta-weighted** flow over the trailing 60 s: `net_60 = exec_history[-1][1] − exec_history[0][1]`, i.e. the change in `delta_buy − delta_sell` over the trailing 60 s window, from the ATM call/put only. Each ATM trade is weighted by the front-month ATM option delta (call Δ > 0, put Δ < 0, plumbed from the REST chain via `set_ticker_atm_deltas`; defaults to ±0.5 before the first chain refresh), so the column reports `net_delta = delta_buy − delta_sell` rather than raw contracts. Each trade print is routed to **every** tracked flow whose stream symbol matches the option's root, so tracking both `$SPX` and `SPY` (or `$RUT`+`IWM`) updates both rows from the same proxy ticks. Green > 0, red < 0, orange otherwise. See **Order absorption (Telegram + grid)**. |
-| **Liquidity Flow** | **Level 2** (OPTIONS_BOOK) | Net change in L2 OPTIONS-book resting depth at the best levels over the trailing 60 s: `liquidity_flow = depth_now − depth_60s_ago` (from `StreamingService.trend_data`). Positive = liquidity being posted (book refilling); negative = liquidity being drained (break risk). Green > 0, red < 0, orange otherwise. |
+| **Liquidity Flow** | **Level 2** (OPTIONS_BOOK) | Net change in L2 OPTIONS-book resting depth at the best levels over the trailing 60 s, computed from robust **band medians** of the window edges (`_liquidity_flow_sides` in `StreamingService`): depth is median-averaged over the newest/oldest 5 s bands and the medians differenced, so a single large book refresh at a window edge cannot dominate the reading. Positive = liquidity being posted (book refilling); negative = liquidity being drained (break risk). Side-aware splits (`bid_liquidity_flow` / `ask_liquidity_flow` in `trend_data`) separate a genuine one-sided drain from a rotation. Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -161,7 +161,7 @@ Schwab WebSocket (LEVEL1_EQUITIES + LEVEL1_OPTIONS + OPTIONS_BOOK)
    -> buy_vol / sell_vol (delta-adjusted)      -> appended to per-symbol 60s history [Level 2]
    -> GEX totals                               -> flow_speed / flow_acceleration  [Level 2]
    -> Net Flow 60s  (exec_history Δ, delta-weighted)  -> trend / reversal (trend_data)   [Level 2]
-   -> Absorption  (vol / spot displacement)    -> Liquidity Flow (depth Δ)        [Level 2]
+   -> Absorption  (vol / spot path length)   -> Liquidity Flow (depth Δ)        [Level 2]
          |                                             |
          |  Spot [Level 1 equity] / walls, option marks, index proxy spots [REST] |
          v                                             v
@@ -357,9 +357,9 @@ with the signal direction:
 | --- | --- |
 | \|book_imbalance\| > 0.3 | price pressure is strong |
 | flow_speed & flow_acceleration share a sign | momentum is accelerating |
-| liquidity_flow > 0 (up) / < 0 (down) | book refills in an up move, drains in a down move |
+| liquidity_flow > 0 (up) / < 0 (down) **and** \|liquidity_flow\| ≥ max(25 contracts, 2 % of book depth) | book refills in an up move, drains in a down move — by a magnitude that beats churn |
 | net_flow(60 s) > 0 (up) / < 0 (down) | delta-weighted executed flow matches direction |
-| absorption ≥ 20 vol/$1 (`_ABSORPTION_MIN_VOL`) | heavy flow is being absorbed |
+| absorption ≥ 1000 vol/$1 (`ABSORPTION_HIGH`) | HEAVY flow is being absorbed (price pinned) — thin-flow drift does not score |
 
 Reversals (`bullish` / `bearish`) clear with score ≥ 2. Weak / flat-ish
 trends that don't corroborate stay quiet. Thresholds are the tunable
@@ -435,10 +435,15 @@ surfaced as the grid **Absorption** column and the Telegram
 `Absorption: <n> vol/$1` header line — folded into the compact trend signal
 line as `Abs`) measures how much aggressive ATM option flow the book consumed
 without moving the price. **Level 1** data: ATM option trade volume (from
-`LEVEL1_OPTIONS`) over the spot displacement (from the `LEVEL1_EQUITIES`
+`LEVEL1_OPTIONS`) over the spot **path length** (from the `LEVEL1_EQUITIES`
 stream):
 
-    absorption = Δ(cumulative ATM volume over 60 s) / max(|Δspot| over 60 s, 0.05)
+    absorption = Δ(cumulative ATM volume over 60 s) / max(Σ|Δspot| over 60 s, 0.05)
+
+The denominator sums the absolute per-sample spot moves (path length), not
+the net displacement, so a tape that whipsaws and closes flat has travelled
+a lot and does NOT read as pinned — only a price that stays put yields a
+high ratio.
 
 High absorption (≥ 1000 vol/$1) means heavy flow is being soaked up at a level
 (price pinned — support/resistance holding); low absorption (< 300) means the

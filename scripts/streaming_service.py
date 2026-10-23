@@ -21,6 +21,21 @@ def _exp_neg(x: float) -> float:
     return math.exp(-x)
 
 
+def _median_of(values) -> float:
+    """Median of an iterable (always non-empty by the callers' contract)."""
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+# Width (seconds) of the edge bands used by the robust liquidity-flow window
+# diff: resting depth is median-estimated over the newest/oldest 5 s of the
+# trailing 60 s window instead of differencing the two extreme samples, so
+# one large OPTIONS_BOOK refresh at a window edge cannot dominate the reading.
+_LIQUIDITY_FLOW_BAND_SECS = 5.0
+
+
 class StreamingService:
     """Subscribes to Schwab LEVELONE_EQUITIES plus OPTIONS_BOOK for the chart
     symbol and every tracked ticker.  Extracts raw tick data
@@ -84,9 +99,11 @@ class StreamingService:
         # Per-symbol L2 book-imbalance history: stream_symbol -> list[(ts, ratio)],
         # pruned to the last 60s, used to derive flow_speed / flow_acceleration.
         self._book_imb_history: dict[str, list] = {}
-        # Per-symbol L2 resting-depth history: stream_symbol -> list[(ts, bid_vol
-        # + ask_vol at the best levels)], pruned to 60s, used to derive
-        # liquidity_flow (net liquidity added/drained over the window).
+        # Per-symbol L2 resting-depth history: stream_symbol -> list[(ts,
+        # bid_vol, ask_vol) of depth at the best levels], pruned to 60s,
+        # used to derive liquidity_flow (net liquidity added/drained over
+        # the window, side-aware so a bid/ask rotation is distinguishable
+        # from a genuine drain).
         self._book_depth_history: dict[str, list] = {}
         self._prev_trend: dict[str, str] = {}        # stream_symbol -> last trend label (reversal)
 
@@ -625,7 +642,7 @@ class StreamingService:
         while hist and hist[0][0] < cutoff:
             hist.pop(0)
         depth = self._book_depth_history.setdefault(symbol, [])
-        depth.append((now, total))
+        depth.append((now, bid_vol, ask_vol))
         while depth and depth[0][0] < cutoff:
             depth.pop(0)
 
@@ -669,26 +686,65 @@ class StreamingService:
         flow_acceleration = recent_flow - previous_flow
         return flow_speed, flow_acceleration
 
+    def _liquidity_flow_sides(self, symbol: str) -> tuple[float | None, float | None, float | None]:
+        """Side-aware, noise-robust net L2 liquidity change over the trailing
+        60 s: ``(total, bid, ask)`` net depth change in contracts at the best
+        levels.
+
+        Rather than differencing the two extreme samples of the window — a
+        single large OPTIONS_BOOK refresh at either edge would dominate the
+        result — the resting depth is taken as the median over the newest
+        and oldest ``_LIQUIDITY_FLOW_BAND_SECS`` bands of the window and
+        the band medians are differenced.  The bid/ask split separates a
+        genuine one-sided drain (break risk) from a rotation (bids pulled
+        while asks refill), which nets to zero in the total.
+
+        Positive = liquidity is being posted (book refilling); negative =
+        liquidity is being consumed (book draining).  Returns
+        ``(None, None, None)`` when fewer than 2 depth samples exist.
+
+        Assumes *self._lock* is held.
+        """
+        depth = self._book_depth_history.get(symbol)
+        if not depth or len(depth) < 2:
+            return None, None, None
+        now = _time_mod.time()
+        while depth and depth[0][0] < now - 60:
+            depth.pop(0)
+        if len(depth) < 2:
+            return None, None, None
+        old_cut = depth[0][0] + _LIQUIDITY_FLOW_BAND_SECS
+        new_cut = depth[-1][0] - _LIQUIDITY_FLOW_BAND_SECS
+        # Both bands are always non-empty: the first sample is <= old_cut
+        # and the last is >= new_cut by construction.  When the whole
+        # history spans less than one band the bands overlap and the flow
+        # correctly collapses toward 0 instead of amplifying churn.
+        # Median (not mean) within each band so a lone oversized refresh
+        # inside a burst cannot skew the band's depth estimate.
+        old = [(b, a) for (t, b, a) in depth if t <= old_cut]
+        new = [(b, a) for (t, b, a) in depth if t >= new_cut]
+        old_bid = _median_of(b for b, _ in old)
+        old_ask = _median_of(a for _, a in old)
+        new_bid = _median_of(b for b, _ in new)
+        new_ask = _median_of(a for _, a in new)
+        bid_flow = new_bid - old_bid
+        ask_flow = new_ask - old_ask
+        return bid_flow + ask_flow, bid_flow, ask_flow
+
     def _liquidity_flow(self, symbol: str) -> float | None:
-        """Net L2 liquidity change over the trailing 60 s: resting depth at
-        the best levels now minus the depth at the window start (contracts
-        of liquidity added [+]/drained [-]).  Returns None when fewer than
-        2 depth samples exist.
+        """Net L2 liquidity change over the trailing 60 s: change in resting
+        depth at the best levels (contracts of liquidity added [+]/drained
+        [-]), computed from robust band medians of the window edges (see
+        ``_liquidity_flow_sides``).  Returns None when fewer than 2 depth
+        samples exist.
 
         Positive = liquidity is being posted (book refilling); negative =
         liquidity is being consumed (book draining — a break risk).
 
         Assumes *self._lock* is held.
         """
-        depth = self._book_depth_history.get(symbol)
-        if not depth or len(depth) < 2:
-            return None
-        now = _time_mod.time()
-        while depth and depth[0][0] < now - 60:
-            depth.pop(0)
-        if len(depth) < 2:
-            return None
-        return depth[-1][1] - depth[0][1]
+        total, _, _ = self._liquidity_flow_sides(symbol)
+        return total
 
     def trend_data(self, stream_symbol: str) -> dict:
         """L2-sourced trend snapshot for a stream symbol, matching the dict
@@ -696,9 +752,10 @@ class StreamingService:
         shape previously produced by
         ``StreamingService.get_ticker_trend_data``:
 
-             {trend, book_imbalance, flow_speed, flow_acceleration,
-              liquidity_flow, trend_reversal, book_imbalance_history,
-              flow_history}
+              {trend, book_imbalance, flow_speed, flow_acceleration,
+               liquidity_flow, bid_liquidity_flow, ask_liquidity_flow,
+               book_depth, trend_reversal, book_imbalance_history,
+               flow_history}
 
         ``book_imbalance`` is the current L2 OPTIONS-book bid/ask volume
         ratio, aggregated across the ATM call/put OCC contracts subscribed
@@ -707,7 +764,11 @@ class StreamingService:
         ``flow_acceleration`` are the first and second differences of that
         ratio over the trailing 60s window; ``liquidity_flow`` is the net
         change in resting depth at the best levels over the same window
-        (contracts added/drained).  All trend thresholds (>±0.3)
+        (contracts added/drained), computed from robust band medians of the
+        window edges (``_liquidity_flow_sides``) with the per-side
+        ``bid_liquidity_flow`` / ``ask_liquidity_flow`` split alongside, and
+        ``book_depth`` is the current aggregated resting depth for
+        magnitude context.  All trend thresholds (>±0.3)
         match the option-flow derivation, so downstream consumers
         (``flow.maybe_fire_wall_zone_alerts`` and the grid Trend column,
         plus the Telegram formatter) consume the trend and trend_reversal
@@ -717,7 +778,9 @@ class StreamingService:
             ratio = self._book_imbalance_for_symbol(stream_symbol)
             history = list(self._book_imb_history.get(stream_symbol) or [])
             flow_speed, flow_acceleration = self._flow_speed_and_accel(stream_symbol)
-            liquidity_flow = self._liquidity_flow(stream_symbol)
+            liquidity_flow, bid_liq_flow, ask_liq_flow = self._liquidity_flow_sides(stream_symbol)
+            _depth_vols = self._book_volume_for_symbol(stream_symbol)
+            book_depth = (_depth_vols[0] + _depth_vols[1]) if _depth_vols else None
 
             # trend direction from L2 book pressure:
             # 1) Determine the raw directional label from book_imbalance + flow_speed
@@ -766,6 +829,9 @@ class StreamingService:
             "flow_speed": flow_speed,
             "flow_acceleration": flow_acceleration,
             "liquidity_flow": liquidity_flow,
+            "bid_liquidity_flow": bid_liq_flow,
+            "ask_liquidity_flow": ask_liq_flow,
+            "book_depth": book_depth,
             "trend_reversal": reversal,
             "book_imbalance_history": book_imbalance_history,
             "flow_history": [],

@@ -25,7 +25,8 @@ from typing import Any, Iterable, Optional
 
 from scripts import config
 
-from scripts._constants import FLOW_RATIO_GREEN_THRESHOLD, FLOW_RATIO_RED_THRESHOLD
+from scripts._constants import (FLOW_RATIO_GREEN_THRESHOLD, FLOW_RATIO_RED_THRESHOLD,
+                         ABSORPTION_HIGH, ABSORPTION_LOW)
 
 
 logger = logging.getLogger(__name__)
@@ -238,7 +239,7 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         wall_tag = f"${wall_val:,.2f}" if wall_val is not None else "pw" if wall_zone == "Support" else "cw"
         header_lines.append(f"{emoji} Near {wall_zone} {wall_tag}")
     if absorption is not None and not _compact:
-        emoji = "🟢" if absorption >= 1000 else "🔴" if absorption < 300 else "🟡"
+        emoji = "🟢" if absorption >= ABSORPTION_HIGH else "🔴" if absorption < ABSORPTION_LOW else "🟡"
         header_lines.append(f"{emoji} Absorption: <code>{absorption:,.0f}</code> vol/$1")
     if absorbed_at_wall is not None:
         header_lines.append(f"🟡 Wall absorbed: <code>{absorbed_at_wall:,.0f}</code> contracts")
