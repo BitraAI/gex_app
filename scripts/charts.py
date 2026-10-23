@@ -1155,7 +1155,7 @@ INDICATORS = {
   "Andean Squeeze": {"length": 50, "sigLength": 9},
     "EMA 50": {"period": 50, "color": "#FFD700", "lineWidth": 2},
     "Volume Profile": {},
-    "Anchored VWAP": {"color": "#9400D3", "lineWidth": 2},
+    "VWAP": {"color": "#9400D3", "lineWidth": 2},
 }
 
 

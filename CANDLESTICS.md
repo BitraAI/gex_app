@@ -21,7 +21,7 @@ the whole app — equity `StreamingService` and the ATM option
 - **Timeframe** (`st.selectbox`): `1m, 2m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M`.
 - **Indicators** (`st.multiselect`, default `Andean Osc`, `EMA 50`,
   `Trend`): `SMA 20`, `SMA 50`, `EMA 20`, `EMA 50`, `EMA 200`,
-  `Volume Profile`, `Anchored VWAP`, `Half Trend`, `Volume`, `Andean Osc`.
+  `Volume Profile`, `VWAP`, `Half Trend`, `Volume`, `Andean Osc`.
 
 The chart itself is rendered by `chart_component.render_chart` (Lightweight
 Charts HTML/JS). See `README.md` for the interactive pan/zoom and Y-range

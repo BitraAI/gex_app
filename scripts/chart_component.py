@@ -1011,7 +1011,7 @@ def _convert_time(t, et_offset):
 
 def _build_volume_maps(candles: list[dict], et_offset: int) -> tuple[dict, dict, dict]:
     """Per-bar timestamp -> (total, buy, sell) volume maps for the volume-type
-    indicators (Volume / Volume Profile / Anchored VWAP share the same build)."""
+    indicators (Volume / Volume Profile / VWAP share the same build)."""
     vol_map: dict = {}
     buy_map: dict = {}
     sell_map: dict = {}
@@ -1220,7 +1220,7 @@ def build_init_data(
                     bv, sv = _bar_volume_split(c, vol, buy_map, sell_map)
                     vp_vols.append({"time": c["time"], "high": c["high"], "low": c["low"], "buy": float(bv), "sell": float(sv)})
                 continue
-            if name == "Anchored VWAP":
+            if name == "VWAP":
                 vol_map, _bw, _sw = _build_volume_maps(candles, et_offset)
                 vw_times = [c["time"] for c in cd]
                 vw_highs = [c["high"] for c in cd]
