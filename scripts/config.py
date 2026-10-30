@@ -3,7 +3,7 @@ import tomllib
 from pathlib import Path
 
 
-_CONFIG_PATH = Path(__file__).parent.parent / "config.toml"   # repo root (scripts/ is one level down)
+_CONFIG_PATH = Path(__file__).parent.parent / ".streamlit" / "config.toml"   # .streamlit/ subfolder
 
 CLIENT_ID = ""
 CLIENT_SECRET = ""
