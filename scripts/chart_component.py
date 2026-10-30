@@ -989,6 +989,7 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
     // between rebuild and incremental update. Once the chart DOM is alive
     // this interval is a cheap no-op.
     let __cwWatchMiss = 0;
+    let __cwLibRetries = 0;
     setInterval(function() {
         try {
             const c = document.getElementById(ROOT_ID);
@@ -1003,11 +1004,25 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
                 if (__cwWatchMiss === 10) {
                     __cwSetStatus({text: 'Loading chart library...', level: 'warning'});
                 }
+                // Runtime loader fallback: the original tag-driven library load may
+                // have failed (static serving disabled, proxy path change,
+                // MIME mismatch). Re-append the script tag directly via DOM
+                // APIs — runtime-created nodes bypass HTML sanitization,
+                // unlike anything embedded in the element body. Retries are
+                // capped so a genuinely broken setup cannot loop forever.
+                if (__cwWatchMiss >= 15 && __cwWatchMiss %% 15 === 0 && __cwLibRetries < 3) {
+                    __cwLibRetries++;
+                    try {
+                        const s = document.createElement('script');
+                        s.src = '%(static_url)s?r=' + Date.now();
+                        document.head.appendChild(s);
+                    } catch (_) {}
+                }
             }
         } catch (e) {}
     }, 600);
 })();
-""" % {'root_id': root_id}
+""" % {'root_id': root_id, 'static_url': _STATIC_LIB_URL}
 
 
 def _convert_time(t, et_offset):

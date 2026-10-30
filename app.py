@@ -947,57 +947,57 @@ def render_candlesticks_frag():
         st.info("Initialize authentication to load data")
         return
 
+    # Title row: tab title on the left, live ATM flow chips (rolling
+    # 60 s) right-aligned on the same line. Rendered at the TOP of the
+    # fragment, far from the constant chart host (whose DOM persists at
+    # its originally mounted position), so the row holds its place
+    # identically on refresh and tab switches. Net Flow Δ is the
+    # DELTA-WEIGHTED executed net (`get_ticker_executed_net60` —
+    # trailing-60 s change in delta_buy − delta_sell, each print
+    # weighted by ITS OWN contract's delta; same source as the Telegram
+    # header and the conviction gate). Flow Ratio is the delta-weighted
+    # bullish share (`get_ticker_flow_metrics_60s` — trailing-60 s
+    # change in the same delta_buy / delta_sell counters). None until
+    # the option stream produces flow in the window (em dash). Colors
+    # follow the grid /
+    # Telegram thresholds: Net Flow green > 0, red < 0, orange at 0;
+    # Flow Ratio green above FLOW_RATIO_GREEN_THRESHOLD (0.8), red
+    # below FLOW_RATIO_RED_THRESHOLD (0.2), amber between.
+    _title_svc = st.session_state.get("atm_option_service")
+    _tnf, _tfr = (None, None)
+    if _title_svc is not None:
+        try:
+            _tfr = _title_svc.get_ticker_flow_metrics_60s(
+                _normalize_display_symbol(s.get("symbol", "SPY")))[1]
+            _tnf = _title_svc.get_ticker_executed_net60(
+                _normalize_display_symbol(s.get("symbol", "SPY")))[2]
+        except Exception:
+            _tnf, _tfr = (None, None)
+    if _tnf is not None:
+        _tnf_txt = f"{_tnf:+,.0f}"
+        _tnf_col = "#00cc96" if _tnf > 0 else "#ef5350" if _tnf < 0 else "#ff9800"
+    else:
+        _tnf_txt, _tnf_col = "—", "#ff9800"
+    if _tfr is not None:
+        _tfr_txt = f"{_tfr:.2f}"
+        _tfr_col = ("#00cc96" if _tfr > FLOW_RATIO_GREEN_THRESHOLD
+                    else "#ef5350" if _tfr < FLOW_RATIO_RED_THRESHOLD else "#ff9800")
+    else:
+        _tfr_txt, _tfr_col = "—", "#ff9800"
+    st.markdown(
+        '<div style="display:flex;align-items:center;justify-content:space-between;'
+        'gap:12px;margin:0 0 10px 0;">'
+        '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
+        '<div style="display:flex;align-items:center;gap:18px;">'
+        f'<span style="color:{_tfr_col};font-weight:bold;">Flow Ratio: {_tfr_txt}</span>'
+        f'<span style="color:{_tnf_col};font-weight:bold;">Net Flow Δ (60s): {_tnf_txt}</span>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Main content container for controls and chart
     candles_container = st.container()
     with candles_container:
-        # Title row: tab title on the left, live ATM flow chips (rolling
-        # 60 s) right-aligned on the same line. Rendered at the TOP of the
-        # fragment, far from the constant chart host (whose DOM persists at
-        # its originally mounted position), so the row holds its place
-        # identically on refresh and tab switches. Net Flow Δ is the
-        # DELTA-WEIGHTED executed net (`get_ticker_executed_net60` —
-        # trailing-60 s change in delta_buy − delta_sell, each print
-        # weighted by ITS OWN contract's delta; same source as the Telegram
-        # header and the conviction gate). Flow Ratio is the delta-weighted
-        # bullish share (`get_ticker_flow_metrics_60s` — trailing-60 s
-        # change in the same delta_buy / delta_sell counters). None until
-        # the option stream produces flow in the window (em dash). Colors
-        # follow the grid /
-        # Telegram thresholds: Net Flow green > 0, red < 0, orange at 0;
-        # Flow Ratio green above FLOW_RATIO_GREEN_THRESHOLD (0.8), red
-        # below FLOW_RATIO_RED_THRESHOLD (0.2), amber between.
-        _title_svc = st.session_state.get("atm_option_service")
-        _tnf, _tfr = (None, None)
-        if _title_svc is not None:
-            try:
-                _tfr = _title_svc.get_ticker_flow_metrics_60s(
-                    _normalize_display_symbol(s.get("symbol", "SPY")))[1]
-                _tnf = _title_svc.get_ticker_executed_net60(
-                    _normalize_display_symbol(s.get("symbol", "SPY")))[2]
-            except Exception:
-                _tnf, _tfr = (None, None)
-        if _tnf is not None:
-            _tnf_txt = f"{_tnf:+,.0f}"
-            _tnf_col = "#00cc96" if _tnf > 0 else "#ef5350" if _tnf < 0 else "#ff9800"
-        else:
-            _tnf_txt, _tnf_col = "—", "#ff9800"
-        if _tfr is not None:
-            _tfr_txt = f"{_tfr:.2f}"
-            _tfr_col = ("#00cc96" if _tfr > FLOW_RATIO_GREEN_THRESHOLD
-                        else "#ef5350" if _tfr < FLOW_RATIO_RED_THRESHOLD else "#ff9800")
-        else:
-            _tfr_txt, _tfr_col = "—", "#ff9800"
-        st.markdown(
-            '<div style="display:flex;align-items:center;justify-content:space-between;'
-            'gap:12px;margin:0 0 10px 0;">'
-            '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
-            '<div style="display:flex;align-items:center;gap:18px;">'
-            f'<span style="color:{_tfr_col};font-weight:bold;">Flow Ratio: {_tfr_txt}</span>'
-            f'<span style="color:{_tnf_col};font-weight:bold;">Net Flow Δ (60s): {_tnf_txt}</span>'
-            '</div></div>',
-            unsafe_allow_html=True,
-        )
-
-
         # Only show historical data, no live streaming controls
         symbol = s.get("symbol", "SPY")
         
@@ -1461,6 +1461,8 @@ def render_candlesticks_frag():
         # even on ticks without candle data, so it never "disappears".
         render_chart_host()
 
+        # Chart payload (data) is rendered inside candles_container
+        # This updates the chart data every tick without recreating the chart DOM
         if candles_payload:
             iv_skew_indicator_enabled = any(ind in selected_indicators for ind in ["IV Skew (25Δ)"])
             _iv_skew_hist = s.get("iv_skew_history") or []

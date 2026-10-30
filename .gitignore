@@ -1,6 +1,7 @@
 .streamlit/config.toml
-# Root config.toml holds secrets (SMTP, Schwab) — ignored above. The
-# Streamlit UI config has no secrets, so keep it under version control.
+# Holds secrets (SMTP, Schwab, Telegram) — tracked .streamlit/config.toml
+# was removed from the repo (240c2e2 on GitHub). Keep the local copy on
+# disk only; sanitized template lives in .streamlit/config.toml.example.
 __pycache__/
 *.pyc
 .venv
