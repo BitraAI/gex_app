@@ -1,0 +1,8 @@
+LICENSE
+README.md
+pyproject.toml
+scripts/email_service.py
+scripts/email_service.egg-info/PKG-INFO
+scripts/email_service.egg-info/SOURCES.txt
+scripts/email_service.egg-info/dependency_links.txt
+scripts/email_service.egg-info/top_level.txt
