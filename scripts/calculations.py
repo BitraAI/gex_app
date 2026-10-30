@@ -1,8 +1,8 @@
 import bisect
 import numpy as np
-from typing import Any, Optional
+from typing import Any
 from datetime import datetime
-from zoneinfo import ZoneInfo
+from typing import Optional
 
 from scripts._utils import secs_since_market_open as _secs_since_market_open
 

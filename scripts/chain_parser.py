@@ -4,9 +4,8 @@ This module centralizes the duplicate chain parsing logic that was previously
 duplicated across app.py, flow.py, and other modules.
 """
 
-import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from scripts._constants import STREAM_SYMBOL_MAP
 from scripts.calculations import build_greeks_lookup, parse_option_chain

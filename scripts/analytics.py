@@ -1,5 +1,4 @@
 import logging
-from functools import lru_cache
 from typing import Any, Optional
 import numpy as np
 from scripts.calculations import (

@@ -7,7 +7,7 @@ from collections import deque
 from datetime import datetime
 import pandas as pd
 from scripts._constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS, INDEX_QUOTE_MAP
-from scripts._utils import load_json, save_json, compute_strike_increment
+from scripts._utils import load_json, save_json
 from scripts.calculations import calculate_atm_strike, get_strike_spacing
 
 logger = logging.getLogger(__name__)
