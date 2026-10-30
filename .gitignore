@@ -1,4 +1,4 @@
-config.toml
+.streamlit/config.toml
 # Root config.toml holds secrets (SMTP, Schwab) — ignored above. The
 # Streamlit UI config has no secrets, so keep it under version control.
 __pycache__/
