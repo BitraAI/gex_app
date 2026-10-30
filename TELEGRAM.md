@@ -123,8 +123,8 @@ Price: <code>$XXX.XX</code>
 
 ### Flow Ratio thresholds
 
-- `flow_ratio < 0.20` → 🟢 (bullish bias)
-- `flow_ratio > 0.80` → 🔴 (bearish bias)
+- `flow_ratio > 0.80` → 🟢 (bullish bias)
+- `flow_ratio < 0.20` → 🔴 (bearish bias)
 - otherwise → 🟡 (neutral)
 
 ### Trend alerts (compact body)

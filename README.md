@@ -33,7 +33,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Dealer Position (Long/Short Gamma)
    - IV Skew (25-delta, both market and SSVI-smoothed), Expected Move, Next Earnings Date, VEX Magnet, VEX Repellent
    - IV Rank — Where the latest daily return sits in the trailing 52-week range of daily returns. >70 = high vol regime (sell premium), <30 = low vol regime (buy premium)
-    - **Order Flow** — Real-time ATM option flow for every tracked ticker, shown in the **Order Flow** tab. Subscribes to the TWO nearest expirations' ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming (with L2 options book support) — 4 contracts per ticker, so the rolling flow metrics span both closest expiries for a smoother trend. Index symbols (`$SPX`/`$RUT`/`$NDX`) stream their ETF proxy's options (`SPY`/`IWM`/`QQQ`) at the proxy's ATM strike, so Book Imbalance works for indices too. Each ticker uses its own per-ticker expiration (fetched lazily), so non-primary tickers subscribe to the correct option contracts. The grid shows per-ticker **Spot** (live equity stream or REST pre-fetch; index spots fetched separately via REST, stored as normalized uppercase display symbol), **Trend** (`up`/`down`/`UP`/`DOWN`/`bullish`/`bearish`/`flat` — from L2 book-imbalance momentum over 60 s), **Call Price** / **Put Price** (REST option marks at the put-wall / call-wall strikes, refreshed every ~2 s — index symbols quote their own index-option root), **Support** (Put Wall: strike below spot with highest put GEX) and **Resistance** (Call Wall: strike above spot with highest call GEX), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed** (first difference of book-imbalance over 60 s), **Flow Acceleration** (second difference, split at time midpoint), **Absorption** (ATM option volume per $1 of spot **path** — heavy absorption = price pinned, thin flow = price drifting; the denominator is the sum of |Δ| per sample so a whipsawing tape is not mistaken for a pin), **Liquidity Flow** (net change in L2 resting depth over 60 s, from robust band medians of the window edges — positive = book refilling, negative = liquidity draining / break risk; side splits `bid_liquidity_flow`/`ask_liquidity_flow` distinguish a one-sided drain from a rotation), **Net Flow** (rolling 60 s raw contract net: bullish − bearish buckets, differenced over a sliding 60 s window so older flow simply drops out — no session carry-over; each trade print routes to every tracked ticker whose stream symbol matches the option root), **Buy/Sell** (session-cumulative executed flow split by aggressor side), and **Flow Ratio** (rolling 60 s bullish share of executed flow; red background `#ef5350` when > 0.8, green background `#00cc96` when < 0.2, bold text). Ticker flow tracking uses normalized display symbols (uppercase, no "$") as keys in `_ticker_flows` so lookups stay consistent. Spot cell background turns green/red on support/resistance wall breaks or reversals. Spot price updates always apply regardless of service running state. Streaming starts when you Refresh a ticker on the main page.
+    - **Order Flow** — Real-time ATM option flow for every tracked ticker, shown in the **Order Flow** tab. Subscribes to the TWO nearest expirations' ATM call and put contracts for every ticker in `ticker_history.json` via LEVELONE_OPTIONS streaming (with L2 options book support) — 4 contracts per ticker, so the rolling flow metrics span both closest expiries for a smoother trend. Index symbols (`$SPX`/`$RUT`/`$NDX`) stream their ETF proxy's options (`SPY`/`IWM`/`QQQ`) at the proxy's ATM strike, so Book Imbalance works for indices too. Each ticker uses its own per-ticker expiration (fetched lazily), so non-primary tickers subscribe to the correct option contracts. The grid shows per-ticker **Spot** (live equity stream or REST pre-fetch; index spots fetched separately via REST, stored as normalized uppercase display symbol), **Trend** (`up`/`down`/`UP`/`DOWN`/`bullish`/`bearish`/`flat` — from L2 book-imbalance momentum over 60 s), **Call Price** / **Put Price** (REST option marks at the put-wall / call-wall strikes, refreshed every ~2 s — index symbols quote their own index-option root), **Support** (Put Wall: strike below spot with highest put GEX) and **Resistance** (Call Wall: strike above spot with highest call GEX), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed** (first difference of book-imbalance over 60 s), **Flow Acceleration** (second difference, split at time midpoint), **Absorption** (ATM option volume per $1 of spot **path** — heavy absorption = price pinned, thin flow = price drifting; the denominator is the sum of |Δ| per sample so a whipsawing tape is not mistaken for a pin), **Liquidity Flow** (net change in L2 resting depth over 60 s, from robust band medians of the window edges — positive = book refilling, negative = liquidity draining / break risk; side splits `bid_liquidity_flow`/`ask_liquidity_flow` distinguish a one-sided drain from a rotation), **Net Flow** (rolling 60 s delta-weighted net: trailing-window change in the per-ticker `delta_buy − delta_sell`, each trade weighted by its own contract's live streamed delta — REST chain ATM delta per expiration, then static ±0.5, as fallbacks; differenced over a sliding 60 s window so older flow simply drops out — no session carry-over; each trade print routes to every tracked ticker whose stream symbol matches the option root), **Buy/Sell** (session-cumulative executed flow split by aggressor side), and **Flow Ratio** (rolling 60 s bullish share of delta exposure, delta-weighted; green background `#00cc96` when > 0.8, red background `#ef5350` when < 0.2, bold text). Ticker flow tracking uses normalized display symbols (uppercase, no "$") as keys in `_ticker_flows` so lookups stay consistent. Spot cell background turns green/red on support/resistance wall breaks or reversals. Spot price updates always apply regardless of service running state. Streaming starts when you Refresh a ticker on the main page.
 - **Strategy Signals:**
   - Per-option scoring (VRP + Dealer Gamma + Wall Proximity + IV Rank + IV Richness)
   - Market Bias (Bullish/Bearish/Neutral from gamma flip, net GEX, IV skew, wall distance, IV Rank)
@@ -90,13 +90,13 @@ $ git clone https://github.com/BitraAI/gex_app.git
 $ cd gex_app
 $ python3 -m venv .venv
 $ source .venv/bin/activate
-(gex_venv) $ python -m pip install -U pip
-(gex_venv) $ python -m pip install -U uv
-(gex_venv) $ uv pip install -r requirements.txt
+(.venv) $ python -m pip install -U pip
+(.venv) $ python -m pip install -U uv
+(.venv) $ uv pip install -r requirements.txt
 
 # Optional: exposes scripts/email_service.py for `from email_service import ...`
 # with a bare interpreter (also enables pytest config below)
-(gex_venv) $ python -m pip install --no-build-isolation -e .
+(.venv) $ python -m pip install --no-build-isolation -e .
 ```
 
 ### Create a Schwab Developer Portal Account
@@ -153,7 +153,7 @@ Environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` override `conf
 Run the auth script to perform the OAuth browser flow and save a token:
 
 ```bash
-(gex_venv) $ uv run scripts/schwab_auth.py
+(.venv) $ uv run scripts/schwab_auth.py
 ```
 
 This opens a browser for Schwab login. The token is automatically refreshed by the client library.
@@ -175,13 +175,13 @@ This opens a browser for Schwab login. The token is automatically refreshed by t
 ### Running
 
 ```bash
-(gex_venv) $ ./run.sh
+(.venv) $ ./run.sh
 ```
 
 Or directly:
 
 ```bash
-(gex_venv) $ uv run streamlit run app.py
+(.venv) $ uv run streamlit run app.py
 ```
 
 The app will be available at `http://localhost:8501`.
@@ -205,7 +205,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=/path/to/home/gex_app
-ExecStart=/path/to/gex_venv/bin/streamlit run app.py --server.port 8501
+ExecStart=/path/to/.venv/bin/streamlit run app.py --server.port 8501
 Restart=always
 RestartSec=10
 
@@ -266,7 +266,7 @@ journalctl --user -u gex-app.service -f
    - **Drag the price-scale labels** (right edge) to zoom the Y-axis, or the **time-scale labels** (bottom) to zoom the X-axis.
    - **Scroll the mouse wheel** to zoom the X-axis (bar spacing).
    - The Y zoom persists across the live 1-second streaming updates — drag it to where you want and the chart stays there.
- 8. **Order Flow** — open the **Order Flow** tab to see the real-time ATM order-flow grid for every ticker in `ticker_history.json`. Columns: **Ticker**, **Spot** (live equity stream or REST pre-fetch), **ATM Strike**, **Expiration**, **Support** (Put Wall: strike below spot with highest put GEX), **Resistance** (Call Wall: strike above spot with highest call GEX), **Call Price** / **Put Price** (REST marks at wall strikes, ~2 s refresh; index symbols quote their own index-option root), **Trend** (`up`/`down`/`UP`/`DOWN`/`bullish`/`bearish`/`flat` — from L2 book-imbalance momentum over 60 s), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed** (first difference of book imbalance over 60 s), **Flow Acceleration** (second difference, split at time midpoint), **Absorption** (ATM vol per $1 spot path — heavy = price pinned), **Liquidity Flow** (net L2 depth change over 60 s, robust band-median diff), **Net Flow** (rolling 60 s raw contract net, ages out after a minute), and **Buy/Sell**. Flow Ratio background turns red (`#ef5350`) when > 0.8 and green (`#00cc96`) when < 0.2, both in bold. Spot cell background turns green/red on wall breaks or reversals. Index symbols (`$SPX`/`$RUT`/`$NDX`) stream via their ETF proxy at proxy strikes. Ticker flows use normalized display symbols (uppercase, no "$") as keys so lookups stay consistent. Streaming starts when you Refresh a ticker on the main page.
+ 8. **Order Flow** — open the **Order Flow** tab to see the real-time ATM order-flow grid for every ticker in `ticker_history.json`. Columns: **Ticker**, **Spot** (live equity stream or REST pre-fetch), **ATM Strike**, **Expiration**, **Support** (Put Wall: strike below spot with highest put GEX), **Resistance** (Call Wall: strike above spot with highest call GEX), **Call Price** / **Put Price** (REST marks at wall strikes, ~2 s refresh; index symbols quote their own index-option root), **Trend** (`up`/`down`/`UP`/`DOWN`/`bullish`/`bearish`/`flat` — from L2 book-imbalance momentum over 60 s), **Book Imbalance** (L2 pressure, `[-1, 1]`), **Flow Speed** (first difference of book imbalance over 60 s), **Flow Acceleration** (second difference, split at time midpoint), **Absorption** (ATM vol per $1 spot path — heavy = price pinned), **Liquidity Flow** (net L2 depth change over 60 s, robust band-median diff), **Net Flow** (rolling 60 s delta-weighted net, ages out after a minute), and **Buy/Sell**. Flow Ratio background turns green (`#00cc96`) when > 0.8 and red (`#ef5350`) when < 0.2, both in bold. Spot cell background turns green/red on wall breaks or reversals. Index symbols (`$SPX`/`$RUT`/`$NDX`) stream via their ETF proxy at proxy strikes. Ticker flows use normalized display symbols (uppercase, no "$") as keys so lookups stay consistent. Streaming starts when you Refresh a ticker on the main page.
 
 ## Architecture
 

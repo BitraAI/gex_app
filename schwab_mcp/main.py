@@ -20,7 +20,7 @@ Register it in OpenCode (project or global opencode.json(c)):
     "servers": {
       "gex-app": {
         "type": "local",
-        "command": ["/home/spark_admin/gex_venv/bin/python",
+        "command": ["/home/spark_admin/gex_app/.venv/bin/python",
                     "/home/spark_admin/gex_app/schwab_mcp/main.py"]
       }
     }

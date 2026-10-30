@@ -19,11 +19,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# mcp v2 renamed FastMCP -> MCPServer; support both SDK lines.
-try:
-    from mcp.server.mcpserver import MCPServer
-except ImportError:
-    from mcp.server.fastmcp import FastMCP as MCPServer
+# mcp v2: MCPServer lives at mcp.server.mcpserver
+from mcp.server.mcpserver import MCPServer
 
 server = MCPServer(
     name="gex-app",

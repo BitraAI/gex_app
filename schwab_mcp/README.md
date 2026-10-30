@@ -171,7 +171,7 @@ inline; always take the semaphore per API call; catch everything and return
     "servers": {
       "gex-app": {
         "type": "local",
-        "command": ["/path/to/venv/bin/python",
+        "command": ["/path/to/.venv/bin/python",
                     "/path/to/home/gex_app/schwab_mcp/main.py"]
       }
     }
@@ -184,7 +184,7 @@ inline; always take the semaphore per API call; catch everything and return
 }
 ```
 
-- **Python**: `/path/to/venv/bin/python` (has `mcp`, `schwab-py`,
+- **Python**: `/path/to/.venv/bin/python` (has `mcp`, `schwab-py`,
   pandas, numpy, pyarrow).
 - **Transport**: stdio.
 - **Auth/token**: `~/.local/share/gex_app/schwab_token.json` (same file the
@@ -221,7 +221,7 @@ client).
 ### Start the server
 
 ```bash
-nohup /path/to/venv/bin/python /path/to/gex_app/schwab_mcp/main.py \
+nohup /path/to/.venv/bin/python /path/to/gex_app/schwab_mcp/main.py \
   --transport streamable-http --host 0.0.0.0 \
   > /tmp/gex_mcp.log 2>&1 &
 ```
