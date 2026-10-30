@@ -21,7 +21,8 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Flow Speed** | **Level 2** (OPTIONS_BOOK, derived) | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
 | **Flow Acceleration** | **Level 2** (OPTIONS_BOOK, derived) | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, and `mid` is the first sample at/after the window's **time** midpoint `mid_ts`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
 | **Absorption** | **Level 1** (ATM option volume + spot path) | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot **path length** (sum of \|Δ\| per sample) over the same window — chop-adjusted, so a whipsawing tape is not mistaken for a pinned price. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
-| **Net Flow** | **Level 1** (ATM option trades, delta-weighted by REST chain deltas) | Net executed **delta-weighted** flow over the trailing 60 s: `net_60 = exec_history[-1][1] − exec_history[0][1]`, i.e. the change in `delta_buy − delta_sell` over the trailing 60 s window, from the ATM call/put only. Each ATM trade is weighted by the front-month ATM option delta (call Δ > 0, put Δ < 0, plumbed from the REST chain via `set_ticker_atm_deltas`; defaults to ±0.5 before the first chain refresh), so the column reports `net_delta = delta_buy − delta_sell` rather than raw contracts. Each trade print is routed to **every** tracked flow whose stream symbol matches the option's root, so tracking both `$SPX` and `SPY` (or `$RUT`+`IWM`) updates both rows from the same proxy ticks. Green > 0, red < 0, orange otherwise. See **Order absorption (Telegram + grid)**. |
+| **Net Flow** | **Level 1** (ATM option trades, delta-weighted by each trade's own contract delta) | Net executed **delta-weighted** flow over the trailing 60 s: `net_60 = exec_history[-1][1] − exec_history[0][1]`, i.e. the change in `delta_buy − delta_sell` over the trailing 60 s window, from the ATM call/put only (`get_ticker_executed_net60`; same source as the Telegram header and the conviction gate). Each ATM trade is weighted by **its own contract's delta** (call Δ > 0, put Δ < 0): the contract's live streamed `DELTA` (LEVELONE_OPTIONS carries it per contract), falling back to the REST chain ATM delta of the trade's own expiration (`set_ticker_atm_deltas` / `set_ticker_atm_deltas2`), then the static ±0.5 — so the column reports `net_delta = delta_buy − delta_sell` rather than raw contracts (with fallback ±0.5 weighting values ≈ half the raw contract counts). Bullish side = buying calls + selling puts; bearish = selling calls + buying puts. Each trade print is routed to **every** tracked flow whose stream symbol matches the option's root, so tracking both `$SPX` and `SPY` (or `$RUT`+`IWM`) updates both rows from the same proxy ticks. Green > 0, red < 0, orange otherwise. See **Net Flow & Flow Ratio math (rolling 60 s)** and **Order absorption (Telegram + grid)**. |
+| **Flow Ratio** | **Level 1** (ATM option trades, delta-weighted by each trade's own contract delta) | Rolling 60 s **bullish share of delta exposure**: `flow_ratio = bull_Δ / (bull_Δ + bear_Δ)` where `bull_Δ` / `bear_Δ` are the trailing-60 s changes in the cumulative `delta_buy` / `delta_sell` counters from `get_ticker_flow_metrics_60s` (each print weighted by its own contract's live streamed `DELTA`; REST chain ATM delta of the trade's expiration and static ±0.5 as fallbacks). A proportion in **[0, 1]** — never negative (1.0 = all bullish flow, 0.5 = balanced, 0.0 = all bearish); net flow > 0 ↔ ratio > 0.5. `None` when the window has no flow (< 2 samples / zero volume), displayed as 0.00. Grid coloring: green background > 0.8, red background < 0.2; Telegram header: 🟢 above `FLOW_RATIO_GREEN_THRESHOLD` (0.8), 🔴 below `FLOW_RATIO_RED_THRESHOLD` (0.2), 🟡 otherwise. See **Net Flow & Flow Ratio math (rolling 60 s)**. |
 | **Liquidity Flow** | **Level 2** (OPTIONS_BOOK) | Net change in L2 OPTIONS-book resting depth at the best levels over the trailing 60 s, computed from robust **band medians** of the window edges (`_liquidity_flow_sides` in `StreamingService`): depth is median-averaged over the newest/oldest 5 s bands and the medians differenced, so a single large book refresh at a window edge cannot dominate the reading. Positive = liquidity being posted (book refilling); negative = liquidity being drained (break risk). Side-aware splits (`bid_liquidity_flow` / `ask_liquidity_flow` in `trend_data`) separate a genuine one-sided drain from a rotation. Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
@@ -415,18 +416,129 @@ available) renders the following lines in order:
 | Net Flow | `🟢/🔴/🟡 Net Flow (60s): <code>+X</code>` | net_flow |
 | Flow Ratio | `🟢/🔴/🟡 Flow Ratio: <code>XX</code>` | flow_ratio |
 
-Flow Ratio = `(_call_buy + _put_sell) / total_flow` where
-`total_flow = _call_buy + _call_sell + _put_buy + _put_sell` (raw contract
-buckets from the ATM option trade stream). Emoji: green above
-`FLOW_RATIO_GREEN_THRESHOLD`, red below `FLOW_RATIO_RED_THRESHOLD`,
-amber otherwise. Flow Ratio is suppressed for compact trend-alert messages
-(the signal line already folds in the corroborating metrics).
+Flow Ratio is the rolling 60 s **bullish share of delta exposure** —
+`flow_ratio = bull_Δ / (bull_Δ + bear_Δ)` from
+`get_ticker_flow_metrics_60s`, where `bull_Δ` / `bear_Δ` are the changes
+in the cumulative **delta-weighted** counters `delta_buy` / `delta_sell`
+over the trailing 60 s window (each print weighted by **its own
+contract's delta** — live streamed `DELTA`, with the REST chain ATM
+deltas of the trade's expiration and the static ±0.5 as fallbacks). It
+is a proportion in **[0, 1]**
+(never negative — a negative net flow simply means ratio < 0.5) and is
+`None` when the window has no flow, in which case Telegram omits the
+line. Emoji: 🟢 **above** `FLOW_RATIO_GREEN_THRESHOLD` (0.8), 🔴 **below**
+`FLOW_RATIO_RED_THRESHOLD` (0.2), 🟡 otherwise. Flow Ratio is suppressed
+for compact trend-alert messages (the signal line already folds in the
+corroborating metrics). See **Net Flow & Flow Ratio math (rolling 60 s)**
+for the formulas and a worked example.
 
 `flat` and strong `UP` / `DOWN` are **not** surfaced as Telegram alerts —
 only wall-reversal trend alerts (`bullish` / `bearish` REVERSAL) can fire a
 send. Wall-broke alerts and strategy recommendations are also sent to
 Telegram. Wall-reversal alerts require the walls to be stable for 2
 consecutive refreshes and respect the 600 s per-ticker cooldown.
+
+### Net Flow & Flow Ratio math (rolling 60 s)
+
+Every displayed Net Flow / Flow Ratio reading is a **rolling 60-second**
+window over the ATM option trade stream, not a session total — the
+session-cumulative counters are differenced across the window (details
+in **Order absorption (Telegram + grid)** below). This section records
+the shared math and a worked example.
+
+**Trade classification (`_infer_dir`).** Each executed ATM print is
+classified aggressor-direction against the live option quote midpoint:
+`mid = (bid + ask) / 2`; a print at/above `mid` is buyer-initiated,
+below `mid` seller-initiated; with no valid spread yet the size is
+**split evenly** between the two sides. Combined with the option side,
+this fills four cumulative per-ticker buckets in `_process_trade_ticker`:
+
+| Print vs mid | Contract | Bucket incremented |
+| --- | --- | --- |
+| ≥ mid | CALL | `call_buy` |
+| ≥ mid | PUT | `put_buy` |
+| < mid | CALL | `call_sell` |
+| < mid | PUT | `put_sell` |
+
+The displayed Net Flow / Flow Ratio then weight every print by its
+option delta (call Δ > 0, put Δ < 0 — each print weighted by **its own
+contract's live streamed `DELTA`**, falling back to the REST chain ATM
+delta of the trade's own expiration — front pair vs `exp2` pair — and
+then the static **±0.5**, so weighting is live even at cold start) and
+splits by **delta exposure**, not by contract type —
+buying calls and selling puts count as bullish, selling calls and
+buying puts as bearish:
+
+    bullish_Δ  = Σ call_buy×call Δ + Σ put_sell×|put Δ|
+    bearish_Δ  = Σ call_sell×call Δ + Σ put_buy×|put Δ|
+    net_flow   = bullish_Δ − bearish_Δ                (Net Flow Δ, delta units)
+    flow_ratio = bullish_Δ / (bullish_Δ + bearish_Δ)   (delta-weighted share)
+
+(The raw contract identity — `call_buy + put_sell` vs `call_sell +
+put_buy`, plain size sums — still drives the 1-second Buy/Sell bar
+counters and the cumulative `bullish` / `bearish` buckets.)
+
+Because both sides are non-negative weighted sums, **flow_ratio is a
+proportion in [0, 1] and never goes negative** — the sign of the flow
+lives entirely in `net_flow`, and the ratio encodes it as distance from
+0.5:
+
+    flow_ratio = 0.5 + net_flow / (2 · (bullish_Δ + bearish_Δ))
+
+| net_flow | flow_ratio | Reading |
+| --- | --- | --- |
+| > 0 | > 0.5 | bullish-tilted tape |
+| = 0 | = 0.5 | balanced |
+| < 0 | < 0.5 | bearish-tilted tape |
+
+`flow_ratio` is `None` (grid shows 0.00; Telegram omits the header line)
+when the window holds no flow. Thresholds: 🟢 / green above
+`FLOW_RATIO_GREEN_THRESHOLD` (0.8), 🔴 / red below
+`FLOW_RATIO_RED_THRESHOLD` (0.2), 🟡 / amber in between.
+
+**Worked example — positive net flow.** ATM quotes: CALL bid 3.10 /
+ask 3.40 → mid 3.25; PUT bid 2.70 / ask 2.90 → mid 2.80; weighting at
+the static ±0.5 fallback (i.e. no per-contract streamed delta and no
+chain refresh yet — the last-resort source). Five prints:
+
+    CALL @3.30 size 300 → ≥ 3.25 → call_buy  += 300   (Δ +150)
+    CALL @3.20 size 200 → < 3.25 → call_sell += 200   (Δ +100 to bear side)
+    CALL @3.35 size 400 → ≥ 3.25 → call_buy  += 400   (cumulative 700; Δ +200)
+    PUT  @2.85 size 150 → ≥ 2.80 → put_buy   += 150   (Δ +75 to bear side)
+    PUT  @2.60 size 450 → < 2.80 → put_sell  += 450   (Δ +225 to bull side)
+
+Buckets: `call_buy=700, call_sell=200, put_buy=150, put_sell=450`.
+
+    bullish_Δ  = 0.5·700 + 0.5·450 = 575
+    bearish_Δ  = 0.5·200 + 0.5·150 = 175
+    net_flow   = 575 − 175 = +400 (Δ)  = +800 raw contracts  → green cell
+    flow_ratio = 575 / 750 = 0.77     → amber (between 0.2 and 0.8)
+
+**Worked example — negative net flow.** Mirror the tape (heavy
+call-selling and put-buying): `call_buy=150, call_sell=450,
+put_buy=700, put_sell=200` gives `bullish_Δ=175`, `bearish_Δ=575`:
+
+    net_flow   = 175 − 575 = −400 (Δ)  = −800 raw contracts → red cell
+    flow_ratio = 175 / 750 = 0.23     → amber (still within [0, 1])
+
+The ratio stays in [0, 1] even with negative net flow; only its
+position relative to 0.5 encodes the sign.
+
+**Rolling-window mechanics.** The counters themselves accumulate for the
+session. On every executed trade the service appends timestamped
+snapshots of the running counters to per-ticker deques, all pruned
+to the trailing 60 s; the displayed value is always
+newest-minus-oldest sample inside the window:
+
+| Deque | Sample | Displayed value | Consumer |
+| --- | --- | --- | --- |
+| `exec_history` | `(t, delta_buy − delta_sell)` | `net_60` (delta-weighted) | grid Net Flow cell, title-row chip, Telegram `Net Flow (60s)` header (`get_ticker_executed_net60`), conviction gate |
+| `atm_delta_flow_history` | `(t, cumulative delta_buy, cumulative delta_sell)` | `bull_Δ / (bull_Δ + bear_Δ)` (ratio) | grid Flow Ratio cell, title-row chip, Telegram Flow Ratio header (`get_ticker_flow_metrics_60s`) |
+| `atm_flow_history` | `(t, cumulative bullish, cumulative bearish)` | (still recorded; currently unused by the displayed ratio) | reference / future use |
+
+Values redraw on every read and need no reset: flow measured
+against an old level simply ages out after a minute. Fewer than two
+samples in the window → `None`.
 
 ### Order absorption (Telegram + grid)
 
@@ -449,12 +561,15 @@ High absorption (≥ 1000 vol/$1) means heavy flow is being soaked up at a level
 (price pinned — support/resistance holding); low absorption (< 300) means the
 price is drifting on thin flow.
 
-**Executed flow** (`AtmOptionVolumeService.get_ticker_executed_flow`, the grid
-**Net Flow** column and the Telegram
-`Net Flow (60s): <n>` header line — folded into the compact trend signal
-line as `Net`) is the **delta-weighted** aggressor split, sourced from
-**Level 1** ATM option trade prints (`LEVEL1_OPTIONS`) weighted by the
-**front-month ATM option delta** from the REST chain: every trade print is
+**Executed flow** (`AtmOptionVolumeService.get_ticker_executed_net60` — the
+Telegram `Net Flow (60s): <n>` header line and the reversal **conviction
+gate** in `flow.maybe_fire_wall_zone_alerts`, folded into the compact
+trend signal line as `Net`) is the **delta-weighted** aggressor split,
+sourced from
+**Level 1** ATM option trade prints (`LEVEL1_OPTIONS`) weighted by each
+print's **own contract delta** (live streamed `DELTA` from the option
+feed; REST chain ATM deltas per expiration and the static ±0.5 as
+fallbacks): every trade print is
 classified buyer- vs seller-initiated (`_infer_dir` against the bid/ask mid),
 then folded by option side so `buy_vol` counts **buying calls and selling
 puts** (bullish pressure) while `sell_vol` counts selling calls and buying
@@ -465,10 +580,13 @@ puts (bearish pressure) — equivalently:
 
 `buy_vol` / `sell_vol` are session-cumulative **raw contract** buckets (pure
 aggressor-direction counts incremented directly by size in
-`_process_trade_ticker`, not prices × contracts). They are computed and
-returned by `get_ticker_executed_flow`, but the grid itself exposes no
-Buy/Sell columns — only **Net Flow** (the delta-weighted `net_60`) is
-displayed, so the raw buckets are not rendered independently. The
+`_process_trade_ticker`, not prices × contracts); `get_ticker_executed_net60`
+returns them as its first two elements (the alerts consume only its
+`net_60` element). The grid itself exposes no Buy/Sell columns — its
+**Net Flow** cell is the delta-weighted `net_60` from
+`get_ticker_executed_net60`, and its **Flow Ratio** cell is the
+delta-weighted share from `get_ticker_flow_metrics_60s` (see below); the
+same pair feeds the title-row chip and the Telegram alerts. The
 right-hand sides simply mirror the same identity in the per-1-second bar
 counters (`call_buy_vol` / `call_sell_vol` / `put_buy_vol` / `put_sell_vol`)
 rather than being a literal assignment into the ticker totals. Separately,
@@ -481,20 +599,54 @@ contracts:
     delta_sell  = Σ |size × aggressor × Δ_opt| (negative contributions only)
     net_delta   = delta_buy − delta_sell
 
-The deltas come from the front-month ATM strike of the REST chain
-(`set_ticker_atm_deltas`, pushed on every wall refresh); before the first
-refresh populates them, a static **call +0.5 / put −0.5** fallback is used so
-the column is live even at cold start. On every trade a `(timestamp,
+The deltas come from the traded contract itself when the stream has
+delivered them: every LEVELONE_OPTIONS frame carries the contract's own
+`DELTA`, cached per OCC symbol as trades arrive (`_stream_deltas`). The
+resolution order per print is — 1) the traded contract's live streamed
+delta, 2) the REST chain ATM delta of the print's own expiration
+(`set_ticker_atm_deltas` for the front pair, `set_ticker_atm_deltas2`
+for the second pair, both pushed on every wall refresh), 3) a static
+**call +0.5 / put −0.5** fallback so the header is live even at cold
+start. On every trade a `(timestamp,
 delta_buy − delta_sell)` sample is appended to a per-symbol `exec_history`
-pruned to the trailing 60 s. The grid's **Net Flow** cell is the change over
+pruned to the trailing 60 s. The Telegram `Net Flow (60s)` header (and the
+conviction-gate net in `maybe_fire_wall_zone_alerts`) is the change over
 that window:
 
     net_60 = exec_history[-1][1] − exec_history[0][1]   (Δ net_delta over trailing 60 s)
 
+The **flow-ratio cell** binds to the delta-weighted roll —
+`get_ticker_flow_metrics_60s` differencing the per-symbol
+`atm_delta_flow_history` deque (a `(timestamp, cumulative delta_buy,
+cumulative delta_sell)` history pruned to the same 60 s window) into
+`flow_ratio = bull_Δ / (bull_Δ + bear_Δ)` — the same value the
+title-row chip and the Telegram Flow Ratio header show. The **Net Flow
+cell** is the delta-weighted `net_60` above (`get_ticker_executed_net60`),
+the same value the Telegram header and the conviction gate show. Because
+these values are differenced over a sliding window they redraw on every
+read and need no reset: flow measured against an old level ages out
+after a minute. `None` results (untracked ticker, < 2 samples, or zero
+volume in the window) render as an empty Net Flow cell and 0.00 in Flow
+Ratio. See **Net Flow & Flow Ratio math (rolling 60 s)** above for the
+full formulas and worked examples.
+
 The per-contract raw sides (`call_buy_vol` / `call_sell_vol` /
 `put_buy_vol` / `put_sell_vol`) are still kept in the 1-second OHLCV bars, so
-both views remain computable. Only the ATM call and ATM put at the per-ticker
-front expiration are subscribed, so Net Flow is strictly ATM flow.
+both views remain computable. Two ATM call/put pairs are subscribed per
+ticker, both struck at the same ATM strike and folded into the same flow
+buckets: the **front expiration** (`expirations[0]`, per ticker via
+`set_ticker_expiration`) and the **second-nearest expiration**
+(`expirations[1]`, via `set_ticker_expiration2`, when the chain lists a
+second expiry — a single-expiry chain falls back to the front pair
+alone). Net Flow / Flow Ratio / absorption therefore aggregate the two
+closest expiries so the rolling window reads one trend across both
+instead of a single thin contract pair. Delta weighting of executed
+flow is **per-contract**: each print is weighted by its own contract's
+live streamed DELTA; when the stream has not delivered one yet,
+front-pair prints fall back to the front ATM deltas and second-pair
+prints to the `exp2` deltas (`set_ticker_atm_deltas2` — formerly every
+print, including second-pair prints, was weighted with the front
+deltas).
 
 **Multi-flow routing.** Each trade print is folded into **every** tracked flow
 whose stream symbol matches the option's root (`_option_handler` prefix-matches
@@ -675,7 +827,13 @@ sets are not re-sent — re-sending identical subscription requests every
 
 ## Notes / limitations
 
-- Flow totals are **cumulative** for the session, not a rolling window.
+- The flow **counters** (the `call_buy` / `call_sell` / `put_buy` /
+  `put_sell` buckets, `delta_buy` / `delta_sell`, cumulative volume) are
+  **cumulative** for the session, not a rolling window — but every
+  displayed Net Flow / Flow Ratio / Absorption reading is a rolling 60-s
+  difference (or ratio) computed from those counters (newest-minus-oldest
+  sample inside the window), so stale flow ages out after a minute and
+  the counters themselves never reset.
 - Uses the option bid/ask mid as the trade-direction threshold. If
   bid/ask has not yet arrived for an option, the trade is split evenly between
   bullish and bearish.

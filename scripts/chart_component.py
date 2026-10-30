@@ -844,18 +844,12 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         collect(d.series); collect(d.volume_series); collect(d.andean_series); collect(d.iv_skew_series);
         if (d.vp_vols && d.vp_vols.length) keys.push('vp|1');
         keys.sort();
-        // Wall level changes (call/put wall values) alter the flat series values:
-        // include the current levels so a wall move triggers a full rebuild.
-        const ser = d.series || [];
-        const walls = [];
-        for (let i = 0; i < ser.length; i++) {
-            const s = ser[i];
-            if (s.key === 'call_wall' || s.key === 'put_wall') {
-                const arr = s.data || [];
-                walls.push(arr.length ? arr[arr.length - 1].value : null);
-            }
-        }
-        return JSON.stringify([d.symbol || '', keys, d.heights || null, walls]);
+        // NOTE: wall levels (call/put wall) are intentionally NOT part of the
+        // signature. They are data, not structure — a moving wall is applied
+        // per-tick as a single-series setData via __applyList, so a wall
+        // refresh never triggers a full chart rebuild (the old rebuild-per-
+        // wall-change path was the worst source of chart flicker).
+        return JSON.stringify([d.symbol || '', keys, d.heights || null]);
     }
 
     // Keeps at least `minGap` bars of blank space between the last candle and
@@ -917,6 +911,19 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             if (s.type === 'Candlestick') continue;
             const series = byKey[s.key];
             if (!series) continue;
+            if (s.flat) {
+                // Flat lines (call/put walls): the whole array carries one
+                // constant value; refresh with a single setData only when the
+                // level or the bar count actually changed. Never per-tick.
+                const arr = s.data || [];
+                const lastV = arr.length ? arr[arr.length - 1].value : null;
+                if (series.__cwLastV !== lastV || (series.__cwN || 0) !== arr.length) {
+                    try { series.setData(arr); } catch (_) {}
+                    series.__cwLastV = lastV;
+                    series.__cwN = arr.length;
+                }
+                continue;
+            }
             __applyRows(series, s.data);
             if (s.markers && series.setMarkers && series.__cwM !== s.markers.length) {
                 // New bars appended → re-apply the (growing) marker list.
@@ -1109,13 +1116,13 @@ def build_init_data(
 
     if call_wall is not None:
         series_list.append({
-            "type": "Line", "key": "call_wall",
+            "type": "Line", "key": "call_wall", "flat": 1,
             "data": [{"time": cd[i]["time"], "value": call_wall} for i in range(len(cd))],
             "options": {"color": "#ef553b", "lineWidth": 1, "lineStyle": 2, "title": "Resistance"},
         })
     if put_wall is not None:
         series_list.append({
-            "type": "Line", "key": "put_wall",
+            "type": "Line", "key": "put_wall", "flat": 1,
             "data": [{"time": cd[i]["time"], "value": put_wall} for i in range(len(cd))],
             "options": {"color": "#00cc96", "lineWidth": 1, "lineStyle": 2, "title": "Support"},
         })

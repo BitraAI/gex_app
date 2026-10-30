@@ -1480,7 +1480,7 @@ def _squeeze_detector(closes, highs, lows, sqzLength=20, highDev=2.0, midDev=1.5
     for i in range(sqzLength - 1, len(closes)):
         kcUpper.append(bbMiddle[i - sqzLength + 1] + highDev * kc_atr[i - sqzLength + 1])
         kcMiddle.append(bbMiddle[i - sqzLength + 1] + midDev * kc_atr[i - sqzLength + 1])
-        kcLower.append(bbMiddle[i - sqzLength + 1] - lowDev * kc_atr[i - sqzLength + 1])
+        kcLower.append(bbMiddle[i - sqzLength + 1] + lowDev * kc_atr[i - sqzLength + 1])
     sqzRed = [None] * len(closes)
     sqzBlack = [None] * len(closes)
     sqzOrange = [None] * len(closes)

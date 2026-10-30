@@ -27,6 +27,27 @@ The chart itself is rendered by `chart_component.render_chart` (Lightweight
 Charts HTML/JS). See `README.md` for the interactive pan/zoom and Y-range
 persistence behavior across streaming re-renders.
 
+## Live flow chips
+
+The `Candlesticks` **title row** (rendered by `render_candlesticks_frag`
+in place of the plain subheader) shows live ATM `Flow Ratio` /
+`Net Flow Δ (60s)` chips right-aligned next to the tab title. The row is
+a single dynamic element at the **top of the fragment**, far from the
+constant chart host (whose `st.html` DOM persists at its originally
+mounted position), so it holds its place identically on refresh and on
+tab clicks. Values come from
+`AtmOptionVolumeService.get_ticker_executed_net60` (Net Flow Δ — the
+**delta-weighted** executed net, trailing-60 s change in
+`delta_buy − delta_sell`, same source as the Telegram header and the
+conviction gate; the per-print weight is each traded contract's own
+streamed `DELTA` — ±0.5 static fallback) and `get_ticker_flow_metrics_60s` (Flow Ratio — the
+delta-weighted bullish share of delta exposure), the same values the
+**Order Flow** grid's Net Flow / Flow Ratio columns show. Coloring matches the shared thresholds in
+`_constants.py`: Net Flow green > 0, red < 0, orange at 0; Flow Ratio green above
+`FLOW_RATIO_GREEN_THRESHOLD` (0.8), red below
+`FLOW_RATIO_RED_THRESHOLD` (0.2), amber between. Both chips show an em
+dash until the option stream produces flow in the window.
+
 ## Data pipeline
 
 ```
