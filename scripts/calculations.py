@@ -296,86 +296,165 @@ def aggregate_by_strike(
     min_oi: int = 0,
     min_vol: int = 0,
 ) -> list[dict[str, Any]]:
+    """Aggregate option data by strike price with optimized filtering."""
     strikes_map: dict[float, dict] = {}
 
-    for entry in data:
-        if entry["open_interest"] < min_oi:
-            continue
-        if entry["volume"] < min_vol:
-            continue
+    # Early exit for common case: no filtering needed
+    if min_oi <= 0 and min_vol <= 0:
+        for entry in data:
+            sk = entry["strike"]
+            if sk not in strikes_map:
+                strikes_map[sk] = {
+                    "strike": sk,
+                    "call_gex": 0.0,
+                    "put_gex": 0.0,
+                    "net_gex": 0.0,
+                    "call_vex": 0.0,
+                    "put_vex": 0.0,
+                    "net_vex": 0.0,
+                    "call_cex": 0.0,
+                    "put_cex": 0.0,
+                    "net_cex": 0.0,
+                    "call_oi": 0,
+                    "put_oi": 0,
+                    "call_volume": 0,
+                    "put_volume": 0,
+                    "call_gamma": 0.0,
+                    "put_gamma": 0.0,
+                    "total_gamma": 0.0,
+                    "call_front_dte": 9999,
+                    "call_front_iv": 0.0,
+                    "call_front_delta": 0.0,
+                    "put_front_dte": 9999,
+                    "put_front_iv": 0.0,
+                    "put_front_delta": 0.0,
+                    "call_mark": 0.0,
+                    "put_mark": 0.0,
+                    "num_calls": 0,
+                    "num_puts": 0,
+                    "expirations": set(),
+                    "itm": spot > sk,
+                }
 
-        sk = entry["strike"]
-        if sk not in strikes_map:
-            strikes_map[sk] = {
-                "strike": sk,
-                "call_gex": 0.0,
-                "put_gex": 0.0,
-                "net_gex": 0.0,
-                "call_vex": 0.0,
-                "put_vex": 0.0,
-                "net_vex": 0.0,
-                "call_cex": 0.0,
-                "put_cex": 0.0,
-                "net_cex": 0.0,
-                "call_oi": 0,
-                "put_oi": 0,
-                "call_volume": 0,
-                "put_volume": 0,
-                "call_gamma": 0.0,
-                "put_gamma": 0.0,
-                "total_gamma": 0.0,
-                "call_front_dte": 9999,
-                "call_front_iv": 0.0,
-                "call_front_delta": 0.0,
-                "put_front_dte": 9999,
-                "put_front_iv": 0.0,
-                "put_front_delta": 0.0,
-                "call_mark": 0.0,
-                "put_mark": 0.0,
-                "num_calls": 0,
-                "num_puts": 0,
-                "expirations": set(),
-                "itm": spot > sk,
-            }
+            exp = strikes_map[sk]["expirations"]
+            exp.add(entry["expiration"])
 
-        exp = strikes_map[sk]["expirations"]
-        exp.add(entry["expiration"])
+            if entry["type"] == "CALL" and show_calls:
+                strikes_map[sk]["call_gex"] += entry["gex"]
+                strikes_map[sk]["call_vex"] += entry["vex"]
+                strikes_map[sk]["call_cex"] += entry["cex"]
+                strikes_map[sk]["net_gex"] += entry["gex"]
+                strikes_map[sk]["net_vex"] += entry["vex"]
+                strikes_map[sk]["net_cex"] += entry["cex"]
+                strikes_map[sk]["call_oi"] += entry["open_interest"]
+                strikes_map[sk]["call_volume"] += entry["volume"]
+                strikes_map[sk]["call_gamma"] += entry["gamma"]
+                strikes_map[sk]["total_gamma"] += entry["gamma"]
+                if entry["days_to_exp"] < strikes_map[sk]["call_front_dte"]:
+                    strikes_map[sk]["call_front_dte"] = entry["days_to_exp"]
+                    strikes_map[sk]["call_front_iv"] = entry["iv"]
+                    strikes_map[sk]["call_front_delta"] = entry.get("delta", 0) or 0
+                    strikes_map[sk]["call_mark"] = entry.get("mark", 0) or 0
+                strikes_map[sk]["num_calls"] += 1
 
-        if entry["type"] == "CALL" and show_calls:
-            strikes_map[sk]["call_gex"] += entry["gex"]
-            strikes_map[sk]["call_vex"] += entry["vex"]
-            strikes_map[sk]["call_cex"] += entry["cex"]
-            strikes_map[sk]["net_gex"] += entry["gex"]
-            strikes_map[sk]["net_vex"] += entry["vex"]
-            strikes_map[sk]["net_cex"] += entry["cex"]
-            strikes_map[sk]["call_oi"] += entry["open_interest"]
-            strikes_map[sk]["call_volume"] += entry["volume"]
-            strikes_map[sk]["call_gamma"] += entry["gamma"]
-            strikes_map[sk]["total_gamma"] += entry["gamma"]
-            if entry["days_to_exp"] < strikes_map[sk]["call_front_dte"]:
-                strikes_map[sk]["call_front_dte"] = entry["days_to_exp"]
-                strikes_map[sk]["call_front_iv"] = entry["iv"]
-                strikes_map[sk]["call_front_delta"] = entry.get("delta", 0) or 0
-                strikes_map[sk]["call_mark"] = entry.get("mark", 0) or 0
-            strikes_map[sk]["num_calls"] += 1
+            elif entry["type"] == "PUT" and show_puts:
+                strikes_map[sk]["put_gex"] += abs(entry["gex"])
+                strikes_map[sk]["put_vex"] += abs(entry["vex"])
+                strikes_map[sk]["put_cex"] += abs(entry["cex"])
+                strikes_map[sk]["net_gex"] += entry["gex"]
+                strikes_map[sk]["net_vex"] += entry["vex"]
+                strikes_map[sk]["net_cex"] += entry["cex"]
+                strikes_map[sk]["put_oi"] += entry["open_interest"]
+                strikes_map[sk]["put_volume"] += entry["volume"]
+                strikes_map[sk]["put_gamma"] += entry["gamma"]
+                strikes_map[sk]["total_gamma"] += entry["gamma"]
+                if entry["days_to_exp"] < strikes_map[sk]["put_front_dte"]:
+                    strikes_map[sk]["put_front_dte"] = entry["days_to_exp"]
+                    strikes_map[sk]["put_front_iv"] = entry["iv"]
+                    strikes_map[sk]["put_front_delta"] = entry.get("delta", 0) or 0
+                    strikes_map[sk]["put_mark"] = entry.get("mark", 0) or 0
+                strikes_map[sk]["num_puts"] += 1
+    else:
+        # Filter case: check min_oi and min_vol for each entry
+        for entry in data:
+            # Skip entries that don't meet minimum requirements
+            if entry["open_interest"] < min_oi:
+                continue
+            if entry["volume"] < min_vol:
+                continue
 
-        elif entry["type"] == "PUT" and show_puts:
-            strikes_map[sk]["put_gex"] += abs(entry["gex"])
-            strikes_map[sk]["put_vex"] += abs(entry["vex"])
-            strikes_map[sk]["put_cex"] += abs(entry["cex"])
-            strikes_map[sk]["net_gex"] += entry["gex"]
-            strikes_map[sk]["net_vex"] += entry["vex"]
-            strikes_map[sk]["net_cex"] += entry["cex"]
-            strikes_map[sk]["put_oi"] += entry["open_interest"]
-            strikes_map[sk]["put_volume"] += entry["volume"]
-            strikes_map[sk]["put_gamma"] += entry["gamma"]
-            strikes_map[sk]["total_gamma"] += entry["gamma"]
-            if entry["days_to_exp"] < strikes_map[sk]["put_front_dte"]:
-                strikes_map[sk]["put_front_dte"] = entry["days_to_exp"]
-                strikes_map[sk]["put_front_iv"] = entry["iv"]
-                strikes_map[sk]["put_front_delta"] = entry.get("delta", 0) or 0
-                strikes_map[sk]["put_mark"] = entry.get("mark", 0) or 0
-            strikes_map[sk]["num_puts"] += 1
+            sk = entry["strike"]
+            if sk not in strikes_map:
+                strikes_map[sk] = {
+                    "strike": sk,
+                    "call_gex": 0.0,
+                    "put_gex": 0.0,
+                    "net_gex": 0.0,
+                    "call_vex": 0.0,
+                    "put_vex": 0.0,
+                    "net_vex": 0.0,
+                    "call_cex": 0.0,
+                    "put_cex": 0.0,
+                    "net_cex": 0.0,
+                    "call_oi": 0,
+                    "put_oi": 0,
+                    "call_volume": 0,
+                    "put_volume": 0,
+                    "call_gamma": 0.0,
+                    "put_gamma": 0.0,
+                    "total_gamma": 0.0,
+                    "call_front_dte": 9999,
+                    "call_front_iv": 0.0,
+                    "call_front_delta": 0.0,
+                    "put_front_dte": 9999,
+                    "put_front_iv": 0.0,
+                    "put_front_delta": 0.0,
+                    "call_mark": 0.0,
+                    "put_mark": 0.0,
+                    "num_calls": 0,
+                    "num_puts": 0,
+                    "expirations": set(),
+                    "itm": spot > sk,
+                }
+
+            exp = strikes_map[sk]["expirations"]
+            exp.add(entry["expiration"])
+
+            if entry["type"] == "CALL" and show_calls:
+                strikes_map[sk]["call_gex"] += entry["gex"]
+                strikes_map[sk]["call_vex"] += entry["vex"]
+                strikes_map[sk]["call_cex"] += entry["cex"]
+                strikes_map[sk]["net_gex"] += entry["gex"]
+                strikes_map[sk]["net_vex"] += entry["vex"]
+                strikes_map[sk]["net_cex"] += entry["cex"]
+                strikes_map[sk]["call_oi"] += entry["open_interest"]
+                strikes_map[sk]["call_volume"] += entry["volume"]
+                strikes_map[sk]["call_gamma"] += entry["gamma"]
+                strikes_map[sk]["total_gamma"] += entry["gamma"]
+                if entry["days_to_exp"] < strikes_map[sk]["call_front_dte"]:
+                    strikes_map[sk]["call_front_dte"] = entry["days_to_exp"]
+                    strikes_map[sk]["call_front_iv"] = entry["iv"]
+                    strikes_map[sk]["call_front_delta"] = entry.get("delta", 0) or 0
+                    strikes_map[sk]["call_mark"] = entry.get("mark", 0) or 0
+                strikes_map[sk]["num_calls"] += 1
+
+            elif entry["type"] == "PUT" and show_puts:
+                strikes_map[sk]["put_gex"] += abs(entry["gex"])
+                strikes_map[sk]["put_vex"] += abs(entry["vex"])
+                strikes_map[sk]["put_cex"] += abs(entry["cex"])
+                strikes_map[sk]["net_gex"] += entry["gex"]
+                strikes_map[sk]["net_vex"] += entry["vex"]
+                strikes_map[sk]["net_cex"] += entry["cex"]
+                strikes_map[sk]["put_oi"] += entry["open_interest"]
+                strikes_map[sk]["put_volume"] += entry["volume"]
+                strikes_map[sk]["put_gamma"] += entry["gamma"]
+                strikes_map[sk]["total_gamma"] += entry["gamma"]
+                if entry["days_to_exp"] < strikes_map[sk]["put_front_dte"]:
+                    strikes_map[sk]["put_front_dte"] = entry["days_to_exp"]
+                    strikes_map[sk]["put_front_iv"] = entry["iv"]
+                    strikes_map[sk]["put_front_delta"] = entry.get("delta", 0) or 0
+                    strikes_map[sk]["put_mark"] = entry.get("mark", 0) or 0
+                strikes_map[sk]["num_puts"] += 1
 
     result = []
     for sk in sorted(strikes_map.keys()):

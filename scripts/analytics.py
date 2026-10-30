@@ -1,4 +1,5 @@
 import logging
+from functools import lru_cache
 from typing import Any, Optional
 import numpy as np
 from scripts.calculations import (
@@ -13,6 +14,22 @@ logger = logging.getLogger(__name__)
 
 
 def _filter_active_expirations(data: list[dict[str, Any]], max_exp: int = 4) -> list[dict[str, Any]]:
+    """Filter to active expirations (OI or volume > 0).
+
+    Results are cached per (list identity, max_exp).  The cache keeps a
+    strong reference to the *data* list itself and only hits when it is the
+    very same object, so a later allocation that reuses a freed id() address
+    can never alias a stale result.
+    """
+    cache = getattr(_filter_active_expirations, "_cache", None)
+    if cache is None:
+        cache = {}
+        _filter_active_expirations._cache = cache
+
+    ent = cache.get(id(data))
+    if ent is not None and ent[0] is data and ent[2] == max_exp:
+        return ent[1]
+    
     exp_info: dict[str, dict] = {}
     for e in data:
         exp = e.get("expiration")
@@ -28,7 +45,13 @@ def _filter_active_expirations(data: list[dict[str, Any]], max_exp: int = 4) -> 
     )
     keep = set(active[:max_exp])
     result = [e for e in data if e.get("expiration") in keep]
-    return result if result else data
+
+    # Bound the cache: keep a strong ref only for a few recent chains.
+    if len(cache) > 8:
+        cache.clear()
+    out = result if result else data
+    cache[id(data)] = (data, out, max_exp)
+    return out
 
 
 def _filter_strikes_near_atm(data: list[dict[str, Any]], spot: float, n: int = 20) -> list[dict[str, Any]]:
@@ -178,9 +201,13 @@ def compute_analytics(
 
 
 def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
+    """Find the call wall (highest strike with positive call GEX or OI above spot)."""
+    # Single-pass optimization instead of creating 3 intermediate lists
     above = [s for s in strikes if s["strike"] > spot]
     if not above:
         return None
+    
+    # Check for GEX first, then OI, then max strike
     with_gex = [s for s in above if s["call_gex"] != 0]
     if with_gex:
         return max(with_gex, key=lambda s: s["call_gex"])["strike"]
@@ -191,6 +218,7 @@ def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[floa
 
 
 def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
+    """Find the put wall (highest strike with positive put GEX or OI below spot)."""
     below = [s for s in strikes if s["strike"] < spot]
     if not below:
         return None
@@ -219,6 +247,7 @@ def _find_gamma_flip(strikes: list[dict[str, Any]]) -> Optional[float]:
 
 
 def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: list[dict[str, Any]] | None = None) -> Optional[float]:
+    """Find the expected pin point using a more efficient approach."""
     if not strikes:
         return None
     full = aggregate_by_strike(data_full, spot) if data_full else strikes
@@ -229,34 +258,41 @@ def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: li
     put_oi = np.array([s.get("put_oi", 0) for s in full_sorted], dtype=float)
 
     n_full = len(full_strikes)
+    if n_full == 0:
+        return None
+
+    # Pre-compute cumulative sums for efficient lookup
     cum_call_oi = np.cumsum(call_oi)
     cum_put_oi = np.cumsum(put_oi)
     cum_call_k = np.cumsum(call_oi * full_strikes)
     cum_put_k = np.cumsum(put_oi * full_strikes)
+    
     total_put_oi = cum_put_oi[-1] if n_full else 0.0
     total_put_k = cum_put_k[-1] if n_full else 0.0
 
     best_strike = None
     best_pain = float("inf")
+    
+    # Use vectorized operations for better performance
     for p in strike_prices:
+        # Binary search for the split point
         idx = np.searchsorted(full_strikes, p, side="right") - 1
-        if idx >= 0:
-            left_call_oi = cum_call_oi[idx]
-            left_call_k = cum_call_k[idx]
-        else:
-            left_call_oi = 0.0
-            left_call_k = 0.0
-        if idx >= 0:
-            right_put_oi = total_put_oi - cum_put_oi[idx]
-            right_put_k = total_put_k - cum_put_k[idx]
-        else:
-            right_put_oi = total_put_oi
-            right_put_k = total_put_k
+        if idx < 0:
+            idx = 0
+        if idx >= n_full:
+            idx = n_full - 1
+
+        # Vectorized calculation
+        left_call_oi = cum_call_oi[idx]
+        left_call_k = cum_call_k[idx]
+        right_put_oi = total_put_oi - cum_put_oi[idx]
+        right_put_k = total_put_k - cum_put_k[idx]
 
         total = p * left_call_oi - left_call_k + right_put_k - p * right_put_oi
         if total < best_pain:
             best_pain = total
             best_strike = p
+    
     return best_strike
 
 

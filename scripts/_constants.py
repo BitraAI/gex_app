@@ -16,8 +16,8 @@ MAX_BAR_ROWS = 200
 
 # --- Flow / Order-Flow constants ---
 TICKER_RETRY_COUNT = 3
-FLOW_RATIO_GREEN_THRESHOLD = 0.2
-FLOW_RATIO_RED_THRESHOLD = 0.8
+FLOW_RATIO_GREEN_THRESHOLD = 0.8  # bullish share: green (bullish bias) above this
+FLOW_RATIO_RED_THRESHOLD = 0.2    # bullish share: red (bearish bias) below this
 
 # Order-absorption colour thresholds (contracts per $1 of spot path) shared
 # by the Order Flow grid (flow.py) and the Telegram header colouring
