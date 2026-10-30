@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -7,7 +8,8 @@ import pandas as pd
 import streamlit as st
 from scripts import auth_db, landing, persistent_session
 from scripts import client as client_mod
-from scripts._constants import STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS
+from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS,
+                                 FLOW_RATIO_GREEN_THRESHOLD, FLOW_RATIO_RED_THRESHOLD)
 from scripts._utils import compute_strike_increment, floor_dataframe_timestamps, compute_current_bucket, format_expiration, is_otm_or_atm, is_itm_or_atm
 from scripts.client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, load_candle_cache, fetch_price_history_daily, save_candle_cache
 from scripts.streaming_service import StreamingService
@@ -43,6 +45,15 @@ from scripts.config import validate_config
 # only after clicking Refresh.  Done at module scope (before main) so the
 # banner always renders.
 _CONFIG_ERRORS = validate_config()
+
+# Setup logger for client reconnection
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
+handler = logging.StreamHandler()
+handler.setLevel(logging.WARNING)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
 # imported by another module — calling it twice raises StreamlitAPIException.
@@ -236,6 +247,11 @@ def init_client():
         except Exception as e:
             st.error(f"Failed to create Schwab client: {e}")
             return False
+    # NOTE: no proactive REST health check here. The Schwab library refreshes
+    # the access token transparently via the saved refresh token, and a
+    # blocking get_quotes probe on every fragment tick burned REST quota and
+    # caused 429 churn (stream status / wall-value flapping -> chart rebuild
+    # flicker). Token expiry is surfaced by client.py logging instead.
     old = st.session_state.get("streaming_service")
     if old is None or getattr(old, '_loop', None) is None or getattr(old, '_loop', None) is not loop:
         if old is not None:
@@ -933,7 +949,53 @@ def render_candlesticks_frag():
 
     candles_container = st.container()
     with candles_container:
-        st.subheader("Candlesticks")
+        # Title row: tab title on the left, live ATM flow chips (rolling
+        # 60 s) right-aligned on the same line. Rendered at the TOP of the
+        # fragment, far from the constant chart host (whose DOM persists at
+        # its originally mounted position), so the row holds its place
+        # identically on refresh and tab switches. Net Flow Δ is the
+        # DELTA-WEIGHTED executed net (`get_ticker_executed_net60` —
+        # trailing-60 s change in delta_buy − delta_sell, each print
+        # weighted by ITS OWN contract's delta; same source as the Telegram
+        # header and the conviction gate). Flow Ratio is the delta-weighted
+        # bullish share (`get_ticker_flow_metrics_60s` — trailing-60 s
+        # change in the same delta_buy / delta_sell counters). None until
+        # the option stream produces flow in the window (em dash). Colors
+        # follow the grid /
+        # Telegram thresholds: Net Flow green > 0, red < 0, orange at 0;
+        # Flow Ratio green above FLOW_RATIO_GREEN_THRESHOLD (0.8), red
+        # below FLOW_RATIO_RED_THRESHOLD (0.2), amber between.
+        _title_svc = st.session_state.get("atm_option_service")
+        _tnf, _tfr = (None, None)
+        if _title_svc is not None:
+            try:
+                _tfr = _title_svc.get_ticker_flow_metrics_60s(
+                    _normalize_display_symbol(s.get("symbol", "SPY")))[1]
+                _tnf = _title_svc.get_ticker_executed_net60(
+                    _normalize_display_symbol(s.get("symbol", "SPY")))[2]
+            except Exception:
+                _tnf, _tfr = (None, None)
+        if _tnf is not None:
+            _tnf_txt = f"{_tnf:+,.0f}"
+            _tnf_col = "#00cc96" if _tnf > 0 else "#ef5350" if _tnf < 0 else "#ff9800"
+        else:
+            _tnf_txt, _tnf_col = "—", "#ff9800"
+        if _tfr is not None:
+            _tfr_txt = f"{_tfr:.2f}"
+            _tfr_col = ("#00cc96" if _tfr > FLOW_RATIO_GREEN_THRESHOLD
+                        else "#ef5350" if _tfr < FLOW_RATIO_RED_THRESHOLD else "#ff9800")
+        else:
+            _tfr_txt, _tfr_col = "—", "#ff9800"
+        st.markdown(
+            '<div style="display:flex;align-items:center;justify-content:space-between;'
+            'gap:12px;margin:0 0 10px 0;">'
+            '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
+            '<div style="display:flex;align-items:center;gap:18px;">'
+            f'<span style="color:{_tfr_col};font-weight:bold;">Flow Ratio: {_tfr_txt}</span>'
+            f'<span style="color:{_tnf_col};font-weight:bold;">Net Flow Δ (60s): {_tnf_txt}</span>'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
 
 
         # Only show historical data, no live streaming controls
@@ -947,7 +1009,7 @@ def render_candlesticks_frag():
         
         with row2:
             indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "VWAP", "Half Trend", "Volume", "Andean Squeeze"]
-            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "EMA 200", "Half Trend", "VWAP"], label_visibility="collapsed")
+            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "EMA 50", "EMA 200", "Half Trend", "VWAP"], label_visibility="collapsed")
         
         # Refresh the cache from the API when the existing on-disk bars are
         # stale relative to the user's chosen timeframe. The chart fragment
@@ -1403,7 +1465,10 @@ def render_candlesticks_frag():
             iv_skew_indicator_enabled = any(ind in selected_indicators for ind in ["IV Skew (25Δ)"])
             _iv_skew_hist = s.get("iv_skew_history") or []
             if iv_skew_indicator_enabled and _analytics.get("iv_skew") is not None:
-                _now_ms = int(pd.Timestamp.now(tz="UTC").value // 1_000_000)
+                # Second-resolution timestamp (kept in ms). Storing ms would
+                # collapse to duplicate seconds client-side, shrinking the
+                # series every other tick and forcing full setData repaints.
+                _now_ms = (int(pd.Timestamp.now(tz="UTC").value // 1_000_000)) * 1000
                 if not _iv_skew_hist or _iv_skew_hist[-1].get("datetime") != _now_ms:
                     _iv_skew_hist = list(_iv_skew_hist)
                     _iv_skew_hist.append({
@@ -2493,7 +2558,7 @@ def render_tabs_frag():
     # Create the tabs with updated order
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "Market Structure", "Positioning", "Volatility", "Heatmaps",
-        "Options Data", "Candlesticks", "Trade Signals", "Order Flow", "Unusual Trades",
+        "Options Data", "Candlesticks", "Order Flow", "Trade Signals", "Unusual Trades",
         "Live News"
     ])
     
@@ -2517,10 +2582,10 @@ def render_tabs_frag():
         render_candlesticks_frag()
     
     with tab7:
-        render_trade_signals()
+        render_flow_frag()
     
     with tab8:
-        render_flow_frag()
+        render_trade_signals()
     
     with tab9:
         render_unusual_trades()

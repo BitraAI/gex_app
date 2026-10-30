@@ -4,6 +4,8 @@ plotly>=6.8.0
 numpy>=1.26.0
 pandas>=2.0.0
 schwab-py>=1.5.1
+mcp>=2.0.0
+uvicorn>=0.30.0
 tzdata
 feedparser>=6.0
 yfinance>=1.5.0
