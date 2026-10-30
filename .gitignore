@@ -1,8 +1,6 @@
 config.toml
 # Root config.toml holds secrets (SMTP, Schwab) — ignored above. The
 # Streamlit UI config has no secrets, so keep it under version control.
-!/.streamlit/
-!.streamlit/config.toml
 __pycache__/
 *.pyc
-*.egg-info/
+.venv
