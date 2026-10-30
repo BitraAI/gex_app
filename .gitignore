@@ -2,6 +2,11 @@
 # Holds secrets (SMTP, Schwab, Telegram) — tracked .streamlit/config.toml
 # was removed from the repo (240c2e2 on GitHub). Keep the local copy on
 # disk only; sanitized template lives in .streamlit/config.toml.example.
+
+# Node artifacts — the app is pure Python; the only JS dependency is the
+# vendored _lwc_lib.js served from static/. Remove package.json with it
+# if you ever need DOMPurify/jsdom test tooling again: npm install.
+node_modules/
 __pycache__/
 *.pyc
 .venv
