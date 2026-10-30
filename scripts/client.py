@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 from typing import Any, Optional
+from datetime import datetime, timezone
 
 import pandas as pd
 from schwab import auth
@@ -17,6 +18,9 @@ CANDLE_CACHE_DIR = Path.home() / ".local" / "share" / "gex_app" / "candles"
 
 logger = logging.getLogger(__name__)
 
+# Token validation threshold - refresh tokens older than this will trigger re-auth
+MAX_TOKEN_AGE_SECONDS = 7 * 24 * 3600  # 7 days
+
 
 def _token_loader() -> dict[str, Any]:
     token = load_json(TOKEN_PATH)
@@ -29,7 +33,54 @@ def _token_writer(token: dict[str, Any], *args: Any, **kwargs: Any) -> None:
     save_json(TOKEN_PATH, token, secure=True)
 
 
+def _token_is_valid() -> bool:
+    """Check if the Schwab token is still valid.
+    
+    Returns True if token exists and is not expired.
+    Returns False if token is missing, expired, or invalid.
+    Warns if token will expire within 24 hours.
+    """
+    try:
+        token = load_json(TOKEN_PATH)
+        if token is None:
+            return False
+        
+        raw = token.get("token", token)
+        if not isinstance(raw, dict):
+            return False
+            
+        # Check for required keys
+        if "access_token" not in raw or "refresh_token" not in raw:
+            return False
+        
+        # Check token age
+        ct = token.get("creation_timestamp")
+        if ct is None:
+            return False
+            
+        now = datetime.now(timezone.utc).timestamp()
+        
+        # Warn if token will expire within 24 hours
+        time_until_expiry = ct + MAX_TOKEN_AGE_SECONDS - now
+        if time_until_expiry < 24 * 3600 and time_until_expiry > 0:
+            logger.warning(f"Token expiring in {time_until_expiry/3600:.1f} hours - please re-authenticate soon")
+        
+        if now > ct + MAX_TOKEN_AGE_SECONDS:
+            logger.warning(f"Token expired (created {ct}, now {now})")
+            return False
+            
+        return True
+    except Exception as e:
+        logger.warning(f"Token validation error: {e}")
+        return False
+
+
 def create_client() -> AsyncClient:
+    """Create or recreate a Schwab client.
+    
+    If the existing token is expired or invalid, a new client will be created
+    which will trigger re-authentication when the first API call is made.
+    """
     client_id = CLIENT_ID
     client_secret = CLIENT_SECRET
 
@@ -41,6 +92,11 @@ def create_client() -> AsyncClient:
         asyncio=True,
         enforce_enums=False,
     )
+    
+    # Validate token on client creation
+    if not _token_is_valid():
+        logger.warning("Token invalid - will trigger re-auth on next API call")
+    
     return client
 
 
