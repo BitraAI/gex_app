@@ -19,7 +19,8 @@ from datetime import datetime
 from functools import partial
 from zoneinfo import ZoneInfo
 from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT,
-                        FLOW_WATCHDOG_STALE_SECONDS,
+                        FLOW_WATCHDOG_STALE_SECONDS, FLOW_RATIO_GREEN_THRESHOLD,
+                        FLOW_RATIO_RED_THRESHOLD,
                         ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE,
                         ABSORPTION_HIGH, ABSORPTION_LOW)
 from scripts._utils import compute_strike_increment, format_expiration
@@ -1412,11 +1413,18 @@ def render_atm_order_flow_grid():
                 _trend_state[t_upper] = {"candidate": _candidate, "streak": _streak, "display": _display}
                 trend_display = _display
 
-            _net_flow, _flow_ratio = None, None
-            if atm_svc is not None:
-                _net_flow, _flow_ratio = atm_svc.get_ticker_flow_metrics_60s(t_upper)
+            # Net Flow is the delta-weighted executed net (get_ticker_executed_net60
+            # — trailing-60 s change in delta_buy − delta_sell, each print weighted
+            # by ITS OWN contract's delta; same source as the Telegram header and
+            # the conviction gate). Flow Ratio is the delta-weighted bullish share
+            # (get_ticker_flow_metrics_60s — trailing-60 s change in the same
+            # delta_buy / delta_sell counters).
             # Rolling 1-minute values: None until 60 s of flow exists
             # (freshly started feed or quiet book shows an empty cell).
+            _net_flow, _flow_ratio = None, None
+            if atm_svc is not None:
+                _flow_ratio = atm_svc.get_ticker_flow_metrics_60s(t_upper)[1]
+                _net_flow = atm_svc.get_ticker_executed_net60(t_upper)[2]
             if _flow_ratio is None:
                 _flow_ratio = 0.0
             rows.append({
@@ -1479,13 +1487,13 @@ def render_atm_order_flow_grid():
         return "color: #ff9800; font-weight: bold;"
 
     def _flow_ratio_color(val):
-        """Color the flow ratio: red background > 0.8, green background < 0.2."""
+        """Color the flow ratio: green background > 0.8, red background < 0.2."""
         if val is None or not isinstance(val, (int, float)):
             return ""
-        if val > 0.8:
-            return "background-color: #ef5350; font-weight: bold;"
-        if val < 0.2:
+        if val > FLOW_RATIO_GREEN_THRESHOLD:
             return "background-color: #00cc96; font-weight: bold;"
+        if val < FLOW_RATIO_RED_THRESHOLD:
+            return "background-color: #ef5350; font-weight: bold;"
         return ""
 
     def _net_flow_color(val):

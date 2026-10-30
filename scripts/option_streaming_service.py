@@ -7,7 +7,7 @@ from collections import deque
 from datetime import datetime
 import pandas as pd
 from scripts._constants import STREAM_SYMBOL_MAP, MAX_BAR_ROWS, INDEX_QUOTE_MAP
-from scripts._utils import load_json, save_json
+from scripts._utils import load_json, save_json, compute_strike_increment
 from scripts.calculations import calculate_atm_strike, get_strike_spacing
 
 logger = logging.getLogger(__name__)
@@ -152,6 +152,15 @@ class AtmOptionVolumeService:
         self._call_ask: float | None = None
         self._put_bid: float | None = None
         self._put_ask: float | None = None
+
+        # Per-contract live deltas from the LEVELONE_OPTIONS stream
+        # (keyed by space-stripped OCC symbol).  Each executed trade is
+        # weighted by ITS OWN contract's delta — front-vs-second expiry
+        # and strike skew included — instead of a blanket front-ATM
+        # delta.  Falls back to the REST chain ATM deltas (per expiry)
+        # and then the static ±0.5 when the stream has not delivered a
+        # delta for the traded contract yet.
+        self._stream_deltas: dict[str, float] = {}
 
         # Aggregated 1-second bars (primary symbol for chart merge) — list-based
         # accumulator for O(1) appends; converted to DataFrame only on demand.
@@ -403,6 +412,7 @@ class AtmOptionVolumeService:
                     "vol_history": deque(),
                     "spot_history": deque(),
                     "exec_history": deque(),
+                    "atm_delta_flow_history": deque(),
                     "flow_speed": 0,
                     "flow_acceleration": 0,
                     "book_imbalance": None,
@@ -422,6 +432,7 @@ class AtmOptionVolumeService:
         self._subscribed_call_sym = None
         self._subscribed_put_sym = None
         self._stream_client = None
+        self._stream_deltas.clear()
 
     def is_feed_stale(self, max_age_seconds: float = 60.0) -> bool:
         """Return True if no option ticks have been received for
@@ -514,19 +525,25 @@ class AtmOptionVolumeService:
                 net_60 = eh[-1][1] - eh[0][1]
             return buy, sell, net_60
 
-    def get_ticker_flow_metrics_60s(self, display_symbol: str) -> tuple[int | None, float | None]:
-        """Rolling 60 s (net_flow, flow_ratio) of raw contract buckets.
+    def get_ticker_flow_metrics_60s(self, display_symbol: str) -> tuple[float | None, float | None]:
+        """Rolling 60 s (net_flow, flow_ratio) — DELTA-WEIGHTED.
 
-        Returns the bullish-bearish contract difference and the bullish
-        share over the trailing 60 s of executed ATM trades — the rolling
-        1-minute values behind the Order Flow grid's Net Flow and Flow
-        Ratio columns. ``None`` when the ticker is untracked or the
-        window has fewer than two samples (no flow yet / quiet book).
+        Returns the trailing-60 s change in the cumulative delta-weighted
+        sides (``Δ delta_buy − Δ delta_sell``) as ``net_flow`` (identical
+        to ``get_ticker_executed_net60[:-1][2]``'s ``net_60``) and
+        ``Δ delta_buy / (Δ delta_buy + Δ delta_sell)`` as ``flow_ratio`` —
+        the bullish share of **delta exposure**, not raw contracts. The
+        delta-weighted net feeds the Order Flow grid's Net Flow cell, the
+        title-row chip, and the Telegram header; the delta-weighted ratio
+        feeds the grid's Flow Ratio cell, the title-row chip, and the
+        Telegram Flow Ratio header. ``None`` when the ticker is untracked
+        or the window has fewer than two samples (no flow yet / quiet
+        book).
 
         Because the values are differenced over a sliding window they
         redraw themselves every second and need no wall-cross reset: flow
         measured against the old level simply ages out after a minute.
-        Samples record the cumulative buckets at each executed trade, so
+        Samples record the cumulative counters at each executed trade, so
         the window measures trades between the oldest and newest samples
         inside it — matching the absorption / executed-flow semantics."""
         with self._lock:
@@ -534,13 +551,13 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return None, None
             now = _time_mod.time()
-            fh = ticker.setdefault("atm_flow_history", deque())
-            while fh and fh[0][0] < now - 60:
-                fh.popleft()
-            if len(fh) < 2:
+            dfh = ticker.setdefault("atm_delta_flow_history", deque())
+            while dfh and dfh[0][0] < now - 60:
+                dfh.popleft()
+            if len(dfh) < 2:
                 return None, None
-            bull_60 = fh[-1][1] - fh[0][1]
-            bear_60 = fh[-1][2] - fh[0][2]
+            bull_60 = dfh[-1][1] - dfh[0][1]
+            bear_60 = dfh[-1][2] - dfh[0][2]
             total_60 = bull_60 + bear_60
             if total_60 <= 0:
                 return None, None
@@ -831,9 +848,12 @@ class AtmOptionVolumeService:
                               put_delta: float | None):
         """Store the front-month ATM Call delta (>0) and Put delta (<0)
         for a tracked ticker.  These are read from REST option-chain
-        analytics and used to delta-weight each executed trade so the Net
-        Flow column reports net_delta = delta_buy - delta_sell instead of
-        raw contract counts."""
+        analytics and serve as the per-expiration FALLBACK for
+        delta-weighting executed trades — the primary weighting source is
+        each traded contract's own live streamed DELTA (see
+        ``_process_trade_ticker``) — so the Net Flow column reports
+        net_delta = delta_buy - delta_sell instead of raw contract
+        counts."""
         if call_delta is None and put_delta is None:
             return
         with self._lock:
@@ -849,10 +869,12 @@ class AtmOptionVolumeService:
                                put_delta: float | None):
         """Store the SECOND-nearest expiration's ATM Call/Put deltas.
 
-        Delta-weighted executed flow (delta_buy / delta_sell) currently
-        weights every trade by the FRONT expiration's deltas, whether the
-        print came from the front or the second ATM pair — the contracts
-        live at the same strike, so the deltas are close; raw Net Flow /
+        These are the per-expiration fallback for delta-weighting prints
+        from the second ATM pair: `_process_trade_ticker` weights each
+        trade by its own contract's live streamed DELTA and falls back to
+        these only when the stream has not delivered a delta for that
+        contract yet (previously every print — front or second expiry —
+        was weighted by the FRONT expiration's deltas); raw Net Flow /
         Flow Ratio buckets are unaffected (they are pure counts)."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
@@ -1051,6 +1073,7 @@ class AtmOptionVolumeService:
                     "vol_history": deque(),
                     "spot_history": deque(),
                     "exec_history": deque(),
+                    "atm_delta_flow_history": deque(),
                     "flow_speed": 0,
                     "flow_acceleration": 0,
                     "book_imbalance": None,
@@ -1224,6 +1247,15 @@ class AtmOptionVolumeService:
                 contract_type = c.get("CONTRACT_TYPE", "").upper()
                 underlying = c.get("UNDERLYING_PRICE")
 
+                # Per-contract delta: cache the traded contract's own live
+                # delta whenever the stream delivers it (quote refreshes and
+                # updates both carry DELTA since all LEVELONE_OPTIONS fields
+                # are subscribed).  Trades weight themselves by this value
+                # (see _process_trade_ticker).
+                _frame_delta = c.get("DELTA")
+                if isinstance(_frame_delta, (int, float)) and _frame_delta:
+                    self._stream_deltas[sym] = float(_frame_delta)
+
                 # Update bid/ask/spot for every matching flow entry.
                 # Index symbols (SPX/RUT/NDX) share an ETF proxy
                 # subscription (SPY/IWM/QQQ).  The UNDERLYING_PRICE in those
@@ -1323,8 +1355,12 @@ class AtmOptionVolumeService:
                 try:
                     ct = c.get("CONTRACT_TYPE", "").upper()
                     opt_type = "CALL" if ct in ("CALL", "C") else "PUT"
+                    _trade_delta = self._stream_deltas.get(sym)
                     for _td, _tk in matched:
-                        self._process_trade_ticker(_tk, price, size, opt_type)
+                        self._process_trade_ticker(
+                            _tk, price, size, opt_type,
+                            delta=_trade_delta, trade_sym=sym,
+                        )
                     if is_primary:
                         self._aggregate_tick(
                             int(t), float(price), int(size), opt_type,
@@ -1584,29 +1620,59 @@ class AtmOptionVolumeService:
                     bar["total_buy_vol"] += rem
                     bar["total_sell_vol"] += half
 
-    def _process_trade_ticker(self, ticker: dict | None, price: float, size: int, opt_type: str):
+    def _process_trade_ticker(self, ticker: dict | None, price: float, size: int, opt_type: str,
+                              delta: float | None = None, trade_sym: str | None = None):
         """Accumulate a trade into a per-ticker flow total (cumulative,
         not a rolling window).  Called with self._lock held.
 
         Raw ``buy_vol`` / ``sell_vol`` (and the bullish/bearish feel)
         stay as delta-adjusted contract buckets for the Buy/Sell columns
         (buying calls and selling puts -> buy; selling calls and buying
-        puts -> sell).  Separately, each trade is weighted by its
-        front-month ATM delta (call > 0, put < 0) into ``delta_buy`` /
-        ``delta_sell``; that delta-weighted cumulative net
+        puts -> sell).  Separately, each trade is weighted by ITS OWN
+        contract's delta (call > 0, put < 0) into ``delta_buy`` /
+        ``delta_sell``: *delta* is the traded contract's live streamed
+        DELTA; when the stream has not delivered one yet, *trade_sym*
+        selects the REST chain ATM delta for the matching expiration
+        (front vs second-nearest pair); the static ±0.5 is the last
+        resort.  That delta-weighted cumulative net
         (delta_buy - delta_sell) feeds the 60 s executed-flow window
-        behind alerts.  The Order Flow grid's Net Flow column is the raw
-        contract-bucket difference computed by ``flow_metrics``."""
+        behind the Net Flow / Flow Ratio displays and alerts."""
         if ticker is None:
             return
         if opt_type == "CALL":
             direction = self._infer_dir(price, ticker["call_bid"], ticker["call_ask"])
-            _d = ticker.get("call_delta")
-            _d = _d if isinstance(_d, (int, float)) and _d else 0.5
         else:
             direction = self._infer_dir(price, ticker["put_bid"], ticker["put_ask"])
-            _d = ticker.get("put_delta")
-            _d = _d if isinstance(_d, (int, float)) and _d else -0.5
+
+        # Per-trade delta resolution, best source first:
+        #   1. the traded contract's own live delta from the stream,
+        #   2. the REST chain ATM delta of the contract's own expiration
+        #      (front vs second pair — a second-expiry print must not be
+        #      weighted with the front expiry's delta),
+        #   3. the static ±0.5 fallback.
+        _d = None
+        if isinstance(delta, (int, float)) and delta:
+            _d = float(delta)
+        if _d is None:
+            _t = trade_sym or ""
+            _is_exp2 = bool(_t) and _t in (
+                (ticker.get("call_sym2") or "").replace(" ", ""),
+                (ticker.get("put_sym2") or "").replace(" ", ""),
+            )
+            if _is_exp2:
+                _cd2 = ticker.get("exp2_call_delta")
+                _pd2 = ticker.get("exp2_put_delta")
+                if opt_type == "CALL" and isinstance(_cd2, (int, float)) and _cd2:
+                    _d = _cd2
+                elif opt_type == "PUT" and isinstance(_pd2, (int, float)) and _pd2:
+                    _d = _pd2
+        if _d is None:
+            _cd = ticker.get("call_delta")
+            _pd = ticker.get("put_delta")
+            if opt_type == "CALL":
+                _d = _cd if isinstance(_cd, (int, float)) and _cd else 0.5
+            else:
+                _d = _pd if isinstance(_pd, (int, float)) and _pd else -0.5
 
         # Delta-weighted signed flow: buy calls / sell puts carry positive
         # delta (bullish), sell calls / buy puts negative.  Computed here so
@@ -1668,9 +1734,9 @@ class AtmOptionVolumeService:
         while eh and eh[0][0] < now - 60:
             eh.popleft()
         # Rolling 60 s window of the raw cumulative bullish/bearish
-        # contract buckets — differenced over the window by
-        # get_ticker_flow_metrics_60s to yield the rolling 1-minute
-        # Net Flow and Flow Ratio of the Order Flow grid.
+        # contract buckets — still recorded as a reference (kept cheap);
+        # no longer consumed by get_ticker_flow_metrics_60s, which now
+        # reads the delta-weighted atm_delta_flow_history below.
         # (NOT the pre-existing "flow_history" list key several ticker
         # dicts already carry — that one is a plain list from other
         # initializers and cannot popleft.)
@@ -1678,6 +1744,14 @@ class AtmOptionVolumeService:
         fh.append((now, ticker["bullish"], ticker["bearish"]))
         while fh and fh[0][0] < now - 60:
             fh.popleft()
+        # Rolling 60 s window of the cumulative delta-weighted sides
+        # (delta_buy / delta_sell) — differenced over the window by
+        # get_ticker_flow_metrics_60s to yield the delta-weighted
+        # Flow Ratio of the Order Flow grid / title-row chips / Telegram.
+        dfh = ticker.setdefault("atm_delta_flow_history", deque())
+        dfh.append((now, ticker.get("delta_buy", 0.0), ticker.get("delta_sell", 0.0)))
+        while dfh and dfh[0][0] < now - 60:
+            dfh.popleft()
 
     def _infer_dir(self, price: float, bid: float | None, ask: float | None) -> str:
         if bid is not None and ask is not None:
