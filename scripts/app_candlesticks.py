@@ -16,7 +16,7 @@ from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOL
 from scripts._utils import floor_dataframe_timestamps, compute_current_bucket
 from scripts.client import load_candle_cache
 from scripts.chart_component import render_chart, render_chart_host
-from scripts.flow import ensure_atm_streaming, run_async
+from scripts.flow import ensure_atm_streaming, run_async, maybe_refresh_ticker_walls
 from scripts.option_streaming_service import (_normalize_display_symbol,
                                               _get_stream_symbol)
 from scripts.app_data import _candles_need_refresh, refresh_candles
@@ -503,10 +503,29 @@ def render_candlesticks_frag():
 
         last_close = float(df["close"].iloc[-1]) if not df.empty else None
 
-        # Call/Put wall horizontal lines (price levels from analytics)
+        # Call/Put wall horizontal lines (Resistance = Call Wall, Support =
+        # Put Wall). Prefer the LIVE walls from the ATM streaming service:
+        # they are recomputed from the option chain by the shared hybrid
+        # wall-refresh trigger (movement-/staleness-driven, REST-throttled),
+        # so the dashed lines on the chart move whenever the walls move.
+        # Fall back to the session analytics snapshot (set on a full
+        # Refresh) per-level until the live walls arrive.
         _analytics = s.get("analytics") or {}
-        _cw = _analytics.get("call_wall")
-        _pw = _analytics.get("put_wall")
+        maybe_refresh_ticker_walls(_sym_norm_chart)
+        _cw = None
+        _pw = None
+        _wall_svc = s.get("atm_option_service")
+        if _wall_svc is not None:
+            try:
+                _cw = _wall_svc.get_ticker_call_wall(_sym_norm_chart)
+                _pw = _wall_svc.get_ticker_put_wall(_sym_norm_chart)
+            except Exception:
+                _cw = None
+                _pw = None
+        if _cw is None:
+            _cw = _analytics.get("call_wall")
+        if _pw is None:
+            _pw = _analytics.get("put_wall")
 
         # Websocket streaming status — overlaid on the candlesticks chart.
         # The equity StreamClient feeds the live candles (and, when

@@ -688,6 +688,70 @@ def _tracked_book_contracts(atm_svc, tickers):
     return contracts
 
 
+def _maybe_schedule_wall_refresh(t_upper: str, spot: float, now: float,
+                                 include_full: bool = False, atm_svc=None) -> None:
+    """Hybrid wall-refresh trigger for ONE ticker.
+
+      - fast path: lightweight wall refresh when price moves >= half a
+        strike OR the freshness floor (MAX interval) elapses — throttled
+        to at most once per MIN interval per ticker.
+      - slow path (include_full=True): full recompute (analytics + IV rank
+        + alerts context) at a fixed slower cadence so alert headers stay
+        fresh too.
+
+    Writes the module-level throttle dicts (_last_ref_price,
+    _last_recompute_ts, _last_full_recompute_ts, _strike_inc), so callers
+    on different tabs (the Order Flow alerts loop AND the Candlesticks
+    fragment) share one cadence and never double-schedule a REST refresh
+    for the same ticker.
+    """
+    _client = st.session_state.get("client")
+    _loop = _ensure_async_loop()
+    _ref = _last_ref_price.get(t_upper)
+    _inc = _strike_inc.get(t_upper, 1.0)
+    _last_re = _last_recompute_ts.get(t_upper, 0.0)
+    _moved = _ref is None or abs(spot - _ref) >= _inc / 2
+    _stale = (now - _last_re) >= _WALL_RECOMPUTE_MAX_INTERVAL
+    if (_moved or _stale) and (_last_re == 0.0 or (now - _last_re) >= _WALL_RECOMPUTE_MIN_INTERVAL):
+        _last_ref_price[t_upper] = spot
+        _last_recompute_ts[t_upper] = now
+        if _client:
+            asyncio.run_coroutine_threadsafe(
+                _refresh_walls_for_symbol(t_upper, _client, atm_svc), _loop,
+            )
+    if include_full and (now - _last_full_recompute_ts.get(t_upper, 0.0)) >= _WALL_FULL_RECOMPUTE_INTERVAL:
+        _last_full_recompute_ts[t_upper] = now
+        if _client:
+            asyncio.run_coroutine_threadsafe(
+                _recompute_symbol(t_upper, _client, _loop, atm_svc), _loop,
+            )
+
+
+def maybe_refresh_ticker_walls(display_symbol: str) -> None:
+    """Public: schedule the lightweight wall refresh for one ticker.
+
+    Called every Candlesticks-tab tick so the Resistance/Support lines on
+    the candlestick chart track moving walls even while the Order Flow
+    tab (whose alerts loop normally drives wall refreshes) is not open.
+    The throttle state is SHARED with maybe_fire_wall_zone_alerts, so the
+    total REST cadence stays capped at the MIN/MAX intervals per ticker.
+
+    No-op when the ATM service, client, or a streaming spot is missing
+    (the refresh needs a spot to compare against the last reference).
+    """
+    atm_svc = st.session_state.get("atm_option_service")
+    if atm_svc is None or st.session_state.get("client") is None:
+        return
+    t_upper = _normalize_display_symbol(display_symbol)
+    if not t_upper:
+        return
+    spot = atm_svc.get_ticker_spot(t_upper)
+    if spot is None:
+        return
+    _maybe_schedule_wall_refresh(t_upper, spot, _time_mod.monotonic(),
+                                 include_full=False, atm_svc=atm_svc)
+
+
 def maybe_fire_wall_zone_alerts() -> None:
     """Inspect every tracked ticker's streaming spot vs its walls and push
     diff_alerts (wall zone, gamma flip, wall changes) to Telegram.
@@ -716,33 +780,9 @@ def maybe_fire_wall_zone_alerts() -> None:
         if spot is None:
             continue
 
-        # Hybrid trigger for wall refreshes:
-        #   - fast path: lightweight wall refresh when price moves >= half a
-        #     strike OR the freshness floor (MAX interval) elapses — throttled
-        #     to at most once per MIN interval per ticker.
-        #   - slow path: full recompute (analytics + IV rank + alerts) at a
-        #     fixed slower cadence so alert headers stay fresh too.
-        _raw_t = t_upper
-        _ref = _last_ref_price.get(_raw_t)
-        _inc = _strike_inc.get(_raw_t, 1.0)
-        _last_re = _last_recompute_ts.get(_raw_t, 0.0)
-        _moved = _ref is None or abs(spot - _ref) >= _inc / 2
-        _stale = (now - _last_re) >= _WALL_RECOMPUTE_MAX_INTERVAL
-        _client = s.get("client")
-        _loop = _ensure_async_loop()
-        if (_moved or _stale) and (_last_re == 0.0 or (now - _last_re) >= _WALL_RECOMPUTE_MIN_INTERVAL):
-            _last_ref_price[_raw_t] = spot
-            _last_recompute_ts[_raw_t] = now
-            if _client:
-                asyncio.run_coroutine_threadsafe(
-                    _refresh_walls_for_symbol(_raw_t, _client, atm_svc), _loop,
-                )
-        if (now - _last_full_recompute_ts.get(_raw_t, 0.0)) >= _WALL_FULL_RECOMPUTE_INTERVAL:
-            _last_full_recompute_ts[_raw_t] = now
-            if _client:
-                asyncio.run_coroutine_threadsafe(
-                    _recompute_symbol(_raw_t, _client, _loop, atm_svc), _loop,
-                )
+        # Hybrid trigger for wall refreshes (fast + slow path; see
+        # _maybe_schedule_wall_refresh for the cadence rules).
+        _maybe_schedule_wall_refresh(t_upper, spot, now, include_full=True, atm_svc=atm_svc)
 
         prev = state.get(t_upper)
 
