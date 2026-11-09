@@ -24,6 +24,15 @@ FLOW_RATIO_RED_THRESHOLD = 0.2    # bullish share: red (bearish bias) below this
 # (telegram_notifier.py) so both use the exact same cutoffs.
 ABSORPTION_HIGH = 1000.0  # heavy flow absorbed, price pinned
 ABSORPTION_LOW = 300.0    # price drifting on thin flow
+
+# Liquidity flow thresholds - dynamic minimum based on ticker's typical depth
+LIQUIDITY_FLOW_MIN_PCT = 0.03  # 3% of avg book depth (changed from 2%)
+LIQUIDITY_FLOW_MIN_PCT_WINDOW = 30  # seconds for avg depth calculation
+
+# Absorption - use delta-weighted volume, smoother denominator
+ABSORPTION_MIN_VOL = 20
+ABSORPTION_MIN_SPOT_MOVE = 0.05
+
 ATM_SUBSCRIBE_BACKOFF_BASE = 0.5
 ATM_SUBSCRIBE_BACKOFF_RANGE = 1.0
 FLOW_WATCHDOG_STALE_SECONDS = 60

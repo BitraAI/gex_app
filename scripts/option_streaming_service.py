@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import threading
 import time as _time_mod
 from collections import deque
@@ -30,6 +31,14 @@ _WALL_REFRESH_MIN_INTERVAL = 30.0
 _ABSORPTION_MIN_VOL = 20
 _ABSORPTION_MIN_SPOT_MOVE = 0.05  # $ floor so a pinned price can't yield inf
 
+# Unusual Trades print tracker: print_history length cap and the read-time
+# window/gap parameters used by get_unusual_prints for sweep detection.
+_PRINT_HISTORY_MAX = 200      # prints kept per ticker (oldest dropped)
+_SWEEP_WINDOW = 300.0         # seconds of prints a read covers (5 min)
+_SWEEP_GAP = 10.0             # max gap between prints in one sweep cluster
+_SWEEP_MIN_PRINTS = 3         # prints required in a cluster to call a sweep
+_BLOCK_MIN_PREMIUM = 100_000  # single-print $ premium to call a block
+
 TICKER_HISTORY_FILE = os.path.expanduser("~/.local/share/gex_app/ticker_history.json")
 
 
@@ -46,6 +55,28 @@ def _make_option_symbol(root: str, yymmdd: str, call_put: str, strike: float) ->
     cp = "C" if call_put.upper() == "C" else "P"
     strike_int = int(round(strike * 1000))
     return f"{root}{yymmdd}{cp}{strike_int:08d}"
+
+
+def _parse_stream_option_symbol(sym: str | None) -> tuple[str, float, int, int, int]:
+    """Parse a subscribed option symbol built by ``_make_option_symbol``
+    (up-to-6-char root + yymmdd + C/P + strike*1000 digits; the 6-char root
+    field is zero-padded with spaces to exactly 6 chars) into
+    ``(option_type, strike, exp_year, exp_month, exp_day)``.  Tolerates the
+    padded spaces being stripped or re-inserted and returns
+    ``("", 0.0, 0, 0, 0)`` when unparseable."""
+    try:
+        m = re.fullmatch(
+            r"([A-Z.$]{1,6})\s*(\d{6})([CP])(\d{6,9})", (sym or "").strip()
+        )
+        if m is None:
+            return "", 0.0, 0, 0, 0
+        yymmdd, cp, strike_digits = m.group(2), m.group(3), m.group(4)
+        strike = int(strike_digits) / 1000.0
+        opt_type = "CALL" if cp == "C" else "PUT"
+        return (opt_type, strike, 2000 + int(yymmdd[:2]),
+                int(yymmdd[2:4]), int(yymmdd[4:6]))
+    except (ValueError, TypeError, IndexError):
+        return "", 0.0, 0, 0, 0
 
 
 def _index_option_root(display_symbol: str, expiration: str) -> str | None:
@@ -459,13 +490,16 @@ class AtmOptionVolumeService:
 
     def get_ticker_absorption(self, display_symbol: str) -> float | None:
         """Return the current order absorption for a tracked ticker:
-        cumulative ATM option volume over the trailing 60 s divided by the
-        spot *path length* over the same window (contracts per $1).
+        delta-weighted cumulative ATM option volume over the trailing 60 s
+        divided by the spot *path length* over the same window (contracts
+        per $1).
 
         The denominator is the sum of absolute per-sample spot moves, not
         the net displacement: a tape that whipsaws ±$2 and closes flat has
         travelled a lot and must NOT read as pinned — only a price that
         stays put (a genuine pin) yields a high ratio.
+
+        Uses delta-weighted volume (same as Flow Ratio) for consistency.
 
         High absorption means the book/level soaked up heavy flow with
         little price movement (price pinned); low absorption means the
@@ -482,26 +516,60 @@ class AtmOptionVolumeService:
             now = _time_mod.time()
             spot = ticker.get("spot", 0.0) or 0.0
             sh = ticker.setdefault("spot_history", deque())
-            vh = ticker.setdefault("vol_history", deque())
+            dvh = ticker.setdefault("delta_vol_history", deque())
             while sh and sh[0][0] < now - 60:
                 sh.popleft()
-            while vh and vh[0][0] < now - 60:
-                vh.popleft()
+            while dvh and dvh[0][0] < now - 60:
+                dvh.popleft()
             if spot > 0:
                 sh.append((now, spot))
                 while sh and sh[0][0] < now - 60:
                     sh.popleft()
-            if len(vh) < 2 or len(sh) < 2:
+            if len(dvh) < 2 or len(sh) < 2:
                 return None
-            vol_60 = vh[-1][1] - vh[0][1]
+            vol_60 = dvh[-1][1] - dvh[0][1]
             if vol_60 < _ABSORPTION_MIN_VOL:
                 return None
             # Chop-adjusted price movement: total path travelled by spot
-            # over the window (sum of |Δ| per sample), floored so a
-            # dead-flat feed cannot divide by zero.
+            # over the window (sum of |Δ| per sample), with smooth floor
+            # so a dead-flat feed yields finite absorption instead of inf.
             spot_path = sum(abs(cur[1] - prev[1])
                             for prev, cur in zip(sh, list(sh)[1:]))
-            return vol_60 / max(spot_path, _ABSORPTION_MIN_SPOT_MOVE)
+            return vol_60 / (spot_path + _ABSORPTION_MIN_SPOT_MOVE)
+
+    def get_ticker_pin_score(self, display_symbol: str) -> float | None:
+        """Return the current pin score for a tracked ticker: delta-weighted
+        volume over trailing 60 s divided by net spot displacement (contracts
+        per $1).  Simpler than absorption for users who want to know "how
+        much flow did the price absorb?" without the path-length complexity.
+
+        Formula: vol_60 / (abs(net_displacement) + 0.05)
+
+        A high pin score means heavy flow with little net movement (price
+        pinned); a low score means flow caused significant movement.
+        Unlike absorption, this ignores price whipsaw and only cares about
+        net displacement.
+
+        Returns None when the ticker is untracked or the 60 s flow is below
+        ``_ABSORPTION_MIN_VOL`` or fewer than 2 samples exist."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            now = _time_mod.time()
+            sh = ticker.setdefault("spot_history", deque())
+            dvh = ticker.setdefault("delta_vol_history", deque())
+            while sh and sh[0][0] < now - 60:
+                sh.popleft()
+            while dvh and dvh[0][0] < now - 60:
+                dvh.popleft()
+            if len(dvh) < 2 or len(sh) < 2:
+                return None
+            vol_60 = dvh[-1][1] - dvh[0][1]
+            if vol_60 < _ABSORPTION_MIN_VOL:
+                return None
+            net_displacement = abs(sh[-1][1] - sh[0][1])
+            return vol_60 / (net_displacement + 0.05)
 
     def get_ticker_executed_net60(self, display_symbol: str) -> float | None:
         """Return (buy_vol, sell_vol, net_60) for a tracked ticker:
@@ -528,12 +596,28 @@ class AtmOptionVolumeService:
     def get_ticker_flow_metrics_60s(self, display_symbol: str) -> tuple[float | None, float | None]:
         """Rolling 60 s (net_flow, flow_ratio) — DELTA-WEIGHTED.
 
-        Returns the trailing-60 s change in the cumulative delta-weighted
+        Returns delta-weighted flow metrics that account for options' sensitivity
+        to underlying price moves. Delta weighting provides a more accurate view
+        of market sentiment by treating deep ITM options (high delta) as more
+        significant than OTM options (low delta).
+
+        Returns:
+            Tuple of (net_flow, flow_ratio) where:
+            - net_flow: bull_60 - bear_60 (positive = bullish bias)
+            - flow_ratio: bull_60 / (bull_60 + bear_60) (0.5 = neutral)
+
+        Example:
+            If 60s trades include:
+            - 10 calls @ delta=0.6 (bullish) = 6 delta-weighted
+            - 5 puts @ delta=0.3 (bearish) = 1.5 delta-weighted
+            - net_flow = 6 - 1.5 = +4.5
+            - flow_ratio = 6 / 7.5 = 0.80 (80% bullish)
+
+        Uses the trailing-60 s change in cumulative delta-weighted
         sides (``Δ delta_buy − Δ delta_sell``) as ``net_flow`` (identical
         to ``get_ticker_executed_net60[:-1][2]``'s ``net_60``) and
-        ``Δ delta_buy / (Δ delta_buy + Δ delta_sell)`` as ``flow_ratio`` —
-        the bullish share of **delta exposure**, not raw contracts. The
-        delta-weighted net feeds the Order Flow grid's Net Flow cell, the
+        ``Δ delta_buy / (Δ delta_buy + Δ delta_sell)`` as ``flow_ratio``.
+        The delta-weighted net feeds the Order Flow grid's Net Flow cell, the
         title-row chip, and the Telegram header; the delta-weighted ratio
         feeds the grid's Flow Ratio cell, the title-row chip, and the
         Telegram Flow Ratio header. ``None`` when the ticker is untracked
@@ -657,6 +741,117 @@ class AtmOptionVolumeService:
             elif pa is not None:
                 result["put_price"] = round(pa, 2)
             return result
+
+    def get_unusual_prints(
+        self,
+        display_symbol: str | None = None,
+        *,
+        window: float = _SWEEP_WINDOW,
+        min_premium: float = _BLOCK_MIN_PREMIUM,
+        sweep_min_prints: int = _SWEEP_MIN_PRINTS,
+    ) -> dict:
+        """Return recent large option prints and sweep-proxy clusters for the
+        Unusual Trades tab.
+
+        The option stream subscribes only the ATM front/second-expiration
+        contracts per tracked ticker, so this is a live *print* feed for
+        those contracts, not a full-chain tape.
+
+        A print qualifies when its traded premium (``price x size x 100``)
+        reaches *min_premium* within the trailing *window* seconds.  Each
+        row carries the ticker, parsed contract details, aggressor side
+        (buy/sell inferred from the print price vs the per-ticker streamed
+        bid/ask, same rule as the flow columns) and the print premium.
+
+        Sweep detection clusters consecutive same-type, same-side prints
+        (of any size) whose gaps do not exceed ``_SWEEP_GAP`` seconds; a
+        cluster with ``sweep_min_prints`` or more prints across 2+ distinct
+        strikes is reported as a sweep — the classic multi-flight crossing
+        order that tends to mark an agent working one order across several
+        strikes in seconds.
+
+        ``display_symbol=None`` aggregates every tracked ticker.  Returns
+        ``{"prints": [...], "sweeps": [...]}`` (both newest first; safe
+        empty dicts when the ticker/symbol is unknown).
+        """
+        with self._lock:
+            if display_symbol is not None:
+                items = [
+                    (display_symbol, _find_flow_for_display(self._ticker_flows, display_symbol)),
+                ]
+                if items[0][1] is None:
+                    return {"prints": [], "sweeps": []}
+            else:
+                items = list(self._ticker_flows.items())
+
+            cutoff = _time_mod.time() - window
+            prints = []
+            for display_sym, ticker in items:
+                if ticker is None:
+                    continue
+                ph = ticker.get("print_history")
+                if not ph:
+                    continue
+                # print_history is appended only under self._lock; the list()
+                # snapshot below is just for iteration safety.
+                for ts, trade_sym, opt_type, price, size, direction in list(ph):
+                    if ts < cutoff:
+                        continue
+                    o_type, o_strike, ey, em, ed = _parse_stream_option_symbol(trade_sym)
+                    if not o_type:
+                        continue
+                    prints.append({
+                        "ts": ts,
+                        "ticker": display_sym,
+                        "opt_type": o_type,
+                        "strike": o_strike,
+                        "exp": ey * 10000 + em * 100 + ed,
+                        "price": price,
+                        "size": size,
+                        "direction": direction,
+                        "premium": price * size * 100,
+                    })
+
+        prints.sort(key=lambda p: -p["ts"])
+        flagged = [p for p in prints if p["premium"] >= min_premium]
+
+        # Sweep-proxy clustering runs over ALL prints in the window (not
+        # only the individually large ones): a fast 4-flight sweep of small
+        # per-flight lots is still a sweep.
+        sweeps = []
+        clusters: dict[tuple[str, str], list[dict]] = {}
+        for p in prints:
+            clusters.setdefault((p["opt_type"], p["direction"]), []).append(p)
+        for (ptype, pside), plist in clusters.items():
+            if len(plist) < sweep_min_prints:
+                continue
+            plist.sort(key=lambda p: p["ts"])
+            start = 0
+            for i in range(1, len(plist) + 1):
+                # Flush the cluster at the first >gap break (or at the end).
+                if i < len(plist) and (plist[i]["ts"] - plist[i - 1]["ts"]) <= _SWEEP_GAP:
+                    continue
+                cluster = plist[start:i]
+                start = i
+                if len(cluster) < sweep_min_prints:
+                    continue
+                strike_list = sorted({c["strike"] for c in cluster})
+                if len(strike_list) < 2:
+                    continue
+                sweeps.append({
+                    "ticker": cluster[0]["ticker"],
+                    "opt_type": ptype,
+                    "direction": pside,
+                    "prints": len(cluster),
+                    "strikes": len(strike_list),
+                    "strike_list": strike_list,
+                    "exp": max(c["exp"] for c in cluster),
+                    "total_size": sum(c["size"] for c in cluster),
+                    "total_premium": sum(c["premium"] for c in cluster),
+                    "ts": cluster[-1]["ts"],
+                })
+        sweeps.sort(key=lambda s: -s["ts"])
+        return {"prints": flagged, "sweeps": sweeps}
 
     def get_ticker_spot(self, display_symbol: str) -> float | None:
         """Return the live spot price for a tracked ticker,
@@ -1644,6 +1839,19 @@ class AtmOptionVolumeService:
         else:
             direction = self._infer_dir(price, ticker["put_bid"], ticker["put_ask"])
 
+        # Record the raw print for the Unusual Trades large-print / sweep
+        # tracker.  Only per-contract prints (trade_sym carries the OCC-ish
+        # symbol; the primary-symbol aggregated path passes trade_sym=None)
+        # are tracked — the bulk-attribution path has no contract identity.
+        # print_history is a fixed-length deque; _SWEEP_WINDOW bounds it in
+        # time on every read.
+        if trade_sym:
+            ph = ticker.setdefault("print_history", deque())
+            ph.append((_time_mod.time(), trade_sym, opt_type,
+                       float(price), int(size), direction))
+            while len(ph) > _PRINT_HISTORY_MAX:
+                ph.popleft()
+
         # Per-trade delta resolution, best source first:
         #   1. the traded contract's own live delta from the stream,
         #   2. the REST chain ATM delta of the contract's own expiration
@@ -1720,26 +1928,21 @@ class AtmOptionVolumeService:
         elif signed < 0:
             ticker["delta_sell"] = ticker.get("delta_sell", 0.0) - signed
 
-        # Rolling 60 s window of cumulative ATM volume for order absorption
-        # (delta over the window is the recent aggressive flow) and of the
-        # cumulative net executed flow (delta_buy - delta_sell) for the 60 s
-        # net line.
+        # Rolling 60 s window of delta-weighted cumulative ATM volume for
+        # order absorption (delta over the window is the recent aggressive
+        # flow) and of the cumulative net executed flow (delta_buy - delta_sell)
+        # for the 60 s net line.
         now = _time_mod.time()
-        vh = ticker.setdefault("vol_history", deque())
-        vh.append((now, ticker["bullish"] + ticker["bearish"]))
-        while vh and vh[0][0] < now - 60:
-            vh.popleft()
+        dvh = ticker.setdefault("delta_vol_history", deque())
+        dvh.append((now, ticker.get("delta_buy", 0.0) + ticker.get("delta_sell", 0.0)))
+        while dvh and dvh[0][0] < now - 60:
+            dvh.popleft()
         eh = ticker.setdefault("exec_history", deque())
         eh.append((now, ticker.get("delta_buy", 0.0) - ticker.get("delta_sell", 0.0)))
         while eh and eh[0][0] < now - 60:
             eh.popleft()
         # Rolling 60 s window of the raw cumulative bullish/bearish
-        # contract buckets — still recorded as a reference (kept cheap);
-        # no longer consumed by get_ticker_flow_metrics_60s, which now
-        # reads the delta-weighted atm_delta_flow_history below.
-        # (NOT the pre-existing "flow_history" list key several ticker
-        # dicts already carry — that one is a plain list from other
-        # initializers and cannot popleft.)
+        # contract buckets — still recorded as a reference (kept cheap).
         fh = ticker.setdefault("atm_flow_history", deque())
         fh.append((now, ticker["bullish"], ticker["bearish"]))
         while fh and fh[0][0] < now - 60:
@@ -1752,6 +1955,11 @@ class AtmOptionVolumeService:
         dfh.append((now, ticker.get("delta_buy", 0.0), ticker.get("delta_sell", 0.0)))
         while dfh and dfh[0][0] < now - 60:
             dfh.popleft()
+        # Track avg delta volume for liquidity flow threshold calculation
+        dvh_avg = ticker.setdefault("delta_vol_history_avg", deque())
+        dvh_avg.append((now, ticker.get("delta_buy", 0.0) + ticker.get("delta_sell", 0.0)))
+        while dvh_avg and dvh_avg[0][0] < now - 30:
+            dvh_avg.popleft()
 
     def _infer_dir(self, price: float, bid: float | None, ask: float | None) -> str:
         if bid is not None and ask is not None:

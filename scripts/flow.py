@@ -22,7 +22,8 @@ from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY
                         FLOW_WATCHDOG_STALE_SECONDS, FLOW_RATIO_GREEN_THRESHOLD,
                         FLOW_RATIO_RED_THRESHOLD,
                         ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE,
-                        ABSORPTION_HIGH, ABSORPTION_LOW)
+                        ABSORPTION_HIGH, ABSORPTION_LOW,
+                        LIQUIDITY_FLOW_MIN_PCT)
 from scripts._utils import compute_strike_increment, format_expiration
 from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol
 from scripts.client import fetch_quotes
@@ -579,7 +580,7 @@ _WALL_ZONE_ALERT_COOLDOWN = 600.0  # min seconds between consecutive alerts per 
 # _LIQUIDITY_FLOW_MIN_PCT of the current resting depth, whichever is
 # larger, to count as a real refill/drain rather than book churn.
 _LIQUIDITY_FLOW_MIN = 25.0
-_LIQUIDITY_FLOW_MIN_PCT = 0.02
+_LIQUIDITY_FLOW_MIN_PCT = 0.03
 
 # Conviction gate for Telegram trend alerts: only reversals (bullish/bearish)
 # are surfaced as alerts now; the plain up/down direction no longer fires a
@@ -649,7 +650,7 @@ def _conviction_score(
             score += 1
     if liquidity_flow is not None:
         # Magnitude gate: a ±5-contract wobble on a 50k-contract book is
-        # churn, not a refill/drain.  Require the absolute floor or ~2 % of
+        # churn, not a refill/drain.  Require the absolute floor or ~3 % of
         # the current resting depth, whichever is larger.
         _min_flow = _LIQUIDITY_FLOW_MIN
         if book_depth is not None and book_depth > 0:
@@ -1344,6 +1345,27 @@ def render_flow_legend_and_style():
         color: var(--text-color, #31333f);
         background-color: var(--secondary-background-color, #f0f2f6);
         border-bottom: 1px solid var(--border-color, #e0e2e6);
+        cursor: help;
+    }
+    table.flow-grid thead th[data-tooltip]::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        bottom: -35px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0,0,0,0.8);
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 10px;
+        white-space: nowrap;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s;
+        z-index: 1000;
+    }
+    table.flow-grid thead th[data-tooltip]:hover::after {
+        opacity: 1;
     }
     table.flow-grid tbody td {
         padding: 4px 5px;
@@ -1482,7 +1504,10 @@ def render_atm_order_flow_grid():
                 "Net Flow": _net_flow,
                 "Flow Ratio": _flow_ratio,
                 "Liquidity Flow": ticker_data.get("liquidity_flow") if _svc is not None else None,
+                "Bid Liquidity Flow": ticker_data.get("bid_liquidity_flow") if _svc is not None else None,
+                "Ask Liquidity Flow": ticker_data.get("ask_liquidity_flow") if _svc is not None else None,
                 "Absorption": atm_svc.get_ticker_absorption(t_upper) if atm_svc else None,
+                "Pin Score": atm_svc.get_ticker_pin_score(t_upper) if atm_svc else None,
             })
 
     if not rows:
@@ -1498,7 +1523,8 @@ def render_atm_order_flow_grid():
          r["Support"], r["Resistance"], r["Trend"],
          r["Call Price"], r["Put Price"], r["Net Flow"], r["Flow Ratio"],
          r["Book Imbalance"], r["Flow Speed"], r["Flow Acceleration"],
-         r["Liquidity Flow"], r["Absorption"])
+         r["Liquidity Flow"], r["Bid Liquidity Flow"], r["Ask Liquidity Flow"], 
+         r["Absorption"], r["Pin Score"])
         for r in rows
     )
     data_hash = hash(data_key)
@@ -1515,7 +1541,7 @@ def render_atm_order_flow_grid():
     # HTML table instead: `table-layout: fixed` distributes the tab width
     # evenly across the columns and the headers wrap onto multiple lines
     # (see render_flow_legend_and_style for the `.flow-grid` CSS).
-    def _absorption_color(val):
+    def _absorption_color(val, *_):
         """Color order absorption (contracts per $1): green = heavy flow
         absorbed with little price move, red = price drifting on thin flow."""
         if val is None:
@@ -1526,7 +1552,7 @@ def render_atm_order_flow_grid():
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
-    def _flow_ratio_color(val):
+    def _flow_ratio_color(val, *_):
         """Color the flow ratio: green background > 0.8, red background < 0.2."""
         if val is None or not isinstance(val, (int, float)):
             return ""
@@ -1536,7 +1562,7 @@ def render_atm_order_flow_grid():
             return "background-color: #ef5350; font-weight: bold;"
         return ""
 
-    def _net_flow_color(val):
+    def _net_flow_color(val, *_):
         """Color the 60 s net executed flow (buy - sell) by sign."""
         if val is None:
             return ""
@@ -1546,17 +1572,78 @@ def render_atm_order_flow_grid():
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
-    def _liquidity_flow_color(val):
+    def _liquidity_flow_color(val, bid_flow=None, ask_flow=None, book_depth=None, trend=None):
         """Color L2 liquidity flow (net depth change over 60 s): green =
-        liquidity being posted (book refilling), red = liquidity draining."""
+        liquidity being posted (book refilling), red = liquidity draining.
+        
+        Improved logic:
+        - Dynamic threshold based on ticker's typical depth (3% of avg depth)
+        - Side-aware: warn if one-sided drain on strong trend
+        - Different colors for magnitude levels (strong vs weak flow)"""
         if val is None:
             return ""
+        
+        # Dynamic threshold based on typical depth
+        _min_flow = _LIQUIDITY_FLOW_MIN
+        if book_depth is not None and book_depth > 0:
+            _min_flow = max(_min_flow, _LIQUIDITY_FLOW_MIN_PCT * book_depth)
+        
+        is_significant = abs(val) >= _min_flow
+        
         if val > 0:
-            return "color: #00cc96; font-weight: bold;"
+            if is_significant:
+                return "color: #00cc96; font-weight: bold;"
+            return "color: #66bb6a; font-weight: bold;"
         if val < 0:
+            if is_significant:
+                # Side-aware warning: ask drain on uptick = bearish
+                if trend in ("up", "UP", "bullish") and ask_flow is not None and ask_flow < 0:
+                    return "color: #ef5350; font-weight: bold; text-decoration: underline;"
+                return "color: #ef5350; font-weight: bold;"
             return "color: #ef5350; font-weight: bold;"
         return "color: #ff9800; font-weight: bold;"
 
+    def _trend_color(val, *_):
+        """Color trend direction: green for bullish/up, red for bearish/down, amber for flat."""
+        if val is None or val == "":
+            return ""
+        val_lower = str(val).lower()
+        if val_lower in ("bullish", "up"):
+            return "color: #00cc96; font-weight: bold;"
+        if val_lower in ("bearish", "down"):
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+    
+    def _book_imbalance_color(val, *_):
+        """Color book imbalance: green for strong imbalance, red for weak."""
+        if val is None or not isinstance(val, (int, float)):
+            return ""
+        if abs(val) >= 0.5:
+            return "color: #00cc96; font-weight: bold;" if val > 0 else "color: #ef5350; font-weight: bold;"
+        if abs(val) >= 0.3:
+            return "color: #ff9800; font-weight: bold;"
+        return ""
+    
+    def _flow_speed_color(val, *_):
+        """Color flow speed: green for high speed, red for low speed."""
+        if val is None or not isinstance(val, (int, float)):
+            return ""
+        if val >= 10:
+            return "color: #00cc96; font-weight: bold;"
+        if val < 3:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+    
+    def _flow_acceleration_color(val, *_):
+        """Color flow acceleration: green for increasing, red for decreasing."""
+        if val is None or not isinstance(val, (int, float)):
+            return ""
+        if val >= 5:
+            return "color: #00cc96; font-weight: bold;"
+        if val < -3:
+            return "color: #ef5350; font-weight: bold;"
+        return "color: #ff9800; font-weight: bold;"
+    
     def _spot_bg(row):
         """Background color for the Spot cell based on support/resistance zone membership."""
         spot = row["Spot"]
@@ -1582,33 +1669,52 @@ def render_atm_order_flow_grid():
         return f"{v:+,.{dec}f}" if v is not None else ""
 
     def _fmt_commas(v):
-        return f"{v:,.0f}" if v is not None else ""
+        return f"{v:,.0f}" if v is not None and isinstance(v, (int, float)) else ""
 
     def _mk_color(col_name, color_fn):
         def _c(row):
-            return color_fn(row[col_name])
+            return color_fn(row[col_name], 
+                           row.get("Bid Liquidity Flow"), 
+                           row.get("Ask Liquidity Flow"),
+                           row.get("Book Imbalance"),
+                           row.get("Trend"))
         return _c
 
     cols = [
-        ("Ticker", "left", lambda v: html.escape(str(v)) if v is not None else "", None),
-        ("Spot", "center", _fmt_money, _spot_bg),
-        ("Expiration", "center", lambda v: html.escape(format_expiration(v)), None),
+        ("Ticker", "left", None, None),
+        ("Spot", "right", _fmt_money, None),
+        ("Expiration", "center", lambda v: html.escape(format_expiration(v)) if v else "", None),
         ("Support", "right", _fmt_money, None),
         ("Resistance", "right", _fmt_money, None),
         ("Call Price", "right", _fmt_money, None),
         ("Put Price", "right", _fmt_money, None),
-        ("Flow Ratio", "right", lambda v: f"{v:.2f}", _mk_color("Flow Ratio", _flow_ratio_color)),
-        ("Net Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Net Flow", _net_flow_color)),
-        ("Liquidity Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Liquidity Flow", _liquidity_flow_color)),
-        ("Absorption", "right", _fmt_commas, _mk_color("Absorption", _absorption_color)),
+        ("Trend", "center", None, _mk_color("Trend", _trend_color)),
+        ("Book Imbalance", "right", lambda v: f"{v:.2f}" if v is not None else "", _mk_color("Book Imbalance", _book_imbalance_color)),
+        ("Flow Speed", "right", lambda v: f"{v:.1f}" if v is not None else "", _mk_color("Flow Speed", _flow_speed_color)),
+        ("Flow Acceleration", "right", lambda v: f"{v:.1f}" if v is not None else "", _mk_color("Flow Acceleration", _flow_acceleration_color)),
+        ("Flow Ratio", "right", lambda v: f"{v:.2f}" if v is not None else "", _mk_color("Flow Ratio", _flow_ratio_color), "Delta-weighted flow ratio: weights trades by contract delta exposure"),
+        ("Net Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Net Flow", _net_flow_color), "60s delta-weighted net flow (bullish - bearish)"),
+        ("Liquidity Flow", "right", lambda v: _fmt_signed(v, 0), _mk_color("Liquidity Flow", _liquidity_flow_color), "60s L2 book depth change (liquidity added/removed)"),
+        ("Absorption", "right", _fmt_commas, _mk_color("Absorption", _absorption_color), "Volume absorbed per $1 spot path (high = pinned price)"),
+        ("Pin Score", "right", _fmt_commas, _mk_color("Pin Score", _absorption_color), "Volume absorbed per $1 net displacement (pin score)"),
     ]
 
-    thead = "".join(f"<th>{name}</th>" for name, *_rest in cols)
+    thead = ""
+    for col in cols:
+        name = col[0]
+        tooltip = col[5] if len(col) > 5 else None
+        tooltip_attr = f' data-tooltip="{html.escape(tooltip)}"' if tooltip else ""
+        thead += f"<th{tooltip_attr}>{name}</th>"
+    
     tbody = []
     for r in rows:
         cells = []
-        for name, align, fmt, colorer in cols:
-            text = fmt(r[name])
+        for col in cols:
+            name = col[0]
+            align = col[1]
+            fmt = col[2]
+            colorer = col[3] if len(col) > 3 else None
+            text = fmt(r[name]) if fmt else str(r[name]) if r[name] is not None else ""
             style = colorer(r) if colorer else ""
             if align == "right":
                 style += " text-align:right;"

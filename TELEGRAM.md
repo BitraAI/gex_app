@@ -90,6 +90,26 @@ refreshes, and spot inside a wall zone.
 
 ---
 
+## Unusual-trades digest (Unusual Trades tab)
+
+A fourth, independent send path lives in `scripts/app_extras.py`
+(`render_unusual_trades` + `_uw_digest_text`). It is **not** part of
+`diff_alerts`:
+
+- The Unusual Trades fragment auto-scans every tracked ticker every 90 s
+  while the dashboard is open. Each scan diffs the flagged-contract set
+  against the previous scan's set (per trading day; the first scan of the
+  day establishes the baseline and never alerts).
+- Contracts flagged now but not in the previous scan ("NEW" flags) whose
+  premium clears the digest threshold (default $250k, configurable in the
+  tab's Telegram expander) are pushed as **one digest message**:
+  one line per contract with ticker, date, strike/type, volume, Vol/OI,
+  premium and inferred side.
+- Suppressed whenever `is_market_open()` is false, exactly like the other
+  paths. Delivery goes straight through `telegram_notifier.send_telegram`.
+
+---
+
 ## Telegram message format
 
 Every alert renders as one HTML message with this standard header, followed by

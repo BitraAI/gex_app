@@ -834,6 +834,19 @@ sets are not re-sent — re-sending identical subscription requests every
   difference (or ratio) computed from those counters (newest-minus-oldest
   sample inside the window), so stale flow ages out after a minute and
   the counters themselves never reset.
+- **Unusual-Trades print tracker** — every per-contract trade processed by
+  `_process_trade_ticker` is additionally appended to
+  `ticker["print_history"]` (a 200-entry deque; produced only on the
+  per-contract path, where `trade_sym` carries the subscribed symbol).
+  `AtmOptionVolumeService.get_unusual_prints(display_symbol=None, *,
+  window=300, min_premium=100_000, sweep_min_prints=3)` reads that history
+  for the Unusual Trades tab: it returns the prints whose
+  `price x size x 100` premium clears `min_premium`, plus **sweep-proxy
+  clusters** — consecutive same-type, same-side prints (any size) with
+  ≤10 s gaps, reported when a cluster spans >= `sweep_min_prints` prints
+  across 2+ distinct strikes. Because the stream only subscribes the ATM
+  front/second-expiration contracts per ticker, this feed complements but
+  never replaces the full-chain snapshot scan in the same tab.
 - Uses the option bid/ask mid as the trade-direction threshold. If
   bid/ask has not yet arrived for an option, the trade is split evenly between
   bullish and bearish.

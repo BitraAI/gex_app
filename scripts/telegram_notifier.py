@@ -183,7 +183,7 @@ def diff_alerts(
     gf = cur["gamma_flip"]
     prev_gf = prev.get("gamma_flip")
     if gf != prev_gf and prev_gf is not None and gf is not None:
-        new_alerts.append(f"Gamma Flip changed: ${prev_gf:.2f} \\u2192 ${gf:.2f}")
+        new_alerts.append(f"Gamma Flip changed: ${prev_gf:.2f} → ${gf:.2f}")
 
     dp = cur["dealer_position"]
     prev_dp = prev.get("dealer_position")

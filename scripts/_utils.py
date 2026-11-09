@@ -101,6 +101,55 @@ def flow_metrics(call_buy, call_sell, put_buy, put_sell) -> tuple[int, int, floa
     return net, total, ratio
 
 
+def flow_metrics_delta_weighted(
+    call_buy, call_sell, put_buy, put_sell,
+    call_delta, put_delta
+) -> tuple[float, int, float | None]:
+    """Delta-weighted (net_flow, total_flow, flow_ratio) from the streamed per-side volumes.
+
+    Weights each side by the traded contract's delta to measure delta exposure
+    rather than raw contract count. This provides a more accurate view of
+    market sentiment by accounting for options' sensitivity to underlying moves.
+
+    Example:
+        If a call trade has delta=0.6 and size=10 contracts:
+        - Bullish delta exposure = 0.6 * 10 = 6
+        - This counts as 6 "delta-weighted" contracts toward bullish flow
+
+    Args:
+        call_buy, call_sell, put_buy, put_sell: Raw contract volumes
+        call_delta: Average delta for call trades (positive, 0-1)
+        put_delta: Average delta for put trades (positive magnitude, 0-1)
+
+    Returns:
+        net_flow: Delta-weighted net exposure (bullish - bearish)
+        total_flow: Total delta-weighted volume
+        flow_ratio: Bullish share of delta exposure (0.0-1.0)
+
+    Notes:
+        - Call buys + Put sells = bullish delta
+        - Put buys + Call sells = bearish delta
+        - Uses absolute delta values (e.g., 0.3 not -0.3 for puts)
+        - Returns None ratio when no flow
+        - Falls back to delta=0.5 if delta is not provided (0 or None)
+    """
+    cb = call_buy or 0
+    cs = call_sell or 0
+    pb = put_buy or 0
+    ps = put_sell or 0
+    cd = abs(call_delta) if call_delta else 0.5
+    pd = abs(put_delta) if put_delta else 0.5
+
+    bullish = cb * cd + ps * pd
+    bearish = pb * pd + cs * cd
+
+    total = bullish + bearish
+    ratio = round(bullish / total, 2) if total > 0 else None
+    net = bullish - bearish
+
+    return net, total, ratio
+
+
 def format_expiration(exp: str | None) -> str:
     """Format expiration date into MM-DD (X days) for display.
 

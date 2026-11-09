@@ -236,6 +236,20 @@ def _extract_option_fields(
             mark = 0
         mark = float(mark)
 
+        # Last trade price (Schwab field "last"; some bridges use
+        # "lastPrice").  Let sequential chain scans (Unusual Trades) compute
+        # premium and infer the aggressor side from what actually traded
+        # instead of the theoretical mark, which sits at the spread midpoint.
+        last = opt.get("last") or opt.get("lastPrice") or 0
+        if last is None:
+            last = 0
+        try:
+            last = float(last)
+        except (TypeError, ValueError):
+            last = 0.0
+        if last < 0:
+            last = 0.0
+
         bid = opt.get("bid", 0)
         if bid is None:
             bid = 0
@@ -276,6 +290,7 @@ def _extract_option_fields(
             "open_interest": oi,
             "volume": volume,
             "mark": mark,
+            "last": last,
             "bid": bid,
             "ask": ask,
             "gex": gex,
