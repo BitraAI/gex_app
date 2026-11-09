@@ -91,13 +91,16 @@ def compute_analytics(
     analytics["total_call_gex"] = totals["total_call_gex"]
     analytics["total_put_gex"] = totals["total_put_gex"]
     analytics["net_gex"] = totals["net_gex"]
-
+    
+    # Calculate wall strength (GEX at wall / total GEX) - use totals dict
+    total_call_gex = totals["total_call_gex"]
+    total_put_gex = totals["total_put_gex"]
+    
     call_wall = _find_call_wall(strikes, spot)
     put_wall = _find_put_wall(strikes, spot)
     analytics["call_wall"] = call_wall
     analytics["put_wall"] = put_wall
     
-    # Calculate wall strength (GEX at wall / total GEX)
     analytics["call_wall_strength"] = None
     analytics["put_wall_strength"] = None
     if call_wall:
