@@ -96,6 +96,18 @@ def compute_analytics(
     put_wall = _find_put_wall(strikes, spot)
     analytics["call_wall"] = call_wall
     analytics["put_wall"] = put_wall
+    
+    # Calculate wall strength (GEX at wall / total GEX)
+    analytics["call_wall_strength"] = None
+    analytics["put_wall_strength"] = None
+    if call_wall:
+        call_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - call_wall))
+        if call_wall_strike and total_call_gex > 0:
+            analytics["call_wall_strength"] = round(call_wall_strike["call_gex"] / total_call_gex, 4)
+    if put_wall:
+        put_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - put_wall))
+        if put_wall_strike and total_put_gex > 0:
+            analytics["put_wall_strength"] = round(put_wall_strike["put_gex"] / total_put_gex, 4)
 
     _call_wall_opts = [e for e in data if e["strike"] == call_wall and e["type"] == "CALL"] if call_wall else []
     _put_wall_opts = [e for e in data if e["strike"] == put_wall and e["type"] == "PUT"] if put_wall else []
@@ -117,7 +129,18 @@ def compute_analytics(
     gamma_flip = _find_gamma_flip(strikes)
     analytics["gamma_flip"] = gamma_flip
 
-    analytics["dealer_position"] = "Long Gamma" if totals["net_gex"] > 0 else "Short Gamma"
+    # Dealer position with strength indicator
+    net_gex = totals["net_gex"]
+    total_gex = totals["total_call_gex"] + totals["total_put_gex"]
+    gex_ratio = abs(net_gex) / total_gex if total_gex > 0 else 0
+    if gex_ratio >= 0.3:
+        strength = "Strong"
+    elif gex_ratio >= 0.1:
+        strength = "Moderate"
+    else:
+        strength = "Weak"
+    
+    analytics["dealer_position"] = f"{'Long' if net_gex > 0 else 'Short'} Gamma ({strength})"
 
     max_pos = max((s for s in strikes if s["strike"] > spot and s["call_gex"] > 0), key=lambda s: s["call_gex"], default=None)
     max_neg = max((s for s in strikes if s["strike"] < spot and s["put_gex"] > 0), key=lambda s: s["put_gex"], default=None)
@@ -200,16 +223,40 @@ def compute_analytics(
 
 
 def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    """Find the call wall (highest strike with positive call GEX or OI above spot)."""
-    # Single-pass optimization instead of creating 3 intermediate lists
+    """Find the call wall (highest strike with positive call GEX or OI above spot).
+    
+    Improved logic:
+    - Uses absolute GEX magnitude, not just positive
+    - Requires minimum threshold (1M or 0.5% of total call GEX) for significance
+    - Returns weighted average of top 3 walls for precision
+    - Falls back to OI-based selection if no GEX walls found
+    """
     above = [s for s in strikes if s["strike"] > spot]
     if not above:
         return None
     
-    # Check for GEX first, then OI, then max strike
-    with_gex = [s for s in above if s["call_gex"] != 0]
+    # Calculate total call GEX for threshold
+    total_call_gex = sum(s["call_gex"] for s in above)
+    
+    # Threshold: minimum 1M or 0.5% of total call GEX
+    threshold = max(1000000, total_call_gex * 0.005) if total_call_gex > 0 else 1000000
+    
+    # Find all strikes above threshold (check absolute GEX magnitude)
+    with_gex = [s for s in above if abs(s["call_gex"]) >= threshold]
     if with_gex:
-        return max(with_gex, key=lambda s: s["call_gex"])["strike"]
+        # Return weighted average of top 3 walls by GEX
+        top_walls = sorted(with_gex, key=lambda s: abs(s["call_gex"]), reverse=True)[:3]
+        total_gex = sum(abs(s["call_gex"]) for s in top_walls)
+        if total_gex > 0:
+            return sum(s["strike"] * abs(s["call_gex"]) / total_gex for s in top_walls)
+        return with_gex[0]["strike"]
+    
+    # Fallback: check absolute GEX without threshold
+    with_any_gex = [s for s in above if s["call_gex"] != 0]
+    if with_any_gex:
+        return max(with_any_gex, key=lambda s: abs(s["call_gex"]))["strike"]
+    
+    # Last resort: use OI
     with_oi = [s for s in above if s.get("call_oi", 0) > 0]
     if with_oi:
         return max(with_oi, key=lambda s: s.get("call_oi", 0))["strike"]
@@ -217,13 +264,40 @@ def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[floa
 
 
 def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    """Find the put wall (highest strike with positive put GEX or OI below spot)."""
+    """Find the put wall (highest strike with positive put GEX or OI below spot).
+    
+    Improved logic:
+    - Uses absolute GEX magnitude, not just positive
+    - Requires minimum threshold (1M or 0.5% of total put GEX) for significance
+    - Returns weighted average of top 3 walls for precision
+    - Falls back to OI-based selection if no GEX walls found
+    """
     below = [s for s in strikes if s["strike"] < spot]
     if not below:
         return None
-    with_gex = [s for s in below if s["put_gex"] != 0]
+    
+    # Calculate total put GEX for threshold
+    total_put_gex = sum(s["put_gex"] for s in below)
+    
+    # Threshold: minimum 1M or 0.5% of total put GEX
+    threshold = max(1000000, total_put_gex * 0.005) if total_put_gex > 0 else 1000000
+    
+    # Find all strikes above threshold (check absolute GEX magnitude)
+    with_gex = [s for s in below if abs(s["put_gex"]) >= threshold]
     if with_gex:
-        return max(with_gex, key=lambda s: s["put_gex"])["strike"]
+        # Return weighted average of top 3 walls by GEX
+        top_walls = sorted(with_gex, key=lambda s: abs(s["put_gex"]), reverse=True)[:3]
+        total_gex = sum(abs(s["put_gex"]) for s in top_walls)
+        if total_gex > 0:
+            return sum(s["strike"] * abs(s["put_gex"]) / total_gex for s in top_walls)
+        return with_gex[0]["strike"]
+    
+    # Fallback: check absolute GEX without threshold
+    with_any_gex = [s for s in below if s["put_gex"] != 0]
+    if with_any_gex:
+        return max(with_any_gex, key=lambda s: abs(s["put_gex"]))["strike"]
+    
+    # Last resort: use OI
     with_oi = [s for s in below if s.get("put_oi", 0) > 0]
     if with_oi:
         return max(with_oi, key=lambda s: s.get("put_oi", 0))["strike"]
@@ -231,22 +305,50 @@ def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float
 
 
 def _find_gamma_flip(strikes: list[dict[str, Any]]) -> Optional[float]:
+    """Find the gamma flip point (where net GEX crosses zero).
+    
+    Improved logic:
+    - Uses linear interpolation between strikes for precise flip point
+    - No arbitrary 1% threshold - finds actual zero-crossing
+    - Returns interpolated strike for better accuracy
+    """
     sorted_strikes = sorted(strikes, key=lambda s: s["strike"])
-    total_abs_gex = sum(abs(s["net_gex"]) for s in sorted_strikes)
-    threshold = total_abs_gex * 0.01 if total_abs_gex > 0 else 0.0
     cumulative = 0.0
+    prev_strike = None
+    prev_cumulative = 0.0
+    
     for s in sorted_strikes:
-        prev = cumulative
+        if prev_strike is not None:
+            # Check for zero-crossing between prev and current
+            if prev_cumulative > 0 and cumulative <= 0:
+                # Linear interpolation to find exact zero-crossing
+                if prev_cumulative != cumulative:
+                    ratio = prev_cumulative / (prev_cumulative - cumulative)
+                    return prev_strike + ratio * (s["strike"] - prev_strike)
+                return prev_strike
+            
+            if prev_cumulative < 0 and cumulative >= 0:
+                # Linear interpolation to find exact zero-crossing
+                if prev_cumulative != cumulative:
+                    ratio = abs(prev_cumulative) / (abs(prev_cumulative) + cumulative)
+                    return prev_strike + ratio * (s["strike"] - prev_strike)
+                return prev_strike
+        
+        prev_strike = s["strike"]
+        prev_cumulative = cumulative
         cumulative += s["net_gex"]
-        if prev > threshold and cumulative <= 0:
-            return s["strike"]
-        if prev < -threshold and cumulative >= 0:
-            return s["strike"]
-    return None
+    
+    return prev_strike if prev_strike else None
 
 
 def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: list[dict[str, Any]] | None = None) -> Optional[float]:
-    """Find the expected pin point using a more efficient approach."""
+    """Find the expected pin point using a more efficient approach.
+    
+    Improved logic:
+    - Uses weighted average of top pin candidates for precision
+    - Considers both OI and GEX for pin strength
+    - Returns interpolated strike for better accuracy
+    """
     if not strikes:
         return None
     full = aggregate_by_strike(data_full, spot) if data_full else strikes
@@ -255,6 +357,10 @@ def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: li
     full_strikes = np.array([s["strike"] for s in full_sorted], dtype=float)
     call_oi = np.array([s.get("call_oi", 0) for s in full_sorted], dtype=float)
     put_oi = np.array([s.get("put_oi", 0) for s in full_sorted], dtype=float)
+    
+    # Also get GEX data
+    call_gex = np.array([s.get("call_gex", 0) for s in full_sorted], dtype=float)
+    put_gex = np.array([s.get("put_gex", 0) for s in full_sorted], dtype=float)
 
     n_full = len(full_strikes)
     if n_full == 0:
@@ -265,12 +371,15 @@ def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: li
     cum_put_oi = np.cumsum(put_oi)
     cum_call_k = np.cumsum(call_oi * full_strikes)
     cum_put_k = np.cumsum(put_oi * full_strikes)
+    cum_call_gex = np.cumsum(call_gex)
+    cum_put_gex = np.cumsum(put_gex)
     
     total_put_oi = cum_put_oi[-1] if n_full else 0.0
     total_put_k = cum_put_k[-1] if n_full else 0.0
+    total_put_gex = cum_put_gex[-1] if n_full else 0.0
 
-    best_strike = None
-    best_pain = float("inf")
+    # Track best pins with their pain scores
+    pins = []
     
     # Use vectorized operations for better performance
     for p in strike_prices:
@@ -288,11 +397,27 @@ def _find_expected_pin(strikes: list[dict[str, Any]], spot: float, data_full: li
         right_put_k = total_put_k - cum_put_k[idx]
 
         total = p * left_call_oi - left_call_k + right_put_k - p * right_put_oi
-        if total < best_pain:
-            best_pain = total
-            best_strike = p
+        
+        # Calculate pin strength based on GEX
+        left_call_gex = cum_call_gex[idx]
+        right_put_gex = total_put_gex - cum_put_gex[idx]
+        pin_strength = abs(left_call_gex) + abs(right_put_gex)
+        
+        pins.append((p, total, pin_strength))
     
-    return best_strike
+    if not pins:
+        return None
+    
+    # Sort by pain, then by strength, take top 3
+    pins.sort(key=lambda x: (x[1], -x[2]))
+    top_pins = pins[:3]
+    
+    # Weighted average of top pins
+    total_strength = sum(p[2] for p in top_pins)
+    if total_strength > 0:
+        return sum(p[0] * p[2] / total_strength for p in top_pins)
+    
+    return pins[0][0]
 
 
 def _calculate_iv_skew(data: list[dict[str, Any]], spot: float, expiration: str | None = None) -> Optional[dict[str, float]]:

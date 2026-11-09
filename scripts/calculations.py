@@ -28,7 +28,18 @@ def calculate_atm_strike(spot: float) -> float:
 def calculate_gex(
     gamma: float, open_interest: int, spot: float
 ) -> float:
-    return gamma * open_interest * 100 * (spot ** 2) * 0.01
+    """Calculate Gamma Exposure in USD.
+    
+    Formula: gamma * oi * 100 * (spot/100)^2
+    This converts the option's gamma to delta change per $1 move, then
+    multiplies by open interest and the spot price squared to get the
+    total dollar exposure dealers have to cover.
+    
+    The (spot/100)^2 factor accounts for the fact that for index options
+    like SPX, a $1 move is 1% of a $100 base, and gamma scales with the
+    underlying price squared.
+    """
+    return gamma * open_interest * 100 * (spot / 100) ** 2
 
 
 # Pre-parsed expiration dates ("YYYY-MM-DD" -> datetime); parse is per-option
