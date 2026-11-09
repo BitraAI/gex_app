@@ -43,16 +43,19 @@ def render_candlesticks_frag():
     # DELTA-WEIGHTED executed net (`get_ticker_executed_net60` —
     # trailing-60 s change in delta_buy − delta_sell, each print
     # weighted by ITS OWN contract's delta; same source as the Telegram
-    # header and the conviction gate). Flow Ratio is the delta-weighted
-    # bullish share (`get_ticker_flow_metrics_60s` — trailing-60 s
-    # change in the same delta_buy / delta_sell counters). None until
-    # the option stream produces flow in the window (em dash). Colors
-    # follow the grid /
-    # Telegram thresholds: Net Flow green > 0, red < 0, orange at 0;
+    # header and the conviction gate). Liquidity Flow is the net L2 book
+    # depth change over 60 s (contracts added/drained). Flow Ratio is the
+    # delta-weighted bullish share (`get_ticker_flow_metrics_60s` —
+    # trailing-60 s change in the same delta_buy / delta_sell counters).
+    # None until the option stream produces flow in the window (em dash).
+    # Colors follow the grid / Telegram thresholds: Net Flow green > 0,
+    # red < 0, orange at 0; Liquidity Flow green = posted, red = drained;
     # Flow Ratio green above FLOW_RATIO_GREEN_THRESHOLD (0.8), red
     # below FLOW_RATIO_RED_THRESHOLD (0.2), amber between.
     _title_svc = st.session_state.get("atm_option_service")
+    _svc = st.session_state.get("streaming_service")
     _tnf, _tfr = (None, None)
+    _liquidity_flow = None
     if _title_svc is not None:
         try:
             _tfr = _title_svc.get_ticker_flow_metrics_60s(
@@ -61,11 +64,22 @@ def render_candlesticks_frag():
                 _normalize_display_symbol(s.get("symbol", "SPY")))[2]
         except Exception:
             _tnf, _tfr = (None, None)
+    if _svc is not None:
+        try:
+            _ticker_data = _svc.get_ticker_trend_data(_normalize_display_symbol(s.get("symbol", "SPY")))
+            _liquidity_flow = _ticker_data.get("liquidity_flow")
+        except Exception:
+            _liquidity_flow = None
     if _tnf is not None:
         _tnf_txt = f"{_tnf:+,.0f}"
         _tnf_col = "#00cc96" if _tnf > 0 else "#ef5350" if _tnf < 0 else "#ff9800"
     else:
         _tnf_txt, _tnf_col = "—", "#ff9800"
+    if _liquidity_flow is not None:
+        _liquidity_txt = f"{_liquidity_flow:+,.0f}"
+        _liquidity_col = "#00cc96" if _liquidity_flow > 0 else "#ef5350" if _liquidity_flow < 0 else "#ff9800"
+    else:
+        _liquidity_txt, _liquidity_col = "—", "#ff9800"
     if _tfr is not None:
         _tfr_txt = f"{_tfr:.2f}"
         _tfr_col = ("#00cc96" if _tfr > FLOW_RATIO_GREEN_THRESHOLD
@@ -77,6 +91,7 @@ def render_candlesticks_frag():
         'gap:12px;margin:0 0 10px 0;">'
         '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
         '<div style="display:flex;align-items:center;gap:18px;">'
+        f'<span style="color:{_liquidity_col};font-weight:bold;">Liquidity: {_liquidity_txt}</span>'
         f'<span style="color:{_tfr_col};font-weight:bold;">Flow Ratio: {_tfr_txt}</span>'
         f'<span style="color:{_tnf_col};font-weight:bold;">Net Flow Δ (60s): {_tnf_txt}</span>'
         '</div></div>',
