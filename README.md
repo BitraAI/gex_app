@@ -395,9 +395,9 @@ Where:
 - **n / (n - 1)** — Degrees-of-freedom correction inside the square root
 
 **Key Metrics:**
-- **Call Wall** — Strike above spot with highest call GEX (weighted average of top 3 by GEX magnitude). VEX and CEX tracked separately as confirmation metrics.
-- **Put Wall** — Strike below spot with highest put GEX (weighted average of top 3 by GEX magnitude). VEX and CEX tracked separately as confirmation metrics.
-- **Wall Strength** — GEX strength shows what % of total GEX the wall represents. VEX/CEX contributions show each Greek's relative contribution at the wall (not combined, since they have different units).
+- **Call Wall** — Strike above spot with highest call GEX (weighted average of top 3 by GEX magnitude, displayed in $XM format). VEX and CEX tracked separately as confirmation metrics.
+- **Put Wall** — Strike below spot with highest put GEX (weighted average of top 3 by GEX magnitude, displayed in $XM format). VEX and CEX tracked separately as confirmation metrics.
+- **Wall Strength** — Sum of top 3 call/put GEX (displayed in $XM format). VEX/CEX contributions show each Greek's relative contribution at the wall (not combined, since they have different units).
 - **Gamma Flip** — Strike where cumulative net GEX crosses zero gamma level. Requires cumulative magnitude > 1% of total absolute GEX before registering a cross, filtering out noise from small near-zero fluctuations. 
     Above this line: Dealer flows stabilize the market (lower volatility).
     Below this line: Dealer flows destabilize the market (amplifying volatility).
