@@ -6,6 +6,7 @@ Nothing here renders UI except error paths (``st.error``); view modules
 import from this module.
 """
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -16,12 +17,17 @@ import streamlit as st
 from scripts import client as client_mod
 from scripts._constants import STREAM_SYMBOL_MAP
 from scripts._utils import compute_strike_increment, is_otm_or_atm, is_itm_or_atm
-from scripts.client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, load_candle_cache
+from scripts.client import (create_client, fetch_option_chain, get_yield,
+                            get_interest_rate, get_20d_rv, get_next_earnings_date,
+                            fetch_candles_smart, fetch_price_history_daily,
+                            save_candle_cache, load_candle_cache)
 from scripts.streaming_service import StreamingService
 from scripts.option_streaming_service import (AtmOptionVolumeService,
                                               _save_ticker_history,
                                               _normalize_display_symbol)
 from scripts.calculations import parse_option_chain, build_greeks_lookup, aggregate_by_strike, aggregate_by_expiration
+
+logger = logging.getLogger(__name__)
 from scripts.analytics import compute_analytics
 from scripts.telegram_notifier import notify_alerts, diff_alerts
 from scripts.flow import (_ensure_async_loop, _ticker_analytics_cache,
@@ -445,10 +451,16 @@ def _candles_need_refresh(symbol: str, tf: str) -> bool:
 def refresh_candles(symbol: str, tf: str):
     """Fetch candles via Parquet cache + API, store in session state."""
     key = f"{symbol}|{tf}"
-    with st.spinner(f"Loading {tf} candles for {symbol}..."):
-        df = run_async(fetch_candles_smart(st.session_state.client, symbol, tf))
+    logger.info("refresh_candles: fetching %s %s (client=%s)", symbol, tf, st.session_state.get("client") is not None)
+    try:
+        with st.spinner(f"Loading {tf} candles for {symbol}..."):
+            df = run_async(fetch_candles_smart(st.session_state.client, symbol, tf))
+    except Exception:
+        logger.exception("refresh_candles: run_async/fetch failed for %s %s", symbol, tf)
+        raise
     st.session_state.candle_dataframes[key] = df
     st.session_state.candle_last_fetch[key] = datetime.now(timezone.utc)
+    logger.info("refresh_candles: stored %d rows for %s %s (last bar %s)", len(df), symbol, tf, df["datetime"].iloc[-1] if len(df) else None)
 
 
 def prefetch_daily_candles(symbol: str):

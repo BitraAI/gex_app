@@ -31,6 +31,13 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+# Candle-refresh diagnostics: route INFO from the refresh path to stderr
+# (journald) so silent refresh failures are visible in `journalctl -u gex-app`.
+for _diag_name in ("scripts.app_data", "scripts.app_candlesticks", "scripts.client"):
+    _diag = logging.getLogger(_diag_name)
+    _diag.setLevel(logging.INFO)
+    _diag.addHandler(handler)
+
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
 # imported by another module — calling it twice raises StreamlitAPIException.
 # Guard it so the module is safely importable for its helper functions

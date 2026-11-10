@@ -5,6 +5,7 @@
 load-bearing (title row -> controls -> constant chart host -> payload ->
 caption); do not reorder.
 """
+import logging
 import time
 
 import pandas as pd
@@ -20,6 +21,8 @@ from scripts.flow import ensure_atm_streaming, run_async, maybe_refresh_ticker_w
 from scripts.option_streaming_service import (_normalize_display_symbol,
                                               _get_stream_symbol)
 from scripts.app_data import _candles_need_refresh, refresh_candles
+
+logger = logging.getLogger(__name__)
 
 
 TIMEFRAMES = {
@@ -154,9 +157,7 @@ def render_candlesticks_frag():
             try:
                 refresh_candles(symbol, timeframe)
             except Exception:
-                # Refresh is best-effort: fall through to whatever cache load
-                # returns below so the chart still renders with stale data.
-                pass
+                logger.exception("Candlestick refresh failed for %s %s", symbol, timeframe)
 
         historical_df = load_candle_cache(symbol, timeframe)
 
@@ -406,9 +407,12 @@ def render_candlesticks_frag():
         # ---- Index symbols (SPX, RUT, NDX): build a live bar from the real
         # index spot poll (s.spot_cache, updated every ~2s by the $SPX etc.
         # fetch above) and merge it into the chart so $SPX/$RUT/$NDX
-        # candlesticks update like equities.  Index symbols cannot be streamed
+        # candlesticks update like equities. Index symbols cannot be streamed
         # via the equity WebSocket (Schwab only supports LEVELONE_EQUITIES for
-        # real equities, not indices), so we fall back to REST polling ---- #
+        # real equities, not indices), so we fall back to REST polling. Today's
+        # intraday bars between the last cached bar and now are NOT invented
+        # here — the historical cache must be refreshed by the API fetch above;
+        # synthesizing bars from the 60s spot window would produce fake OHLC. ---- #
         _sym_norm_idx = _normalize_display_symbol(symbol)
         if _sym_norm_idx in INDEX_SYMBOLS and not chart_df.empty:
             try:
@@ -480,6 +484,7 @@ def render_candlesticks_frag():
         # Persist in session state. chart_df["datetime"] stays as int64 ms because
         # chart_component.render_chart converts it to UNIX-seconds time keys for
         # lightweight-charts (with the proper EST offset).
+        chart_df = chart_df.drop_duplicates(subset=["datetime"], keep="last").sort_values("datetime").reset_index(drop=True)
         s.candlestick_data = chart_df
         s.candlestick_label = chart_label
 
