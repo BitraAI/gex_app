@@ -103,10 +103,6 @@ def compute_analytics(
     
     analytics["call_wall_strength"] = None
     analytics["put_wall_strength"] = None
-    analytics["call_wall_vex_contribution"] = None
-    analytics["put_wall_vex_contribution"] = None
-    analytics["call_wall_cex_contribution"] = None
-    analytics["put_wall_cex_contribution"] = None
     
     # Calculate wall strength using GEX only (primary metric)
     total_call_gex = totals["total_call_gex"]
@@ -124,10 +120,6 @@ def compute_analytics(
             if top_3:
                 top_3_gex_sum = sum(abs(s["call_gex"]) for s in top_3)
                 analytics["call_wall_strength"] = round(top_3_gex_sum, 2)
-            if total_call_vex > 0:
-                analytics["call_wall_vex_contribution"] = round(abs(call_wall_strike["call_vex"]) / abs(total_call_vex), 4)
-            if total_call_cex > 0:
-                analytics["call_wall_cex_contribution"] = round(abs(call_wall_strike["call_cex"]) / abs(total_call_cex), 4)
     if put_wall:
         put_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - put_wall))
         if put_wall_strike:
@@ -136,10 +128,6 @@ def compute_analytics(
             if top_3:
                 top_3_gex_sum = sum(abs(s.get("put_gex", 0)) for s in top_3)
                 analytics["put_wall_strength"] = round(top_3_gex_sum, 2)
-            if total_put_vex > 0:
-                analytics["put_wall_vex_contribution"] = round(abs(put_wall_strike["put_vex"]) / abs(total_put_vex), 4)
-            if total_put_cex > 0:
-                analytics["put_wall_cex_contribution"] = round(abs(put_wall_strike["put_cex"]) / abs(total_put_cex), 4)
 
     _call_wall_opts = [e for e in data if e["strike"] == call_wall and e["type"] == "CALL"] if call_wall else []
     _put_wall_opts = [e for e in data if e["strike"] == put_wall and e["type"] == "PUT"] if put_wall else []
