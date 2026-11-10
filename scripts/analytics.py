@@ -125,6 +125,7 @@ def compute_analytics(
                 analytics["call_wall_vex_score"] = 1 if analytics["call_wall_vex_adjustment"] < 0 else (-1 if analytics["call_wall_vex_adjustment"] > 0 else 0)
                 top_3_cex_sum = sum(s["call_cex"] for s in top_3)
                 analytics["call_wall_cex_adjustment"] = round(-top_3_cex_sum * (30 / 1440), 2)
+                analytics["call_wall_cex_score"] = 1 if analytics["call_wall_cex_adjustment"] < 0 else (-1 if analytics["call_wall_cex_adjustment"] > 0 else 0)
     if put_wall:
         put_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - put_wall))
         if put_wall_strike:
