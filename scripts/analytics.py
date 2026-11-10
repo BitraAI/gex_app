@@ -134,6 +134,7 @@ def compute_analytics(
                 analytics["put_wall_strength"] = round(top_3_gex_sum, 2)
                 top_3_vex_sum = sum(s.get("put_vex", 0) for s in top_3)
                 analytics["put_wall_vex_adjustment"] = round(top_3_vex_sum * 0.01, 2)
+                analytics["put_wall_vex_score"] = 1 if top_3_vex_sum > 0 else (-1 if top_3_vex_sum < 0 else 0)
                 top_3_cex_sum = sum(s.get("put_cex", 0) for s in top_3)
                 analytics["put_wall_cex_adjustment"] = round(top_3_cex_sum * (30 / 1440), 2)
 
