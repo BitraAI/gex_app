@@ -119,8 +119,15 @@ def compute_analytics(
     if call_wall:
         call_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - call_wall))
         if call_wall_strike:
+            # Wall strength = GEX at wall / total call GEX
             if total_call_gex > 0:
                 analytics["call_wall_strength"] = round(abs(call_wall_strike["call_gex"]) / abs(total_call_gex), 4)
+            # Wall strength weighted = sum of top 3 GEX / total call GEX
+            above = [s for s in strikes if s["strike"] >= call_wall and s["call_gex"] != 0]
+            top_3 = sorted(above, key=lambda s: abs(s["call_gex"]), reverse=True)[:3]
+            if top_3:
+                top_3_gex_sum = sum(abs(s["call_gex"]) for s in top_3)
+                analytics["call_wall_strength_weighted"] = round(top_3_gex_sum / abs(total_call_gex), 4)
             if total_call_vex > 0:
                 analytics["call_wall_vex_contribution"] = round(abs(call_wall_strike["call_vex"]) / abs(total_call_vex), 4)
             if total_call_cex > 0:
@@ -128,8 +135,15 @@ def compute_analytics(
     if put_wall:
         put_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - put_wall))
         if put_wall_strike:
+            # Wall strength = GEX at wall / total put GEX
             if total_put_gex > 0:
                 analytics["put_wall_strength"] = round(abs(put_wall_strike["put_gex"]) / abs(total_put_gex), 4)
+            # Wall strength weighted = sum of top 3 GEX / total put GEX
+            below = [s for s in strikes if s["strike"] <= put_wall and s.get("put_gex", 0) != 0]
+            top_3 = sorted(below, key=lambda s: abs(s.get("put_gex", 0)), reverse=True)[:3]
+            if top_3:
+                top_3_gex_sum = sum(abs(s.get("put_gex", 0)) for s in top_3)
+                analytics["put_wall_strength_weighted"] = round(top_3_gex_sum / abs(total_put_gex), 4)
             if total_put_vex > 0:
                 analytics["put_wall_vex_contribution"] = round(abs(put_wall_strike["put_vex"]) / abs(total_put_vex), 4)
             if total_put_cex > 0:
