@@ -65,10 +65,10 @@ selected symbol when the main page refreshes analytics.
 |-------|-------------|
 | **Gamma Flip change** | Gamma flip strike value changed |
 | **Dealer gamma flip** | Dealer position flipped Long Gamma ↔ Short Gamma |
-| **Call Wall moved** | Call wall strike value changed (GEX+VEX+CEX combined or VEX/CEX-specific; e.g. `$495.00 → $500.00`) |
-| **Put Wall moved** | Put wall strike value changed (GEX+VEX+CEX combined or VEX/CEX-specific; e.g. `$485.00 → $480.00`) |
-| **Price crossed above/below Resistance** | Spot pierced the Call Wall level (GEX+VEX+CEX combined or VEX/CEX-specific; only between refreshes where the Call Wall strike itself is unchanged) |
-| **Price crossed above/below Support** | Spot pierced the Put Wall level (GEX+VEX+CEX combined or VEX/CEX-specific; only between refreshes where the Put Wall strike itself is unchanged) |
+| **Call Wall moved** | Call wall strike value changed (GEX only; e.g. `$495.00 ($2.50M) → $500.00 ($2.75M)`) |
+| **Put Wall moved** | Put wall strike value changed (GEX only; e.g. `$485.00 ($1.80M) → $480.00 ($2.10M)`) |
+| **Price crossed above/below Resistance** | Spot pierced the Call Wall level (GEX only; only between refreshes where the Call Wall strike itself is unchanged) |
+| **Price crossed above/below Support** | Spot pierced the Put Wall level (GEX only; only between refreshes where the Put Wall strike itself is unchanged) |
 
 Wall-change alerts fire regardless of wall stability. Price-crossing alerts
 only fire between refreshes where the wall strike itself is unchanged, so a
