@@ -27,7 +27,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP, expandable via slider, x-axis locked)
   - Strategy Signals (automated trade recommendations from the option chain)
 - **Analytics Panel:**
-   - Call Wall (highest call GEX+VEX+CEX above spot), Put Wall (highest put GEX+VEX+CEX below spot), plus VEX and CEX-specific walls
+   - Call Wall (highest call GEX above spot), Put Wall (highest put GEX below spot)
   - Gamma Flip (cumulative net GEX zero-crossing with 1% threshold), Max Pain
   - Max +GEX, Max -GEX
   - Dealer Position (Long/Short Gamma)
@@ -56,11 +56,11 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - **±20 strikes around ATM** applied across all heatmaps (OI, Volume, IV Richness, VRP), positioning charts (OI, Volume), dealer curve (GEX, VEX, CEX), and volatility charts (IV, IV Richness, VRP)
   - **Nearest 4 active expirations** with non-zero OI/volume
   - Charts have sliders to control expiration count and are unaffected by sidebar expiration selection
-- **Options Data** — Sortable grid filtered by sidebar expiration selection, with highlighted cells and CSV export (columns: Strike, Call/Put GEX, Net GEX, Call/Put OI, Call/Put Vol, Call/Put Gamma, Call/Put Price, Call/Put Delta, Call/Put IV, SSVI IV, IV (pp), Expirations):
+- **Options Data** — Sortable grid filtered by sidebar expiration selection, with highlighted cells and CSV export (columns: Strike, Call/Put GEX, Net GEX, Call/Put VEX, Call/Put CEX, Call/Put OI, Call/Put Vol, Call/Put Gamma, Call/Put Price, Call/Put Delta, Call/Put IV, SSVI IV, IV (pp), Expirations):
   - **Gray row** — ATM strike (closest to spot)
   - **Red OI cells** — Max Pain strike OI columns
-  - **Orange Call GEX cell** — Call Wall strike Call GEX (also shows VEX/CEX walls)
-  - **Green Put GEX cell** — Put Wall strike Put GEX (also shows VEX/CEX walls)
+   - Orange Call GEX cell — Call Wall strike Call GEX (wall defined by GEX; VEX/CEX show confirmation)
+   - Green Put GEX cell — Put Wall strike Put GEX (wall defined by GEX; VEX/CEX show confirmation)
   - **SSVI IV** — Model IV from the SSVI volatility surface at the front-month TTE
   - **IV (pp)** — IV Richness in percentage points = IV - SSVI IV
   - **Call/Put Delta** — Option delta at the front expiration (used for the Trade Signals delta filters)
@@ -395,9 +395,9 @@ Where:
 - **n / (n - 1)** — Degrees-of-freedom correction inside the square root
 
 **Key Metrics:**
-- **Call Wall** — Strike above spot with highest combined call GEX+VEX+CEX (weighted average of top 3 by magnitude). Also tracks VEX and CEX-specific walls (`call_wall_vex`, `call_wall_cex`) for IV sensitivity and time decay analysis.
-- **Put Wall** — Strike below spot with highest combined put GEX+VEX+CEX (weighted average of top 3 by magnitude). Also tracks VEX and CEX-specific walls (`put_wall_vex`, `put_wall_cex`) for IV sensitivity and time decay analysis.
-- **Wall Strength** — GEX, VEX, and CEX strength metrics show what % of total exposure each wall represents. For example, `call_wall_strength` = GEX at wall / total call GEX, `call_wall_strength_vex` = VEX at wall / total call VEX.
+- **Call Wall** — Strike above spot with highest call GEX (weighted average of top 3 by GEX magnitude). VEX and CEX tracked separately as confirmation metrics.
+- **Put Wall** — Strike below spot with highest put GEX (weighted average of top 3 by GEX magnitude). VEX and CEX tracked separately as confirmation metrics.
+- **Wall Strength** — GEX strength shows what % of total GEX the wall represents. VEX/CEX contributions show each Greek's relative contribution at the wall (not combined, since they have different units).
 - **Gamma Flip** — Strike where cumulative net GEX crosses zero gamma level. Requires cumulative magnitude > 1% of total absolute GEX before registering a cross, filtering out noise from small near-zero fluctuations. 
     Above this line: Dealer flows stabilize the market (lower volatility).
     Below this line: Dealer flows destabilize the market (amplifying volatility).
