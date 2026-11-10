@@ -126,6 +126,10 @@ def compute_analytics(
                 top_3_cex_sum = sum(s["call_cex"] for s in top_3)
                 analytics["call_wall_cex_adjustment"] = round(-top_3_cex_sum * (30 / 1440), 2)
                 analytics["call_wall_cex_score"] = 1 if analytics["call_wall_cex_adjustment"] < 0 else (-1 if analytics["call_wall_cex_adjustment"] > 0 else 0)
+                # Stability: combined vex+cex direction. |sum| >= 2 -> ±2,
+                # (0, 1] -> 1, [-1, 0) -> -1, exact 0 -> 0.
+                _call_stability_sum = analytics["call_wall_vex_score"] + analytics["call_wall_cex_score"]
+                analytics["call_wall_stability_score"] = 2 if _call_stability_sum > 1 else (1 if _call_stability_sum > 0 else (-2 if _call_stability_sum < -1 else (-1 if _call_stability_sum < 0 else 0)))
     if put_wall:
         put_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - put_wall))
         if put_wall_strike:
