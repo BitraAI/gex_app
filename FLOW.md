@@ -299,7 +299,8 @@ The Support / Resistance columns come from the put/call walls computed by
 `compute_analytics` on a REST option chain. They are **GEX-derived** (not raw
 OI): `_find_put_wall` picks the strike below spot with the highest `put_gex`,
 and `_find_call_wall` picks the strike above spot with the highest `call_gex`
-(dealer gamma exposure = OI × gamma). Walls are refreshed with a
+(dealer gamma exposure = OI × gamma). Walls use weighted average of top 3 by
+GEX magnitude and are displayed in $XM format. Walls are refreshed with a
 **hybrid trigger** in `flow.maybe_fire_wall_zone_alerts` (checked every 2 s
 fragment tick), with two tiers:
 
