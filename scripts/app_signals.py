@@ -60,7 +60,9 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     # Update ATM service with walls so the Order Flow grid displays them
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
-        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
+        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"),
+                                 analytics.get("put_wall_stability_score"),
+                                 analytics.get("call_wall_stability_score"))
 
     if etf_analytics:
         if analytics.get("net_gex", 0) == 0:
@@ -98,7 +100,9 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
         _put_wall = analytics.get("put_wall")
         _call_wall = analytics.get("call_wall")
         if _put_wall is not None or _call_wall is not None:
-            atm_svc.set_ticker_walls(_sym, _put_wall, _call_wall)
+            atm_svc.set_ticker_walls(_sym, _put_wall, _call_wall,
+                                     analytics.get("put_wall_stability_score"),
+                                     analytics.get("call_wall_stability_score"))
         # For index symbols (SPX, RUT, NDX) set the correct spot via
         # the REST option chain parse — the streaming feed only gives
         # us the ETF proxy (SPY, IWM, QQQ) price.

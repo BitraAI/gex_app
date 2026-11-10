@@ -276,7 +276,9 @@ def fetch_data(symbol: str) -> bool:
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
         _ana = st.session_state.get("analytics") or {}
-        atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"))
+        atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"),
+                                 _ana.get("put_wall_stability_score"),
+                                 _ana.get("call_wall_stability_score"))
     # Populate the per-ticker strike increment (used by
     # maybe_fire_wall_zone_alerts to size the wall-refresh / big-move
     # thresholds).  Without this, the default 1.0 is used until the first

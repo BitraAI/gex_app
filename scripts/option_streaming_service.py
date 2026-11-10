@@ -415,6 +415,8 @@ class AtmOptionVolumeService:
                     "expiration": self._expiration,
                     "call_wall": None,
                     "put_wall": None,
+                    "put_wall_stability": None,
+                    "call_wall_stability": None,
                     "call_sym": None,
                     "put_sym": None,
                     "call_bid": None,
@@ -1023,15 +1025,20 @@ class AtmOptionVolumeService:
         # Mark for re-fetch on the next ensure_atm_streaming cycle.
         self._walls_verified.discard(norm)
 
-    def set_ticker_walls(self, display_symbol: str, put_wall: float | None, call_wall: float | None):
+    def set_ticker_walls(self, display_symbol: str, put_wall: float | None, call_wall: float | None,
+                         put_stability: int | None = None, call_stability: int | None = None):
         """Store the Put Wall (support) and Call Wall (resistance) for a
         tracked ticker.  These are read from REST option-chain analytics
-        and displayed in the Order Flow grid."""
+        and displayed in the Order Flow grid.  ``put_stability`` /
+        ``call_stability`` carry the raw stability scores (±1/±2/0) used
+        for the Support / Resistance columns' arrow indicators."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is not None:
                 ticker["put_wall"] = put_wall
                 ticker["call_wall"] = call_wall
+                ticker["put_wall_stability"] = put_stability
+                ticker["call_wall_stability"] = call_stability
                 norm = _normalize_display_symbol(display_symbol)
                 self._walls_verified.add(norm)
                 # Stamp the refresh time so the throttle in
@@ -1238,6 +1245,8 @@ class AtmOptionVolumeService:
                     "expiration": self._expiration,
                     "call_wall": None,
                     "put_wall": None,
+                    "put_wall_stability": None,
+                    "call_wall_stability": None,
                     "call_sym": None,
                     "put_sym": None,
                     "call_bid": None,
@@ -1337,6 +1346,22 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return None
             return ticker.get("call_wall")
+
+    def get_ticker_put_stability(self, display_symbol: str) -> int | None:
+        """Return the stored put_wall_stability_score (±1/±2/0) or None."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("put_wall_stability")
+
+    def get_ticker_call_stability(self, display_symbol: str) -> int | None:
+        """Return the stored call_wall_stability_score (±1/±2/0) or None."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return None
+            return ticker.get("call_wall_stability")
 
     def bulk_update_spots(self, spot_map: dict[str, float]):
         """Set spot prices for multiple tickers at once and trigger a single

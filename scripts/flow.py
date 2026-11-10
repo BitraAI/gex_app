@@ -365,6 +365,8 @@ def ensure_atm_streaming(stream_symbol: str):
                         "expiration": atm_svc._expiration,
                         "call_wall": None,
                         "put_wall": None,
+                        "put_wall_stability": None,
+                        "call_wall_stability": None,
                         "call_sym": None,
                         "put_sym": None,
                         "call_bid": None,
@@ -428,6 +430,8 @@ def ensure_atm_streaming(stream_symbol: str):
                                         "expiration": atm_svc._expiration,
                                         "call_wall": None,
                                         "put_wall": None,
+                                        "put_wall_stability": None,
+                                        "call_wall_stability": None,
                                         "call_sym": None,
                                         "put_sym": None,
                                         "call_bid": None,
@@ -458,7 +462,9 @@ def ensure_atm_streaming(stream_symbol: str):
                                         "trend_reversal": None,
                                     }
                     # Now set the walls
-                    atm_svc.set_ticker_walls(current_sym, put_wall, call_wall)
+                    atm_svc.set_ticker_walls(current_sym, put_wall, call_wall,
+                                             analytics.get("put_wall_stability_score"),
+                                             analytics.get("call_wall_stability_score"))
 
 
 
@@ -991,7 +997,9 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         if atm_svc:
             _pw = analytics.get("put_wall")
             _cw = analytics.get("call_wall")
-            atm_svc.set_ticker_walls(display_key, _pw, _cw)
+            atm_svc.set_ticker_walls(display_key, _pw, _cw,
+                                     analytics.get("put_wall_stability_score"),
+                                     analytics.get("call_wall_stability_score"))
             _exps = sorted(set(e["expiration"] for e in data))
             if _exps:
                 atm_svc.set_ticker_expiration(display_key, _exps[0])
@@ -1179,7 +1187,9 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
         if atm_svc:
             _pw = analytics.get("put_wall")
             _cw = analytics.get("call_wall")
-            atm_svc.set_ticker_walls(display_key, _pw, _cw)
+            atm_svc.set_ticker_walls(display_key, _pw, _cw,
+                                     analytics.get("put_wall_stability_score"),
+                                     analytics.get("call_wall_stability_score"))
             _exps = sorted(set(e["expiration"] for e in data))
             if _exps:
                 atm_svc.set_ticker_expiration(display_key, _exps[0])
@@ -1359,6 +1369,29 @@ def render_atm_order_flow_grid():
             # walls from ATM option service, which retain last valid values.
             put_wall_val = atm_svc.get_ticker_put_wall(t_upper) if atm_svc else None
             call_wall_val = atm_svc.get_ticker_call_wall(t_upper) if atm_svc else None
+            # Support column stability arrows (from put_wall_stability_score):
+            #   +2 -> two green up arrows, +1 -> one green up arrow,
+            #   -2 -> two red down arrows, -1 -> one red down arrow, 0/None -> none.
+            _stab = atm_svc.get_ticker_put_stability(t_upper) if atm_svc else None
+            _GREEN = "color: #00cc96; font-weight: bold;"
+            _RED = "color: #ef5350; font-weight: bold;"
+
+            def _stability_arrows(score):
+                if score == 2:
+                    return f' <span style="{_GREEN}">▲▲</span>'
+                if score == 1:
+                    return f' <span style="{_GREEN}">▲</span>'
+                if score == -2:
+                    return f' <span style="{_RED}">▼▼</span>'
+                if score == -1:
+                    return f' <span style="{_RED}">▼</span>'
+                return ""
+            _arrows = _stability_arrows(_stab)
+            support_cell = f"${put_wall_val:,.2f}{_arrows}" if put_wall_val is not None else ""
+            # Resistance column stability arrows (from call_wall_stability_score),
+            # same ±1/±2 arrow convention as the Support column.
+            _cstab = atm_svc.get_ticker_call_stability(t_upper) if atm_svc else None
+            resistance_cell = f"${call_wall_val:,.2f}{_stability_arrows(_cstab)}" if call_wall_val is not None else ""
 
             _call_p, _put_p = _wall_price_marks(opt_prices, wall_prices, call_wall_val, put_wall_val, spot)
             
@@ -1426,8 +1459,8 @@ def render_atm_order_flow_grid():
                 "Ticker": t_upper,
                 "Spot": spot,
                 "Expiration": atm_svc.get_ticker_expiration(t_upper) if atm_svc else None,
-                "Support": put_wall_val,
-                "Resistance": call_wall_val,
+                "Support": support_cell,
+                "Resistance": resistance_cell,
                 "Call Price": _call_p,
                 "Put Price": _put_p,
                 "Trend": trend_display,
@@ -1617,8 +1650,8 @@ def render_atm_order_flow_grid():
         ("Ticker", "left", None, None),
         ("Spot", "right", _fmt_money, None),
         ("Expiration", "center", lambda v: html.escape(format_expiration(v)) if v else "", None),
-        ("Support", "right", _fmt_money, None),
-        ("Resistance", "right", _fmt_money, None),
+        ("Support", "right", None, None),
+        ("Resistance", "right", None, None),
         ("Call Price", "right", _fmt_money, None),
         ("Put Price", "right", _fmt_money, None),
         ("Trend", "center", None, _mk_color("Trend", _trend_color)),
