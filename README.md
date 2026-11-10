@@ -346,7 +346,7 @@ Both raw and delta-weighted metrics are available to distinguish contract count 
 
 **VEX Formula (Vanna Exposure):**
 ```
-VEX = Vega × Open Interest × 100 × S × 0.01
+VEX = Vega × Open Interest × 100 × (S/100)² × 0.01
 ```
 
 Where:
@@ -354,6 +354,7 @@ Where:
 - **Open Interest** — Number of open contracts
 - **100** — Contract multiplier
 - **S** — Current spot price
+- **(S/100)²** — Spot price squared normalization (consistent with GEX)
 - **0.01** — 1% IV scaling factor (VEX represents delta change per 1% IV move)
 - VEX measures vanna exposure — how dealer delta changes as implied volatility moves
 

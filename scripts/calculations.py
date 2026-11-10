@@ -69,7 +69,12 @@ def calculate_cex(
     charm_yearly = npd1 * (2 * (r - q) * T - 2 * d1 * sigma * np.sqrt(T) - 1) / (2 * T ** 2)
     charm_daily = charm_yearly / 365.0
     cex = charm_daily * open_interest * 100 * spot * 0.01
-    if option_type == "PUT":
+    # Sign convention: CALL positive (dealers buy hedging), PUT negative (dealers sell hedging)
+    # Same as GEX/VEX. Charm is typically negative for ATM options (delta decays toward 0),
+    # so we negate for CALL to make it positive.
+    if option_type == "CALL":
+        cex = abs(cex)
+    else:
         cex = -abs(cex)
     return round(cex, 2)
 
@@ -295,7 +300,9 @@ def _extract_option_fields(
         days_to_exp = (exp_dt - (_now or datetime.now())).days
 
         gex = calculate_gex(gamma, oi, spot) if oi > 0 and spot > 0 else 0.0
-        vex = (vega * oi * 100 * spot * 0.01) if oi > 0 and spot > 0 and (vega or 0) > 0 else 0.0
+        # VEX: Vega sensitivity - delta change per 1% IV move
+        # Normalized with (S/100)^2 for consistency with GEX
+        vex = (vega * oi * 100 * (spot / 100) ** 2 * 0.01) if oi > 0 and spot > 0 and (vega or 0) > 0 else 0.0
         cex = calculate_cex(iv, strike, spot, max(days_to_exp, 1), oi, option_type, r, q) if oi > 0 and spot > 0 else 0.0
 
         if option_type == "PUT":
