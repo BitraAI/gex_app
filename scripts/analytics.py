@@ -122,6 +122,7 @@ def compute_analytics(
                 analytics["call_wall_strength"] = round(top_3_gex_sum, 2)
                 top_3_vex_sum = sum(s["call_vex"] for s in top_3)
                 analytics["call_wall_vex_adjustment"] = round(-top_3_vex_sum * 0.01, 2)
+                analytics["call_wall_vex_score"] = 1 if analytics["call_wall_vex_adjustment"] < 0 else (-1 if analytics["call_wall_vex_adjustment"] > 0 else 0)
                 top_3_cex_sum = sum(s["call_cex"] for s in top_3)
                 analytics["call_wall_cex_adjustment"] = round(-top_3_cex_sum * (30 / 1440), 2)
     if put_wall:
