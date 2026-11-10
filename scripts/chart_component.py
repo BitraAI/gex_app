@@ -1301,11 +1301,14 @@ def build_init_data(
                 series_list.append({
                     "type": "Line", "key": "ma_EMA 200", "data": ema_pts,
                     # Default color only covers points without a per-point one.
-                    "options": {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False},
+                    # priceLineVisible must be off, otherwise lightweight-charts
+                    # draws a dotted horizontal line at the series' last value
+                    # across the whole chart (same as the EMA 50 branch below).
+                    "options": {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False, "priceLineVisible": False},
                 })
                 continue
             if name in ("EMA 20", "SMA 50", "SMA 20"):
-                opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False}
+                opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "lastValueVisible": False, "priceLineVisible": False}
             else:
                 opts = {"color": cfg["color"], "lineWidth": cfg["lineWidth"], "title": name}
             series_list.append({"type": "Line", "key": f"ma_{name}", "data": [{"time": cd[i]["time"], "value": vals[i - offset]} for i in range(offset, len(cd))], "options": opts})
