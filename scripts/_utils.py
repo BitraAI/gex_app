@@ -62,11 +62,20 @@ _NY_TZ = ZoneInfo("America/New_York")
 _secs_since_930_cache: tuple[tuple[int, int], float] | None = None  # ((hh, mm), secs)
 
 
+def is_market_open() -> bool:
+    """Return True if US regular equity trading hours are currently open
+    (09:30-16:00 ET, Mon-Fri, excluding major holidays)."""
+    from scripts.flow import is_market_open as _is_market_open
+    return _is_market_open()
+
+
 def secs_since_market_open() -> float:
     """Seconds elapsed since 09:30 ET today, clamped to the 09:30-16:00
     session (0..23400).  Cached per minute — recomputed for thousands of
     options per chain parse, and minute granularity is sufficient."""
     global _secs_since_930_cache
+    if not is_market_open():
+        return 0.0
     now = datetime.now(_NY_TZ)
     key = (now.hour, now.minute)
     if _secs_since_930_cache is not None and _secs_since_930_cache[0] == key:

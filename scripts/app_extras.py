@@ -13,7 +13,7 @@ import streamlit as st
 
 from scripts import telegram_notifier
 from scripts.calculations import parse_option_chain, build_greeks_lookup
-from scripts.client import fetch_option_chain, get_next_earnings_date
+from scripts.client import fetch_option_chain
 from scripts.flow import _ensure_async_loop, run_async, is_market_open, ensure_atm_streaming
 from scripts._constants import STREAM_SYMBOL_MAP
 from scripts.option_streaming_service import _normalize_display_symbol
@@ -167,6 +167,7 @@ def _uw_earnings_flags(syms: set[str]) -> dict[str, str | None]:
         if ent and ent[0] == today_iso:
             continue
         try:
+            from scripts.client import get_next_earnings_date
             val = run_async(get_next_earnings_date(client, sym))
         except Exception:
             val = None

@@ -6,6 +6,8 @@ from typing import Optional
 
 from scripts._utils import secs_since_market_open as _secs_since_market_open
 
+_MARKET_CLOSE_SECONDS = 23400
+
 
 def get_strike_spacing(price: float) -> float:
     if price <= 25:
@@ -54,9 +56,13 @@ def calculate_cex(
 ) -> float:
     if open_interest <= 0 or spot <= 0 or days_to_exp <= 0 or iv <= 0:
         return 0.0
+    
     _secs_since_930 = _secs_since_market_open()
-    _secs_left = 23400 - _secs_since_930
-    T = (days_to_exp + _secs_left / 23400) / 365.0
+    _secs_left = _MARKET_CLOSE_SECONDS - _secs_since_930
+    if _secs_left < 0:
+        _secs_left = 0
+    
+    T = (days_to_exp + _secs_left / _MARKET_CLOSE_SECONDS) / 365.0
     sigma = iv
     d1 = (np.log(spot / strike) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     npd1 = np.exp(-d1 ** 2 / 2) / np.sqrt(2 * np.pi)
@@ -69,8 +75,15 @@ def calculate_cex(
 
 
 def compute_totals(data: list[dict[str, Any]]) -> dict[str, float]:
-    total_call_gex = sum(e["gex"] for e in data if e["type"] == "CALL" and e["gex"] > 0)
-    total_put_gex = sum(abs(e["gex"]) for e in data if e["type"] == "PUT" and e["gex"] < 0)
+    if not data:
+        return {
+            "total_call_gex": 0.0,
+            "total_put_gex": 0.0,
+            "net_gex": 0.0,
+        }
+    
+    total_call_gex = sum(e.get("gex", 0) for e in data if e.get("type") == "CALL" and e.get("gex", 0) > 0)
+    total_put_gex = sum(abs(e.get("gex", 0)) for e in data if e.get("type") == "PUT" and e.get("gex", 0) < 0)
     net_gex = total_call_gex - total_put_gex
     return {
         "total_call_gex": round(total_call_gex, 2),

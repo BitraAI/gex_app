@@ -234,18 +234,21 @@ def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[floa
     - Returns weighted average of top 3 walls for precision
     - Falls back to OI-based selection if no GEX walls found
     """
+    if not strikes:
+        return None
+    
     above = [s for s in strikes if s["strike"] > spot]
     if not above:
         return None
     
     # Calculate total call GEX for threshold
-    total_call_gex = sum(s["call_gex"] for s in above)
+    total_call_gex = sum(s.get("call_gex", 0) for s in above)
     
     # Threshold: minimum 1M or 0.5% of total call GEX
     threshold = max(1000000, total_call_gex * 0.005) if total_call_gex > 0 else 1000000
     
     # Find all strikes above threshold (check absolute GEX magnitude)
-    with_gex = [s for s in above if abs(s["call_gex"]) >= threshold]
+    with_gex = [s for s in above if abs(s.get("call_gex", 0)) >= threshold]
     if with_gex:
         # Return weighted average of top 3 walls by GEX
         top_walls = sorted(with_gex, key=lambda s: abs(s["call_gex"]), reverse=True)[:3]
@@ -267,7 +270,7 @@ def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[floa
 
 
 def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    """Find the put wall (highest strike with positive put GEX or OI below spot).
+    """Find the put wall (lowest strike with positive put GEX or OI below spot).
     
     Improved logic:
     - Uses absolute GEX magnitude, not just positive
@@ -275,30 +278,33 @@ def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float
     - Returns weighted average of top 3 walls for precision
     - Falls back to OI-based selection if no GEX walls found
     """
+    if not strikes:
+        return None
+    
     below = [s for s in strikes if s["strike"] < spot]
     if not below:
         return None
     
     # Calculate total put GEX for threshold
-    total_put_gex = sum(s["put_gex"] for s in below)
+    total_put_gex = sum(s.get("put_gex", 0) for s in below)
     
     # Threshold: minimum 1M or 0.5% of total put GEX
     threshold = max(1000000, total_put_gex * 0.005) if total_put_gex > 0 else 1000000
     
     # Find all strikes above threshold (check absolute GEX magnitude)
-    with_gex = [s for s in below if abs(s["put_gex"]) >= threshold]
+    with_gex = [s for s in below if abs(s.get("put_gex", 0)) >= threshold]
     if with_gex:
         # Return weighted average of top 3 walls by GEX
-        top_walls = sorted(with_gex, key=lambda s: abs(s["put_gex"]), reverse=True)[:3]
-        total_gex = sum(abs(s["put_gex"]) for s in top_walls)
+        top_walls = sorted(with_gex, key=lambda s: abs(s.get("put_gex", 0)), reverse=True)[:3]
+        total_gex = sum(abs(s.get("put_gex", 0)) for s in top_walls)
         if total_gex > 0:
-            return sum(s["strike"] * abs(s["put_gex"]) / total_gex for s in top_walls)
+            return sum(s["strike"] * abs(s.get("put_gex", 0)) / total_gex for s in top_walls)
         return with_gex[0]["strike"]
     
     # Fallback: check absolute GEX without threshold
-    with_any_gex = [s for s in below if s["put_gex"] != 0]
+    with_any_gex = [s for s in below if s.get("put_gex", 0) != 0]
     if with_any_gex:
-        return max(with_any_gex, key=lambda s: abs(s["put_gex"]))["strike"]
+        return max(with_any_gex, key=lambda s: abs(s.get("put_gex", 0)))["strike"]
     
     # Last resort: use OI
     with_oi = [s for s in below if s.get("put_oi", 0) > 0]

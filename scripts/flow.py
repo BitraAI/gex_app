@@ -28,16 +28,6 @@ from scripts._utils import compute_strike_increment, format_expiration
 from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol
 from scripts.client import fetch_quotes
 from scripts.calculations import calculate_atm_strike
-
-from scripts.analytics import compute_analytics
-from scripts.calculations import build_greeks_lookup, parse_option_chain
-from scripts.client import (
-    compute_iv_rank,
-    fetch_option_chain,
-    get_20d_rv,
-    get_interest_rate,
-    get_yield,
-)
 from scripts.signals import build_strategy_alerts
 from scripts.telegram_notifier import diff_alerts, notify_alerts
 
@@ -925,92 +915,27 @@ async def _compute_walls_for_symbol(client, symbol: str) -> dict | None:
     latest walls can be fetched much more often without hammering the API.
     Returns ``None`` when the chain cannot be loaded.
     """
-    raw = await _fetch_chain_with_retry(client, symbol)
-    if raw is None:
-        return None
-
-    try:
-        fallback_greeks = None
-        fallback_sym = STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"))
-        if fallback_sym:
-            fb_raw = await fetch_option_chain(
-                client, fallback_sym, strike_count=75, include_quotes=True,
-            )
-            fallback_greeks = build_greeks_lookup(fb_raw)
-        data, spot = parse_option_chain(raw, fallback_greeks=fallback_greeks)
-    except Exception as exc:
-        logger.warning("wall parse failed for %s: %s", symbol, exc)
-        return None
-    if not data or spot <= 0:
+    from scripts.chain_parser import fetch_and_parse_chain
+    
+    _sym = symbol.upper().lstrip("$")
+    is_index = _sym in STREAM_SYMBOL_MAP
+    
+    result = await fetch_and_parse_chain(
+        client, symbol, include_quotes=True, is_index_symbol=is_index
+    )
+    
+    if not result["data"] or result["spot"] <= 0:
         logger.warning("no option data for %s", symbol)
         return None
+    
+    return {
+        "analytics": result["analytics"],
+        "spot": result["spot"],
+        "data": result["data"]
+    }
 
-    analytics = compute_analytics(data, spot)
-    return {"analytics": analytics, "spot": spot, "data": data}
 
 
-async def _compute_for_symbol(client, symbol: str) -> dict | None:
-    """Fetch chain + compute analytics + IV rank for one symbol."""
-    raw = await _fetch_chain_with_retry(client, symbol)
-    if raw is None:
-        return None
-
-    try:
-        r = await get_interest_rate(client)
-        q = await get_yield(client, symbol)
-    except Exception as exc:
-        logger.warning("rate/yield failed for %s: %s", symbol, exc)
-        r, q = 0.0, 0.0
-
-    fallback_greeks = None
-    etf_analytics = None
-    fallback_sym = STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"))
-    if fallback_sym:
-        try:
-            fb_raw = await fetch_option_chain(
-                client, fallback_sym, strike_count=75, include_quotes=True,
-            )
-            fallback_greeks = build_greeks_lookup(fb_raw)
-            etf_data, etf_spot = parse_option_chain(fb_raw, r=r, q=q)
-            if etf_data and etf_spot > 0:
-                etf_analytics = compute_analytics(etf_data, etf_spot, data_full=etf_data, r=r, q=q)
-        except Exception as exc:
-            logger.warning("fallback greeks failed for %s: %s", symbol, exc)
-
-    data, spot = parse_option_chain(raw, r=r, q=q, fallback_greeks=fallback_greeks)
-    if not data or spot <= 0:
-        logger.warning("no option data for %s", symbol)
-        return None
-
-    analytics = compute_analytics(data, spot, r=r, q=q)
-
-    if etf_analytics:
-        if analytics.get("net_gex", 0) == 0:
-            for key in ("net_gex", "total_call_gex", "total_put_gex",
-                         "max_positive_gex", "max_negative_gex",
-                         "max_positive_gex_strike", "max_negative_gex_strike",
-                         "dealer_position"):
-                if key in etf_analytics:
-                    analytics[key] = etf_analytics[key]
-        if analytics.get("ssvi_surface") is None and etf_analytics.get("ssvi_surface") is not None:
-            analytics["ssvi_surface"] = etf_analytics["ssvi_surface"]
-        if analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
-            analytics["atm_iv"] = etf_analytics["atm_iv"]
-
-    rv = 0.0
-    try:
-        rv = await get_20d_rv(client, symbol)
-    except Exception as exc:
-        logger.warning("failed to fetch 20d RV for %s: %s", symbol, exc)
-
-    iv_rank = None
-    try:
-        iv_rank = await compute_iv_rank(client, symbol)
-    except Exception as exc:
-        logger.warning("failed to compute IV rank for %s: %s", symbol, exc)
-
-    analytics["iv_rank"] = iv_rank
-    return {"analytics": analytics, "spot": spot, "rv": rv, "data": data, "iv_rank": iv_rank}
 
 
 def _atm_deltas_for_symbol(data: list, atm_strike: float | None, idx: int = 0):
@@ -1039,17 +964,19 @@ def _atm_deltas_for_symbol(data: list, atm_strike: float | None, idx: int = 0):
 async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> None:
     """Event-driven: fetch chain, recompute analytics, check zones, send alerts."""
     try:
+        from scripts.chain_parser import compute_analytics_for_symbol
+        
         _cache_key = display_key.split(":")[0]
         if _cache_key in STREAM_SYMBOL_MAP:
             api_symbol = f"${_cache_key}"
         else:
             api_symbol = display_key
 
-        result = await _compute_for_symbol(client, api_symbol)
+        result = await compute_analytics_for_symbol(client, api_symbol)
         if result is None:
             return
         analytics, spot = result["analytics"], result["spot"]
-        rv, data, iv_rank = result["rv"], result["data"], result["iv_rank"]
+        rv, data, iv_rank = result.get("rv", 0.0), result["data"], result.get("iv_rank")
 
         _ticker_analytics_cache[_cache_key] = {
             "net_gex": analytics.get("net_gex"),
@@ -1181,6 +1108,12 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                 spot,
                 _wall_zone,
             )
+            # Additional debug for strategy build failures
+            if analytics.get("ssvi_surface") is None and analytics.get("iv_skew") is None:
+                logger.info(
+                    "[%s] SSVI surface and iv_skew both missing - strategy signals may be unavailable",
+                    display_key
+                )
         # Filter out wall-broke and wall-reversal alerts from the periodic
         # poller path — those are surfaced by the streaming
         # ``maybe_fire_wall_zone_alerts`` path with full L2 context instead.

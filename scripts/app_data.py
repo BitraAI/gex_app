@@ -16,7 +16,7 @@ import streamlit as st
 from scripts import client as client_mod
 from scripts._constants import STREAM_SYMBOL_MAP
 from scripts._utils import compute_strike_increment, is_otm_or_atm, is_itm_or_atm
-from scripts.client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, fetch_candles_smart, fetch_price_history_daily, load_candle_cache, save_candle_cache
+from scripts.client import create_client, fetch_option_chain, get_yield, get_interest_rate, get_20d_rv, get_next_earnings_date, load_candle_cache
 from scripts.streaming_service import StreamingService
 from scripts.option_streaming_service import (AtmOptionVolumeService,
                                               _save_ticker_history,
@@ -199,6 +199,7 @@ def _fetch_option_chain_core(
 
     if (not data or spot <= 0) and etf_data and etf_spot > 0:
         data, spot = etf_data, etf_spot
+        analytics = etf_analytics
 
     return {
         "sym": _sym,
@@ -381,8 +382,8 @@ def compute_state():
         })
         # Cap the history: rows accumulate while the app runs and would grow
         # unbounded (built into the chart payload on every fragment tick).
-        if len(st.session_state.iv_skew_history) > 900:
-            st.session_state.iv_skew_history = st.session_state.iv_skew_history[-900:]
+        if len(st.session_state.iv_skew_history) > 300:
+            st.session_state.iv_skew_history = st.session_state.iv_skew_history[-300:]
     st.session_state.expirations = sorted(set(
         e["expiration"] for e in st.session_state.data
     ))
@@ -460,6 +461,8 @@ def prefetch_daily_candles(symbol: str):
     last cached — today's daily bar would then never appear until the user
     cleared the cache manually.
     """
+    from scripts.client import fetch_price_history_daily, save_candle_cache
+    
     key = f"{symbol}|1d"
     if not _candles_need_refresh(symbol, "1d") and st.session_state.candle_dataframes.get(key) is not None:
         return

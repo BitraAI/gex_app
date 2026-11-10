@@ -8,7 +8,7 @@ from typing import Any
 
 import streamlit as st
 
-from scripts.client import get_20d_rv, get_next_earnings_date
+from scripts.client import get_20d_rv
 from scripts.calculations import aggregate_by_expiration
 from scripts.analytics import compute_analytics
 from scripts.signals import generate_recommendations, assess_market_bias, _tte_from_dtes
@@ -78,6 +78,7 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     if rv is None:
         rv = 0.0
 
+    from scripts.client import get_next_earnings_date
     earnings_date = run_async(get_next_earnings_date(st.session_state.client, symbol))
 
     # Update ATM service with correct expiration for this ticker
@@ -276,6 +277,7 @@ def render_trade_signals():
                 _ed = s.get("next_earnings_date")
                 if _ed is None and _sym_earn and s.get("client"):
                     try:
+                        from scripts.client import get_next_earnings_date
                         _ed = run_async(get_next_earnings_date(s.client, _sym_earn))
                         st.session_state.next_earnings_date = _ed
                     except Exception:

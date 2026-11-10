@@ -23,6 +23,8 @@ def _exp_neg(x: float) -> float:
 
 def _median_of(values) -> float:
     """Median of an iterable (always non-empty by the callers' contract)."""
+    if not values:
+        return 0.0
     s = sorted(values)
     n = len(s)
     mid = n // 2
@@ -709,8 +711,11 @@ class StreamingService:
         if not depth or len(depth) < 2:
             return None, None, None
         now = _time_mod.time()
-        while depth and depth[0][0] < now - 60:
-            depth.pop(0)
+        try:
+            while depth and depth[0][0] < now - 60:
+                depth.pop(0)
+        except Exception:
+            return None, None, None
         if len(depth) < 2:
             return None, None, None
         old_cut = depth[0][0] + _LIQUIDITY_FLOW_BAND_SECS
@@ -723,10 +728,10 @@ class StreamingService:
         # inside a burst cannot skew the band's depth estimate.
         old = [(b, a) for (t, b, a) in depth if t <= old_cut]
         new = [(b, a) for (t, b, a) in depth if t >= new_cut]
-        old_bid = _median_of(b for b, _ in old)
-        old_ask = _median_of(a for _, a in old)
-        new_bid = _median_of(b for b, _ in new)
-        new_ask = _median_of(a for _, a in new)
+        old_bid = _median_of([b for b, _ in old])
+        old_ask = _median_of([a for _, a in old])
+        new_bid = _median_of([b for b, _ in new])
+        new_ask = _median_of([a for _, a in new])
         bid_flow = new_bid - old_bid
         ask_flow = new_ask - old_ask
         return bid_flow + ask_flow, bid_flow, ask_flow

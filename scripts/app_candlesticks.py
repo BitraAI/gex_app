@@ -599,7 +599,7 @@ def render_candlesticks_frag():
                         "call_iv_25d": _analytics.get("call_iv_25d"),
                         "atm_iv": _analytics.get("atm_iv"),
                     })
-            s["iv_skew_history"] = _iv_skew_hist[-900:] if len(_iv_skew_hist) > 900 else _iv_skew_hist
+            s["iv_skew_history"] = _iv_skew_hist[-300:] if len(_iv_skew_hist) > 300 else _iv_skew_hist
             render_chart(
                 candles_payload,
                 indicators=selected_indicators,

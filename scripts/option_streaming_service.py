@@ -1801,7 +1801,7 @@ class AtmOptionVolumeService:
                     bar["put_sell_vol"] += size
                     bar["total_buy_vol"] += size
             else:
-                # Unknown — split evenly
+                # Unknown — split evenly, track as unknown direction for visibility
                 half = size // 2
                 rem = size - half
                 if opt_type == "CALL":
