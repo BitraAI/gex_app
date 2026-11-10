@@ -328,9 +328,13 @@ def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float
     
     # Fallback: check absolute GEX without threshold
     with_any_gex = [s for s in below if s.get("put_gex", 0) != 0]
-    if with_any_vex:
-        return max(with_any_vex, key=lambda s: abs(s.get("put_vex", 0)))["strike"]
+    if with_any_gex:
+        return max(with_any_gex, key=lambda s: abs(s.get("put_gex", 0)))["strike"]
     
+    # Last resort: use OI
+    with_oi = [s for s in below if s.get("put_oi", 0) > 0]
+    if with_oi:
+        return max(with_oi, key=lambda s: s.get("put_oi", 0))["strike"]
     return max(below, key=lambda s: s["strike"])["strike"]
 
 
