@@ -98,16 +98,14 @@ Each directional strategy follows a multi-step pipeline. All criteria are checke
 - `analytics.py` — `compute_analytics()` — Main analytics engine with GEX+VEX+CEX walls (combined and individual), flip, skew, and calculations. `ssvi_skew_for_tte()` provides SSVI-based skew for any TTE. Wall detection uses weighted average of top 3 strikes by combined magnitude.
 
 **Wall Detection Functions:**
-- `_find_call_wall()` — Call Wall using combined GEX+VEX+CEX (weighted average of top 3 by magnitude)
-- `_find_put_wall()` — Put Wall using combined GEX+VEX+CEX (weighted average of top 3 by magnitude)
+- `_find_call_wall()` — Call Wall using GEX only (weighted average of top 3 by magnitude, displayed in $XM format)
+- `_find_put_wall()` — Put Wall using GEX only (weighted average of top 3 by magnitude, displayed in $XM format)
 - `_find_call_wall_vex()` — Call Wall using VEX only
 - `_find_put_wall_vex()` — Put Wall using VEX only
 - `_find_call_wall_cex()` — Call Wall using CEX only
 - `_find_put_wall_cex()` — Put Wall using CEX only
 
 **Wall Strength Metrics:**
-- `call_wall_strength` / `put_wall_strength` — GEX-based
-- `call_wall_strength_vex` / `put_wall_strength_vex` — VEX-based
-- `call_wall_strength_cex` / `put_wall_strength_cex` — CEX-based
+- `call_wall_strength` / `put_wall_strength` — GEX-based (sum of top 3, displayed in $XM format)
 - `app.py` — `render_trade_signals_frag()` renders the UI, applies the selected-expiration restriction, and calls `generate_recommendations`; `_build_strategy_alerts()` builds the in-app Trade Signals alerts.
 - `flow.py` — `_recompute_symbol()` calls `signals.build_strategy_alerts` to generate strategy recommendation blocks, then sends them to Telegram alongside wall-broke alerts, wall-change diff alerts, and wall-reversal trend alerts. Strategy recommendation text with VRP values **is** included in Telegram, but front expiration VRP is removed from the Telegram header (not passed to `notify_alerts`). The Trade Signals tab UI also shows strategy recommendations.
