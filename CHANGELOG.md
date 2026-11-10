@@ -4,7 +4,7 @@
 
 ### Added
 - **Pin Score** column in Order Flow grid - simpler metric than absorption showing volume absorbed per $1 net displacement
-- **Wall Strength** metrics in analytics - GEX at wall / total GEX ratio
+- **Wall Strength** metrics in analytics - sum of top 3 call/put GEX (displayed in $XM format)
 - **VEX and CEX Wall Detection** - Individual VEX and CEX-specific wall functions (`_find_call_wall_vex()`, `_find_put_wall_vex()`, `_find_call_wall_cex()`, `_find_put_wall_cex()`)
 - **VEX/CEX Wall Confirmation** - VEX and CEX-based wall metrics tracked separately for confirmation analysis
 
@@ -20,9 +20,9 @@
 
 ### Improved
 - **Call/Put Walls**: 
-  - Require minimum GEX threshold (1M or 0.5% of total)
-  - Use weighted average of top 3 walls by GEX magnitude
+  - Use weighted average of top 3 walls by GEX magnitude (threshold removed, always takes top 3)
   - Check absolute GEX magnitude, not just positive
+  - Wall strength now shows sum of top 3 GEX (displayed in $XM format)
   - VEX and CEX-specific walls provide additional IV sensitivity and time decay analysis
 - **Gamma Flip**: Now uses linear interpolation between strikes for precise flip point
 - **Expected Pin**: Now uses GEX-based strength weighting
