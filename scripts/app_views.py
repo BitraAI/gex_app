@@ -31,21 +31,21 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
     net = analytics.get('net_gex', 0)
     net_label = "Net GEX" + (" (via ETF)" if st.session_state.get("etf_analytics") else "")
     net_cls = "positive" if net >= 0 else "negative"
-    net_str = f"${net/1000000:.1f}M" if net != 0 else "$0"
+    net_str = f"${net/1000000:.2f}M" if net != 0 else "$0.00M"
     col2.markdown(
         f'<div class="gex-metric"><div class="label">{net_label}</div>'
         f'<div class="value {net_cls}">{net_str}</div></div>',
         unsafe_allow_html=True,
     )
     tc = analytics.get('total_call_gex', 0)
-    tc_str = f"${tc/1000000:.1f}M" if tc != 0 else "$0"
+    tc_str = f"${tc/1000000:.2f}M" if tc != 0 else "$0.00M"
     col3.markdown(
         f'<div class="gex-metric"><div class="label">Call GEX</div>'
         f'<div class="value positive">{tc_str}</div></div>',
         unsafe_allow_html=True,
     )
     tp = analytics.get('total_put_gex', 0)
-    tp_str = f"${tp/1000000:.1f}M" if tp != 0 else "$0"
+    tp_str = f"${tp/1000000:.2f}M" if tp != 0 else "$0.00M"
     col4.markdown(
         f'<div class="gex-metric"><div class="label">Put GEX</div>'
         f'<div class="value negative">{tp_str}</div></div>',
