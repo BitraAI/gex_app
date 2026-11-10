@@ -137,6 +137,7 @@ def compute_analytics(
                 analytics["put_wall_vex_score"] = 1 if top_3_vex_sum > 0 else (-1 if top_3_vex_sum < 0 else 0)
                 top_3_cex_sum = sum(s.get("put_cex", 0) for s in top_3)
                 analytics["put_wall_cex_adjustment"] = round(top_3_cex_sum * (30 / 1440), 2)
+                analytics["put_wall_cex_score"] = 1 if analytics["put_wall_cex_adjustment"] > 0 else (-1 if analytics["put_wall_cex_adjustment"] < 0 else 0)
 
     _call_wall_opts = [e for e in data if e["strike"] == call_wall and e["type"] == "CALL"] if call_wall else []
     _put_wall_opts = [e for e in data if e["strike"] == put_wall and e["type"] == "PUT"] if put_wall else []
