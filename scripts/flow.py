@@ -1378,20 +1378,24 @@ def render_atm_order_flow_grid():
 
             def _stability_arrows(score):
                 if score == 2:
-                    return f' <span style="{_GREEN}">▲▲</span>'
+                    return f'<span style="{_GREEN}">▲▲</span>'
                 if score == 1:
-                    return f' <span style="{_GREEN}">▲</span>'
+                    return f'<span style="{_GREEN}">▲</span>'
                 if score == -2:
-                    return f' <span style="{_RED}">▼▼</span>'
+                    return f'<span style="{_RED}">▼▼</span>'
                 if score == -1:
-                    return f' <span style="{_RED}">▼</span>'
+                    return f'<span style="{_RED}">▼</span>'
                 return ""
             _arrows = _stability_arrows(_stab)
-            support_cell = f"${put_wall_val:,.2f}{_arrows}" if put_wall_val is not None else ""
+            support_cell = (f'<span style="white-space: nowrap">$'
+                            f"{put_wall_val:,.2f}&nbsp;{_arrows}</span>"
+                            ) if put_wall_val is not None else ""
             # Resistance column stability arrows (from call_wall_stability_score),
             # same ±1/±2 arrow convention as the Support column.
             _cstab = atm_svc.get_ticker_call_stability(t_upper) if atm_svc else None
-            resistance_cell = f"${call_wall_val:,.2f}{_stability_arrows(_cstab)}" if call_wall_val is not None else ""
+            resistance_cell = (f'<span style="white-space: nowrap">$'
+                               f"{call_wall_val:,.2f}&nbsp;{_stability_arrows(_cstab)}</span>"
+                               ) if call_wall_val is not None else ""
 
             _call_p, _put_p = _wall_price_marks(opt_prices, wall_prices, call_wall_val, put_wall_val, spot)
             
@@ -1691,6 +1695,17 @@ def render_atm_order_flow_grid():
     table_html = (
         '<div class="flow-grid-wrap">'
         '<table class="flow-grid">'
+        # Explicit column widths: wall columns (Support/Resistance) carry
+        # money + stability arrows, so they need ~2 extra percentage points
+        # over the default 1/16 equal split.
+        '<colgroup>'
+        '<col style="width:6%"><col style="width:7%"><col style="width:7%">'
+        '<col style="width:8%"><col style="width:8%">'
+        '<col style="width:7%"><col style="width:7%">'
+        '<col style="width:6%"><col style="width:5%"><col style="width:5%"><col style="width:6%">'
+        '<col style="width:7%"><col style="width:5%"><col style="width:6%">'
+        '<col style="width:5%"><col style="width:5%">'
+        '</colgroup>'
         f"<thead><tr>{thead}</tr></thead>"
         f"<tbody>{''.join(tbody)}</tbody>"
         "</table></div>"
