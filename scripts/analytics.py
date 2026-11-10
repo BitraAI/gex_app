@@ -122,6 +122,8 @@ def compute_analytics(
                 analytics["call_wall_strength"] = round(top_3_gex_sum, 2)
                 top_3_vex_sum = sum(s["call_vex"] for s in top_3)
                 analytics["call_wall_vex_adjustment"] = round(-top_3_vex_sum * 0.01, 2)
+                top_3_cex_sum = sum(s["call_cex"] for s in top_3)
+                analytics["call_wall_cex_adjustment"] = round(-top_3_cex_sum * (30 / 1440), 2)
     if put_wall:
         put_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - put_wall))
         if put_wall_strike:
@@ -132,6 +134,8 @@ def compute_analytics(
                 analytics["put_wall_strength"] = round(top_3_gex_sum, 2)
                 top_3_vex_sum = sum(s.get("put_vex", 0) for s in top_3)
                 analytics["put_wall_vex_adjustment"] = round(top_3_vex_sum * 0.01, 2)
+                top_3_cex_sum = sum(s.get("put_cex", 0) for s in top_3)
+                analytics["put_wall_cex_adjustment"] = round(top_3_cex_sum * (30 / 1440), 2)
 
     _call_wall_opts = [e for e in data if e["strike"] == call_wall and e["type"] == "CALL"] if call_wall else []
     _put_wall_opts = [e for e in data if e["strike"] == put_wall and e["type"] == "PUT"] if put_wall else []
