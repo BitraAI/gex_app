@@ -14,20 +14,20 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
   - **Mouse wheel** zooms the X-axis (bar spacing) anywhere over the chart; a crosshair tracks the cursor.
   - The Y range is **persistent across the 1-second streaming fragment re-renders**: user-set Y-zoom (via body drag, axis-label drag, or autoscaleInfoProvider pin) is saved losslessly on gesture end and restored on each re-render, so streaming ticks do not snap the chart back to the auto-fit range and the Y range doesn't drift over time. X-axis range persistence works the same way.
   - Each pane (main candlesticks / Volume / ATM / Andean Osc) pans its own Y range independently when dragged in its own vertical band.
-- **3 Calculations** — GEX (Gamma), VEX (Vanna), CEX (Charm) Exposure
+- **3 Calculations** — GEX (Gamma), VEX (Vanna), CEX (Charm) Exposure with unified GEX+VEX+CEX wall detection
 - **Arbitrage-Free SSVI Volatility Surface** — Fits a parametric (Raw SVI per-tenor → SSVI surface) smoothed IV surface for cleaner skew / IV estimates. Used for the SSVI model overlay on IV-by-Strike and ATM IV-by-Expiration charts, and `ssvi_skew` analytics.
 - **10 Interactive Charts:**
   - GEX by Strike (bar chart with Call/Put Wall, Gamma Flip overlays)
   - GEX by Expiration (stacked bar by expiration cycle, expandable via slider)
   - 3D Gamma Surface (strike × expiration × GEX, expandable via slider)
-  - Dealer Curve (cumulative GEX/VEX/CEX across strikes, with Spot/Call Wall/Put Wall/Gamma Flip markers in GEX mode, VEX Magnet/Repellent markers in VEX mode)
+   - Dealer Curve (cumulative GEX/VEX/CEX across strikes, with Spot/Call Wall/Put Wall/Gamma Flip markers in GEX mode, VEX Magnet/Repellent markers in VEX mode, CEX-specific walls in CEX mode)
   - OI/Vol by Strike (grouped bars, toggle OI or Volume)
     - IV by Expiration (bar chart, toggle ATM IV / VRP — ATM IV colored by IV magnitude with RV horizontal line; VRP colored by ±10pp buckets with a Buy Premium → Sell Premium legend)
     - IV by Strike (bar chart, toggle IV / IV Richness (pp) — IV with SSVI fitted smile overlay and Spot/ATM marker; IV Richness (pp) colored by ±5pp buckets with a Cheap → Expensive legend)
   - Heatmaps + Vol Surface (strike × expiration grid, toggle OI/Volume/VRP, expandable via slider, x-axis locked)
   - Strategy Signals (automated trade recommendations from the option chain)
 - **Analytics Panel:**
-  - Call Wall (highest call GEX above spot), Put Wall (highest put GEX below spot)
+   - Call Wall (highest call GEX+VEX+CEX above spot), Put Wall (highest put GEX+VEX+CEX below spot), plus VEX and CEX-specific walls
   - Gamma Flip (cumulative net GEX zero-crossing with 1% threshold), Max Pain
   - Max +GEX, Max -GEX
   - Dealer Position (Long/Short Gamma)
@@ -59,8 +59,8 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 - **Options Data** — Sortable grid filtered by sidebar expiration selection, with highlighted cells and CSV export (columns: Strike, Call/Put GEX, Net GEX, Call/Put OI, Call/Put Vol, Call/Put Gamma, Call/Put Price, Call/Put Delta, Call/Put IV, SSVI IV, IV (pp), Expirations):
   - **Gray row** — ATM strike (closest to spot)
   - **Red OI cells** — Max Pain strike OI columns
-  - **Orange Call GEX cell** — Call Wall strike Call GEX
-  - **Green Put GEX cell** — Put Wall strike Put GEX
+  - **Orange Call GEX cell** — Call Wall strike Call GEX (also shows VEX/CEX walls)
+  - **Green Put GEX cell** — Put Wall strike Put GEX (also shows VEX/CEX walls)
   - **SSVI IV** — Model IV from the SSVI volatility surface at the front-month TTE
   - **IV (pp)** — IV Richness in percentage points = IV - SSVI IV
   - **Call/Put Delta** — Option delta at the front expiration (used for the Trade Signals delta filters)
@@ -395,8 +395,9 @@ Where:
 - **n / (n - 1)** — Degrees-of-freedom correction inside the square root
 
 **Key Metrics:**
-- **Call Wall** — Strike above spot with highest call GEX
-- **Put Wall** — Strike below spot with highest put GEX
+- **Call Wall** — Strike above spot with highest combined call GEX+VEX+CEX (weighted average of top 3 by magnitude). Also tracks VEX and CEX-specific walls (`call_wall_vex`, `call_wall_cex`) for IV sensitivity and time decay analysis.
+- **Put Wall** — Strike below spot with highest combined put GEX+VEX+CEX (weighted average of top 3 by magnitude). Also tracks VEX and CEX-specific walls (`put_wall_vex`, `put_wall_cex`) for IV sensitivity and time decay analysis.
+- **Wall Strength** — GEX, VEX, and CEX strength metrics show what % of total exposure each wall represents. For example, `call_wall_strength` = GEX at wall / total call GEX, `call_wall_strength_vex` = VEX at wall / total call VEX.
 - **Gamma Flip** — Strike where cumulative net GEX crosses zero gamma level. Requires cumulative magnitude > 1% of total absolute GEX before registering a cross, filtering out noise from small near-zero fluctuations. 
     Above this line: Dealer flows stabilize the market (lower volatility).
     Below this line: Dealer flows destabilize the market (amplifying volatility).

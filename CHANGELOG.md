@@ -5,20 +5,26 @@
 ### Added
 - **Pin Score** column in Order Flow grid - simpler metric than absorption showing volume absorbed per $1 net displacement
 - **Wall Strength** metrics in analytics - GEX at wall / total GEX ratio
+- **VEX and CEX Wall Detection** - Individual VEX and CEX-specific wall functions (`_find_call_wall_vex()`, `_find_put_wall_vex()`, `_find_call_wall_cex()`, `_find_put_wall_cex()`)
+- **Wall Strength Metrics** - VEX and CEX-based wall strength (`call_wall_strength_vex`, `put_wall_strength_vex`, `call_wall_strength_cex`, `put_wall_strength_cex`)
+- **Combined GEX+VEX+CEX Walls** - Wall detection now uses combined GEX+VEX+CEX metrics for more robust identification
 
 ### Changed
 - **Liquidity Flow** threshold now dynamic: `max(25, 3% of avg book depth)` instead of static 25 contracts
 - **Absorption** now uses delta-weighted volume (same as Flow Ratio) instead of raw volume
 - **Absorption** denominator smoothed: `vol_60 / (spot_path + 0.05)` for smoother transitions
 - **GEX Formula**: Fixed to use `(spot/100)^2` instead of `spot^2` for correct scaling
+- **VEX Formula**: Fixed to use `(spot/100)^2` for spot normalization (consistent with GEX)
+- **CEX Formula**: Fixed sign convention - CALL positive, PUT negative (matches GEX/VEX)
 - **Dealer Position**: Now includes strength indicator (Strong/Moderate/Weak)
 - Updated conviction score liquidity flow threshold from 2% to 3%
 
 ### Improved
 - **Call/Put Walls**: 
-  - Require minimum GEX threshold (1M or 0.5% of total)
-  - Use weighted average of top 3 walls by GEX
-  - Check absolute GEX magnitude, not just positive
+  - Require minimum combined GEX+VEX+CEX threshold (1M or 0.5% of total)
+  - Use weighted average of top 3 walls by combined magnitude
+  - Check absolute combined magnitude, not just positive
+  - VEX and CEX-specific walls provide additional IV sensitivity and time decay analysis
 - **Gamma Flip**: Now uses linear interpolation between strikes for precise flip point
 - **Expected Pin**: Now uses GEX-based strength weighting
 - Liquidity Flow now shows bid/ask flows separately

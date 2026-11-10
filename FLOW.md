@@ -325,10 +325,10 @@ the in-app single-ticker `app.check_alerts`) — the streaming path pins
 remains only in strategy recommendation text.
 
 **Wall-change diff alerts.** `telegram_notifier.diff_alerts()` detects when
-the Call Wall or Put Wall strike value changes between refreshes and emits:
+the Call Wall or Put Wall strike value changes between refreshes (GEX+VEX+CEX combined or VEX/CEX-specific) and emits:
 
-- `Call Wall moved: $<prev> → $<curr>`
-- `Put Wall moved: $<prev> → $<curr>`
+  - `Call Wall moved: $<prev> → $<curr>` (GEX+VEX+CEX combined, or VEX/CEX-specific)
+  - `Put Wall moved: $<prev> → $<curr>` (GEX+VEX+CEX combined, or VEX/CEX-specific)
 
 These pass through unchanged (same treatment as Gamma Flip / Dealer flip changed)
 and fire regardless of wall stability, subject to the per-ticker cooldown.

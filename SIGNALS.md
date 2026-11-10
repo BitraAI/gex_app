@@ -83,7 +83,7 @@ Each directional strategy follows a multi-step pipeline. All criteria are checke
 | **Short Puts** | OTM puts (`strike < spot`) DTE 1–45 → highest-VRP expiration → IV skew `> 0` → `\|Δ\|` 0.15–0.20 → highest SSVI richness (pp) → `Sell Put @ K (MM-DD) — VRP X.X%, IV (pp) +X.XX%, 25Δ Skew +X.XX%` |
 | **Call Credit Spread** | Sell lowest OTM call / Buy higher OTM call, same expiration; picks the pair where the expiration has the highest `exp_vrp` |
 | **Put Credit Spread** | Sell highest OTM put / Buy lower OTM put, same expiration; picks the pair where the expiration has the highest `exp_vrp` |
-| **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall and Call Wall strikes, with long protection legs at the richest OTM strikes beyond them. Falls back to symmetric wings if walls unavailable. Display shows expiration ATM VRP for each leg |
+| **Iron Condor** | Two-legged credit spread — sell put/call at the Put Wall (GEX+VEX+CEX combined) and Call Wall (GEX+VEX+CEX combined) strikes, with long protection legs at the richest OTM strikes beyond them. Falls back to symmetric wings if walls unavailable. Display shows expiration ATM VRP for each leg. Also supports VEX and CEX-specific wall strikes for advanced IV/time-decay analysis. |
 | **Iron Butterfly** | Sell ATM call + sell ATM put, buy OTM call above and OTM put below. Displays `exp_vrp` for the expiration |
 | **Butterfly** | Buy one OTM put + one OTM call, sell 2× ATM body |
 | **Broken Wing Butterfly (Calls)** | Buy lowest OTM call / Sell 2× middle call / Buy highest OTM call, where the upper wing is wider than the lower |
@@ -95,6 +95,19 @@ Each directional strategy follows a multi-step pipeline. All criteria are checke
 ## Code reference
 
 - `signals.py` — Bias and recommendation logic. `exp_vrp` dict (ATM IV − RV per expiration) built from full chain at function entry. Directional strategies select best expiration from this dict. SSVI-based per-strike richness used for final strike selection within the chosen expiration. Also owns `_tte_from_dtes` and `build_strategy_alerts()` which produces the **Buy/Sell Premium strategy recommendation blocks** (shown in the Trade Signals tab UI; these contain VRP values in their text).
-- `analytics.py` — `compute_analytics()` — Main analytics engine with walls, flip, skew, and GEX/VEX/CEX calculations. `ssvi_skew_for_tte()` provides SSVI-based skew for any TTE.
+- `analytics.py` — `compute_analytics()` — Main analytics engine with GEX+VEX+CEX walls (combined and individual), flip, skew, and calculations. `ssvi_skew_for_tte()` provides SSVI-based skew for any TTE. Wall detection uses weighted average of top 3 strikes by combined magnitude.
+
+**Wall Detection Functions:**
+- `_find_call_wall()` — Call Wall using combined GEX+VEX+CEX (weighted average of top 3 by magnitude)
+- `_find_put_wall()` — Put Wall using combined GEX+VEX+CEX (weighted average of top 3 by magnitude)
+- `_find_call_wall_vex()` — Call Wall using VEX only
+- `_find_put_wall_vex()` — Put Wall using VEX only
+- `_find_call_wall_cex()` — Call Wall using CEX only
+- `_find_put_wall_cex()` — Put Wall using CEX only
+
+**Wall Strength Metrics:**
+- `call_wall_strength` / `put_wall_strength` — GEX-based
+- `call_wall_strength_vex` / `put_wall_strength_vex` — VEX-based
+- `call_wall_strength_cex` / `put_wall_strength_cex` — CEX-based
 - `app.py` — `render_trade_signals_frag()` renders the UI, applies the selected-expiration restriction, and calls `generate_recommendations`; `_build_strategy_alerts()` builds the in-app Trade Signals alerts.
 - `flow.py` — `_recompute_symbol()` calls `signals.build_strategy_alerts` to generate strategy recommendation blocks, then sends them to Telegram alongside wall-broke alerts, wall-change diff alerts, and wall-reversal trend alerts. Strategy recommendation text with VRP values **is** included in Telegram, but front expiration VRP is removed from the Telegram header (not passed to `notify_alerts`). The Trade Signals tab UI also shows strategy recommendations.
