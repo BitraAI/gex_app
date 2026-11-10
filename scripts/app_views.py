@@ -54,7 +54,7 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
     pw_strength = analytics.get('put_wall_strength')
     col1.markdown(
         f'<div class="gex-metric"><div class="label">Put Wall</div>'
-        f'<div class="value neutral">${pw:.2f} {f"({pw_strength:,.2f})" if pw_strength else ""}</div></div>' if pw else
+        f'<div class="value neutral">${pw:.2f} {f"({pw_strength/1000000:.0f})" if pw_strength else ""}</div></div>' if pw else
         '<div class="gex-metric"><div class="label">Put Wall</div>'
         '<div class="value neutral">N/A</div></div>',
         unsafe_allow_html=True,
@@ -63,7 +63,7 @@ def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime
     cw_strength = analytics.get('call_wall_strength')
     col2.markdown(
         f'<div class="gex-metric"><div class="label">Call Wall</div>'
-        f'<div class="value neutral">${cw:.2f} {f"({cw_strength:,.2f})" if cw_strength else ""}</div></div>' if cw else
+        f'<div class="value neutral">${cw:.2f} {f"({cw_strength/1000000:.0f})" if cw_strength else ""}</div></div>' if cw else
         '<div class="gex-metric"><div class="label">Call Wall</div>'
         '<div class="value neutral">N/A</div></div>',
         unsafe_allow_html=True,
