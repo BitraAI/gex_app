@@ -56,7 +56,7 @@ def render_candlesticks_frag():
         'gap:12px;margin:0 0 10px 0;">'
         '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
         f'<div style="display:flex;gap:16px;font-size:0.9rem;">'
-        f'<span style="color:{nf_color};">Net Flow: {net_flow:,.2f}</span>'
+        f'<span style="color:{nf_color};">Net Flow: {net_flow:,.0f}</span>'
         f'<span style="color:{fr_color};">Flow Ratio: {flow_ratio:.2%}</span>'
         '</div>'
         '</div>',
