@@ -16,7 +16,7 @@ from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOL
 from scripts._utils import floor_dataframe_timestamps, compute_current_bucket
 from scripts.client import load_candle_cache
 from scripts.chart_component import render_chart, render_chart_host
-from scripts.flow import ensure_atm_streaming, run_async, maybe_refresh_ticker_walls
+from scripts.flow import _ticker_analytics_cache, ensure_atm_streaming, run_async, maybe_refresh_ticker_walls
 from scripts.option_streaming_service import (_normalize_display_symbol,
                                               _get_stream_symbol)
 from scripts.app_data import _candles_need_refresh, refresh_candles
@@ -42,9 +42,7 @@ def render_candlesticks_frag():
     _sym = s.get("symbol", "SPY").upper().lstrip("$")
     
     # Get analytics from cache to extract Support/Resistance values
-    _ticker_ana = {}
-    if s.get("_ticker_analytics_cache"):
-        _ticker_ana = s.get("_ticker_analytics_cache", {}).get(_sym) or {}
+    _ticker_ana = _ticker_analytics_cache.get(_sym) or {}
     
     oi_support = _ticker_ana.get("oi_support")
     oi_resistance = _ticker_ana.get("oi_resistance")
