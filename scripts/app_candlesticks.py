@@ -37,24 +37,59 @@ def render_candlesticks_frag():
         st.info("Initialize authentication to load data")
         return
 
-    # Title row: tab title on the left, Net Flow and Flow Ratio on the right.
+    # Title row: tab title on the left, Support/Resistance levels in center, Net Flow and Flow Ratio on the right.
     atm_svc = s.get("atm_option_service")
     _sym = s.get("symbol", "SPY").upper().lstrip("$")
-    net_flow = 0.0
-    flow_ratio = 0.0
+    
+    oi_support = None
+    oi_resistance = None
+    volume_support = None
+    volume_resistance = None
+    
     if atm_svc and _sym in atm_svc.tracked_tickers():
         try:
             net_flow, flow_ratio, _, _, _ = atm_svc.get_ticker_net_flow(_sym)
         except Exception:
-            pass
+            net_flow = 0.0
+            flow_ratio = 0.0
+        
+        # Get analytics from cache
+        _ticker_ana = s.get("_ticker_analytics_cache", {}).get(_sym) or {}
+        oi_support = _ticker_ana.get("oi_support")
+        oi_resistance = _ticker_ana.get("oi_resistance")
+        volume_support = _ticker_ana.get("volume_support")
+        volume_resistance = _ticker_ana.get("volume_resistance")
+    else:
+        net_flow = 0.0
+        flow_ratio = 0.0
     
     nf_color = "green" if net_flow > 0 else ("red" if net_flow < 0 else "#666")
     fr_color = "green" if flow_ratio > 0.70 else ("red" if flow_ratio < 0.30 else "#666")
+    
+    # Build Support/Resistance display
+    support_vals = []
+    if volume_support is not None:
+        support_vals.append(f"Vol: ${volume_support:,.0f}")
+    if oi_support is not None:
+        support_vals.append(f"OI: ${oi_support:,.0f}")
+    
+    resistance_vals = []
+    if volume_resistance is not None:
+        resistance_vals.append(f"Vol: ${volume_resistance:,.0f}")
+    if oi_resistance is not None:
+        resistance_vals.append(f"OI: ${oi_resistance:,.0f}")
+    
+    support_display = " | ".join(support_vals) if support_vals else ""
+    resistance_display = " | ".join(resistance_vals) if resistance_vals else ""
+    support_resistance_display = f"{support_display} {resistance_display}"
     
     st.markdown(
         '<div style="display:flex;align-items:center;justify-content:space-between;'
         'gap:12px;margin:0 0 10px 0;">'
         '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
+        f'<div style="display:flex;gap:16px;font-size:0.9rem;">'
+        f'<span style="color:#666;">{support_resistance_display}</span>'
+        '</div>'
         f'<div style="display:flex;gap:16px;font-size:0.9rem;">'
         f'<span style="color:{nf_color};">Net Flow: {net_flow:,.0f}</span>'
         f'<span style="color:{fr_color};">Flow Ratio: {flow_ratio:.2%}</span>'
