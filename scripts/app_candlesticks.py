@@ -37,14 +37,19 @@ def render_candlesticks_frag():
         st.info("Initialize authentication to load data")
         return
 
-    # Title row: tab title on the left, Support/Resistance levels in center, Net Flow and Flow Ratio on the right.
+# Title row: tab title on the left, Support/Resistance levels in center, Net Flow and Flow Ratio on the right.
     atm_svc = s.get("atm_option_service")
     _sym = s.get("symbol", "SPY").upper().lstrip("$")
     
-    oi_support = None
-    oi_resistance = None
-    volume_support = None
-    volume_resistance = None
+    # Get analytics from cache to extract Support/Resistance values
+    _ticker_ana = {}
+    if s.get("_ticker_analytics_cache"):
+        _ticker_ana = s.get("_ticker_analytics_cache", {}).get(_sym) or {}
+    
+    oi_support = _ticker_ana.get("oi_support")
+    oi_resistance = _ticker_ana.get("oi_resistance")
+    volume_support = _ticker_ana.get("volume_support")
+    volume_resistance = _ticker_ana.get("volume_resistance")
     
     # Get Net Flow and Flow Ratio if ATM service is available
     net_flow = 0.0
@@ -62,10 +67,28 @@ def render_candlesticks_frag():
     nf_color = "green" if net_flow > 0 else ("red" if net_flow < 0 else "#666")
     fr_color = "green" if flow_ratio > 0.70 else ("red" if flow_ratio < 0.30 else "#666")
     
+    # Build Support/Resistance display text
+    support_text = ""
+    if volume_support is not None:
+        support_text += f"Vol: ${round(volume_support, 2):.2f} "
+    if oi_support is not None:
+        support_text += f"OI: ${round(oi_support, 2):.2f} "
+    
+    resistance_text = ""
+    if volume_resistance is not None:
+        resistance_text += f"Vol: ${round(volume_resistance, 2):.2f} "
+    if oi_resistance is not None:
+        resistance_text += f"OI: ${round(oi_resistance, 2):.2f} "
+    
+    all_support_resistance = f"{support_text}{resistance_text}".strip()
+    
     st.markdown(
         '<div style="display:flex;align-items:center;justify-content:space-between;'
         'gap:12px;margin:0 0 10px 0;">'
         '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
+        '<div style="flex:1;min-width:200px;text-align:center;">'
+        f'<span style="color:#666;">{all_support_resistance}</span>'
+        '</div>'
         '<div style="display:flex;gap:16px;font-size:0.9rem;">'
         f'<span style="color:{nf_color};">Net Flow: {net_flow:,.0f}</span>'
         f'<span style="color:{fr_color};">Flow Ratio: {flow_ratio:.2f}</span>'
