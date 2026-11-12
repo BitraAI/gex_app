@@ -366,6 +366,52 @@ def ensure_atm_streaming(stream_symbol: str):
                                     }
                     # Now set the walls
                     atm_svc.set_ticker_walls(current_sym, put_wall, call_wall)
+        
+        # Force wall recomputes for all tracked non-index tickers if needed
+        if atm_svc:
+            tracked = atm_svc.tracked_tickers()
+            now = _time_mod.monotonic()
+            _client = atm_svc._client
+            _loop = atm_svc._loop
+            
+            # First, check if any ticker needs a wall refresh
+            for t_sym in tracked:
+                t_upper = _normalize_display_symbol(t_sym)
+                # Skip index symbols - their walls come from proxy options
+                if t_upper in INDEX_QUOTE_MAP:
+                    continue
+                
+                # Get spot for this ticker
+                spot = atm_svc.get_ticker_spot(t_upper)
+                if spot is None:
+                    continue
+                
+                # Check if we need to schedule a wall refresh
+                _ref = _last_ref_price.get(t_upper)
+                _inc = _strike_inc.get(t_upper, 1.0)
+                _last_re = _last_recompute_ts.get(t_upper, 0.0)
+                _moved = _ref is None or abs(spot - _ref) >= _inc / 2
+                _stale = (now - _last_re) >= _WALL_RECOMPUTE_MAX_INTERVAL
+                
+                # Force refresh if the ticker has no walls set yet, or if the interval has passed
+                _current_ticker = _find_flow_for_display(atm_svc._ticker_flows, t_upper)
+                has_walls = _current_ticker and (_current_ticker.get("put_wall") is not None or _current_ticker.get("call_wall") is not None)
+                
+                should_refresh = (
+                    not has_walls or  # No walls set yet - force refresh
+                    _moved or  # Spot moved enough
+                    _stale  # Max interval elapsed
+                ) and (now - _last_re >= _WALL_RECOMPUTE_MIN_INTERVAL)  # But respect min interval
+                
+                if should_refresh:
+                    # Schedule a wall refresh for this ticker
+                    _last_ref_price[t_upper] = spot
+                    _last_recompute_ts[t_upper] = now
+                    _last_full_recompute_ts[t_upper] = now  # Also trigger full recompute
+                    if _client:
+                        asyncio.run_coroutine_threadsafe(
+                            _recompute_symbol(t_upper, _client, _loop, atm_svc), _loop,
+                        )
 
 
 
@@ -752,6 +798,8 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                     atm_svc.set_ticker_expiration2(display_key, _exps[1])
             # Call/put marks at the ATM strike (populates Call/Put Price columns)
             _atm_k = analytics.get("atm_strike")
+            _call_delta = None
+            _put_delta = None
             if _atm_k:
                 _atm_exps = sorted({e["expiration"] for e in data if e["strike"] == _atm_k})
                 _call_mark = _put_mark = None
@@ -761,9 +809,14 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                         if e["strike"] == _atm_k and e["expiration"] == _front:
                             if e["type"] == "CALL" and _call_mark is None:
                                 _call_mark = e.get("mark")
+                                _call_delta = e.get("delta")
                             elif e["type"] == "PUT" and _put_mark is None:
                                 _put_mark = e.get("mark")
+                                _put_delta = e.get("delta")
                 atm_svc.set_ticker_option_prices(display_key, _call_mark, _put_mark)
+                # Set delta values for index tickers ($SPX, $RUT, etc.) to use in Net Flow calculation
+                if _call_delta is not None or _put_delta is not None:
+                    atm_svc.set_ticker_atm_deltas(display_key, _call_delta, _put_delta)
             # Option marks at the key wall strikes: CALL at the put wall
             # (support), PUT at the call wall (resistance), CALL at the
             # call wall (resistance), and PUT at the put wall (support).
@@ -923,6 +976,8 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
                     atm_svc.set_ticker_expiration2(display_key, _exps[1])
             # Call/put marks at the ATM strike (populates Call/Put Price columns)
             _atm_k = analytics.get("atm_strike")
+            _call_delta = None
+            _put_delta = None
             if _atm_k:
                 _atm_exps = sorted({e["expiration"] for e in data if e["strike"] == _atm_k})
                 _call_mark = _put_mark = None
@@ -932,9 +987,14 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
                         if e["strike"] == _atm_k and e["expiration"] == _front:
                             if e["type"] == "CALL" and _call_mark is None:
                                 _call_mark = e.get("mark")
+                                _call_delta = e.get("delta")
                             elif e["type"] == "PUT" and _put_mark is None:
                                 _put_mark = e.get("mark")
+                                _put_delta = e.get("delta")
                 atm_svc.set_ticker_option_prices(display_key, _call_mark, _put_mark)
+                # Set delta values for index tickers ($SPX, $RUT, etc.) to use in Net Flow calculation
+                if _call_delta is not None or _put_delta is not None:
+                    atm_svc.set_ticker_atm_deltas(display_key, _call_delta, _put_delta)
             # Option marks at the key wall strikes (Call/Put Price columns).
             atm_svc.set_ticker_wall_prices(
                 display_key,
@@ -1112,8 +1172,9 @@ def render_atm_order_flow_grid():
                 net_flow, flow_ratio, rolling_bullish, rolling_bearish, has_institutional = atm_svc.get_ticker_net_flow(t_upper)
             else:
                 net_flow, flow_ratio, rolling_bullish, rolling_bearish, has_institutional = 0.0, 0.0, 0.0, 0.0, False
-            rows[-1]["Net Flow"] = net_flow
-            rows[-1]["Flow Ratio"] = flow_ratio
+            # Round to reduce flicker - only hash changes on meaningful moves
+            rows[-1]["Net Flow"] = round(net_flow, 2) if net_flow != 0 else 0.0
+            rows[-1]["Flow Ratio"] = round(flow_ratio, 4) if flow_ratio != 0 else 0.0
             rows[-1]["Has Institutional"] = has_institutional
             
             # Add OI Support, OI Resistance, Volume Support, Volume Resistance
