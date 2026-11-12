@@ -37,11 +37,28 @@ def render_candlesticks_frag():
         st.info("Initialize authentication to load data")
         return
 
-    # Title row: tab title on the left.
+    # Title row: tab title on the left, Net Flow and Flow Ratio on the right.
+    atm_svc = s.get("atm_option_service")
+    _sym = s.get("symbol", "SPY").upper().lstrip("$")
+    net_flow = 0.0
+    flow_ratio = 0.0
+    if atm_svc and _sym in atm_svc.tracked_tickers():
+        try:
+            net_flow, flow_ratio, _, _, _ = atm_svc.get_ticker_net_flow(_sym)
+        except Exception:
+            pass
+    
+    nf_color = "green" if net_flow > 0 else ("red" if net_flow < 0 else "#666")
+    fr_color = "green" if flow_ratio > 0.70 else ("red" if flow_ratio < 0.30 else "#666")
+    
     st.markdown(
         '<div style="display:flex;align-items:center;justify-content:space-between;'
         'gap:12px;margin:0 0 10px 0;">'
         '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
+        f'<div style="display:flex;gap:16px;font-size:0.9rem;">'
+        f'<span style="color:{nf_color};">Net Flow: {net_flow:,.2f}</span>'
+        f'<span style="color:{fr_color};">Flow Ratio: {flow_ratio:.2%}</span>'
+        '</div>'
         '</div>',
         unsafe_allow_html=True,
     )
