@@ -18,25 +18,22 @@ from scripts import client as client_mod
 from scripts._constants import STREAM_SYMBOL_MAP
 from scripts._utils import compute_strike_increment, is_otm_or_atm, is_itm_or_atm
 from scripts.client import (create_client, fetch_option_chain, get_yield,
-                            get_interest_rate, get_20d_rv, get_next_earnings_date,
-                            fetch_candles_smart, fetch_price_history_daily,
-                            save_candle_cache, load_candle_cache)
+                             get_interest_rate, get_20d_rv, get_next_earnings_date,
+                             fetch_candles_smart, load_candle_cache)
 from scripts.streaming_service import StreamingService
 from scripts.option_streaming_service import (AtmOptionVolumeService,
-                                              _save_ticker_history,
-                                              _normalize_display_symbol)
+                                               _save_ticker_history,
+                                               _normalize_display_symbol)
 from scripts.calculations import parse_option_chain, build_greeks_lookup, aggregate_by_strike, aggregate_by_expiration
 
 logger = logging.getLogger(__name__)
 from scripts.analytics import compute_analytics
 from scripts.telegram_notifier import notify_alerts, diff_alerts
 from scripts.flow import (_ensure_async_loop, _ticker_analytics_cache,
-                          _wall_buffer, _WALL_ZONE_ALERT_COOLDOWN,
-                          _strike_inc, run_async)
+                           _wall_buffer, _WALL_ZONE_ALERT_COOLDOWN,
+                           _strike_inc, run_async)
 from scripts.news_service import NewsService
 from scripts.index_spot_poller import IndexSpotPoller
-from scripts.landing import render_landing
-from scripts.persistent_session import restore, flush
 
 
 def sync_index_poller() -> None:
@@ -205,7 +202,6 @@ def _fetch_option_chain_core(
 
     if (not data or spot <= 0) and etf_data and etf_spot > 0:
         data, spot = etf_data, etf_spot
-        analytics = etf_analytics
 
     return {
         "sym": _sym,
@@ -276,9 +272,7 @@ def fetch_data(symbol: str) -> bool:
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
         _ana = st.session_state.get("analytics") or {}
-        atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"),
-                                 _ana.get("put_wall_stability_score"),
-                                 _ana.get("call_wall_stability_score"))
+        atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"))
     # Populate the per-ticker strike increment (used by
     # maybe_fire_wall_zone_alerts to size the wall-refresh / big-move
     # thresholds).  Without this, the default 1.0 is used until the first
@@ -290,22 +284,18 @@ def fetch_data(symbol: str) -> bool:
         _strike_inc[_normalize_display_symbol(_sym)] = _si
     st.session_state.etf_analytics = etf_analytics
     if etf_analytics and st.session_state.analytics.get("net_gex", 0) == 0:
-        for key in ("net_gex", "total_call_gex", "total_put_gex",
-                     "max_positive_gex", "max_negative_gex",
-                     "max_positive_gex_strike", "max_negative_gex_strike",
-                     "dealer_position"):
-            if key in etf_analytics:
-                st.session_state.analytics[key] = etf_analytics[key]
-    if etf_analytics and st.session_state.analytics.get("ssvi_surface") is None:
-        st.session_state.analytics["ssvi_surface"] = etf_analytics.get("ssvi_surface")
-    if etf_analytics and st.session_state.analytics.get("atm_iv") is None and etf_analytics.get("atm_iv") is not None:
-        st.session_state.analytics["atm_iv"] = etf_analytics["atm_iv"]
+        from scripts.chain_parser import _merge_etf_analytics
+        st.session_state.analytics = _merge_etf_analytics(st.session_state.analytics, etf_analytics)
     st.session_state.iv_rank = compute_iv_rank(symbol)
     _ticker_analytics_cache[_sym] = {
         "net_gex": st.session_state.analytics.get("net_gex"),
         "atm_iv": st.session_state.analytics.get("atm_iv"),
         "rv": st.session_state.get("underlying_20d_rv", 0.0),
         "iv_rank": st.session_state.iv_rank,
+        "oi_support": st.session_state.analytics.get("oi_support"),
+        "oi_resistance": st.session_state.analytics.get("oi_resistance"),
+        "volume_support": st.session_state.analytics.get("volume_support"),
+        "volume_resistance": st.session_state.analytics.get("volume_resistance"),
     }
     check_alerts(st.session_state.analytics, spot)
     return True
@@ -420,14 +410,6 @@ def check_alerts(analytics: dict, spot: float):
                 _wall_zone = "Resistance"
             elif _pw is not None and _pw - _wall_buffer(_pw) <= spot <= _pw + _wall_buffer(_pw):
                 _wall_zone = "Support"
-            # Flow ratio for Telegram header: rolling 60 s share.
-            _atm_svc = st.session_state.get("atm_option_service")
-            _sym_key = st.session_state.get("symbol")
-            _flow_ratio = None
-            if _atm_svc is not None:
-                _flow_ratio = _atm_svc.get_ticker_flow_metrics_60s(_sym_key)[1]
-            # Absorption for Telegram header
-            _absorption = _atm_svc.get_ticker_absorption(st.session_state.get("symbol")) if _atm_svc else None
             notify_alerts(
                 tg_alerts,
                 symbol=st.session_state.get("symbol"),
@@ -435,8 +417,6 @@ def check_alerts(analytics: dict, spot: float):
                 gex=analytics.get("net_gex"),
                 wall_zone=_wall_zone, pw=_pw, cw=_cw,
                 wall_mark=analytics.get("call_wall_mark") if _wall_zone == "Resistance" else analytics.get("put_wall_mark"),
-                flow_ratio=_flow_ratio,
-                absorption=_absorption,
             )
 
 

@@ -14,7 +14,8 @@ import streamlit as st
 from scripts import telegram_notifier
 from scripts.calculations import parse_option_chain, build_greeks_lookup
 from scripts.client import fetch_option_chain
-from scripts.flow import _ensure_async_loop, run_async, is_market_open, ensure_atm_streaming
+from scripts.flow import _ensure_async_loop, run_async, ensure_atm_streaming
+from scripts._utils import is_market_open
 from scripts._constants import STREAM_SYMBOL_MAP
 from scripts.option_streaming_service import _normalize_display_symbol
 from scripts.app_data import init_client
@@ -78,32 +79,51 @@ def render_news_frag():
         )
 
 
-def _infer_uw_side(bid: float, ask: float, traded: float) -> str:
-    """Infer the aggressor side (ASK/BID/MID) from the *last trade price*
-    position within the bid-ask spread.
+# Float comparison tolerance for mid / prev-price equality in
+# _infer_uw_side (binary floats put (bid+ask)/2 off by ~1e-15).
+_MID_EPS = 1e-9
 
-    Trading at/near the ask means a buyer lifted the offer (demand);
-    at/near the bid means a seller hit the bid (supply); a print at the
-    midpoint (or a missing/out-of-range price) is uninformative -> MID.
-    The caller passes the chain's ``last`` price when the session has one
-    (what actually traded) and falls back to ``mark`` otherwise — the mark
-    is a mid-of-spread theoretical value, so chains without a last price
-    de-grade to MID-heavy inference, which is honest rather than noisy.
+
+def _infer_uw_side(bid: float, ask: float, price: float,
+                   prev_price: float | None = None,
+                   last_direction: str = "") -> str:
+    """Infer the aggressor side for the Unusual Trades scanner (Lee-Ready).
+
+    Rules:
+      - ``price > mid`` -> "buy"  (buyer lifted the offer)
+      - ``price < mid`` -> "sell" (seller hit the bid)
+      - ``price == mid`` -> tick test against the contract's previous
+        traded price: higher -> "buy", lower -> "sell".
+      - ``price == prev_price`` -> repeat ``last_direction`` (the side
+        resolved the last time this contract was seen).
+
+    Returns "buy", "sell", or "" when nothing is informative (missing
+    bid/ask, no previous price, or first-seen contract).  The caller
+    passes the chain's ``last`` price when the session has one (what
+    actually traded) and falls back to ``mark`` otherwise — the mark is
+    a mid-of-spread theoretical value, so it always equals the midpoint
+    when bid/ask are known and degrades to the tick test instead.
     """
-    if bid <= 0 or ask <= 0 or ask <= bid or traded <= 0:
-        return "MID"
-    if traded >= ask:
-        return "ASK"
-    if traded <= bid:
-        return "BID"
+    if bid <= 0 or ask <= 0 or ask <= bid or price <= 0:
+        return ""
     mid = (bid + ask) / 2
-    half = (ask - bid) / 2
-    frac = (traded - mid) / half if half > 0 else 0.0
-    if frac >= 0.3:
-        return "ASK"
-    if frac <= -0.3:
-        return "BID"
-    return "MID"
+    # Float tolerance: with bid/ask on a cent grid the mid sits on a
+    # half-cent grid, and (bid+ask)/2 in binary floats is off by ~1e-15
+    # (e.g. 5.050000000000001), so exact == would never trigger the
+    # tick-test branch.  Treat |price - mid| within _MID_EPS as equal.
+    if price > mid + _MID_EPS:
+        return "buy"
+    if price < mid - _MID_EPS:
+        return "sell"
+    # price == mid: Lee-Ready tick test
+    if prev_price is not None:
+        if price > prev_price + _MID_EPS:
+            return "buy"
+        if price < prev_price - _MID_EPS:
+            return "sell"
+        # price == prev_price: use last direction
+        return last_direction if last_direction in ("buy", "sell") else ""
+    return ""
 
 
 def _uw_fetch_chain(symbol: str, client) -> dict | None:
@@ -212,9 +232,12 @@ def _run_uw_scan(
         s["_uw_scan_date"] = today_iso
         s["_uw_vol_seen"] = {}
         s["_uw_prev_flagged"] = None
+        s["_uw_side_state"] = {}
     vol_seen = s.setdefault("_uw_vol_seen", {})
     prev_flagged = s.get("_uw_prev_flagged")
     first_scan = prev_flagged is None
+    # Per-contract Lee-Ready tick state: key -> {prev_price, last_direction}.
+    side_state = s.setdefault("_uw_side_state", {})
 
     # --- fetch (or reuse cached) chains --------------------------------
     cache = s.setdefault("_uw_chain_cache", {})
@@ -274,15 +297,27 @@ def _run_uw_scan(
                 if opt["type"] == "PUT" and opt["strike"] >= spot:
                     continue
 
+            _ckey = f"{chain['sym']}|{opt['type']}|{opt['strike']:g}|{opt['expiration']}"
+            _st_prev = side_state.get(_ckey) or {}
+            direction = _infer_uw_side(
+                float(opt.get("bid", 0) or 0),
+                float(opt.get("ask", 0) or 0),
+                traded,
+                prev_price=_st_prev.get("prev_price"),
+                last_direction=_st_prev.get("last_direction", ""),
+            )
+            if direction:
+                # Record this print as the next scan's tick-test reference
+                side_state[_ckey] = {
+                    "prev_price": traded,
+                    "last_direction": direction,
+                }
+
             row = {
-                "key": f"{chain['sym']}|{opt['type']}|{opt['strike']:g}|{opt['expiration']}",
+                "key": _ckey,
                 "Ticker": chain["sym"],
                 "Type": opt["type"],
-                "Side": _infer_uw_side(
-                    float(opt.get("bid", 0) or 0),
-                    float(opt.get("ask", 0) or 0),
-                    traded,
-                ),
+                "Side": direction,
                 "Strike": opt["strike"],
                 "Expiration": opt["expiration"],
                 "DTE": dte,
@@ -357,9 +392,11 @@ def _uw_digest_text(new_rows: list[dict], digest_min: float) -> str | None:
         ptxt = f"${premium / 1e6:.2f}M" if premium >= 1e6 else f"${premium / 1e3:.0f}k"
         vold = r.get("Vol Δ")
         vold_txt = f" · +{vold:,} since first seen" if isinstance(vold, int) and vold > 0 else ""
+        _side_lbl = ("BUY" if r["Side"] == "buy"
+                     else "SELL" if r["Side"] == "sell" else "MID")
         lines.append(
             f"{emoji} <b>{r['Ticker']}</b> {r['Expiration'][5:]} {r['Strike']:g}{cp}"
-            f" · {r['Volume']:,} vol · {oi_part} · {ptxt} @ {r['Side']}"
+            f" · {r['Volume']:,} vol · {oi_part} · {ptxt} @ {_side_lbl}"
             f" · Δ{r['Delta']:.2f}{vold_txt}"
         )
     if len(rows) > 10:
@@ -390,8 +427,12 @@ def render_unusual_trades():
             "than churn of existing contracts. **Premium** is "
             "`last x volume x 100` (the theoretical mark when no last trade "
             "exists) &mdash; the estimated money traded. "
-            "**Side** infers the aggressor from the last price sitting at the "
-            "bid or ask; chains with no last trade read MID. "
+            "**Side** is the Lee-Ready aggressor inference: BUY when the "
+            "print is above the bid/ask midpoint, SELL when below; at the "
+            "midpoint it ticks against the contract's previous trade "
+            "(higher = BUY, lower = SELL; unchanged = repeat the last "
+            "side). Contracts with no usable quote or no prior print read "
+            "MID. "
             "**Flags**: <b>NEW</b> = flagged now, wasn't in the previous scan "
             "&middot; <b>VOL Δ</b> = volume added since this contract first "
             "appeared in a scan &middot; <b>ROLL?</b> = same strike/type "
@@ -523,9 +564,9 @@ def render_unusual_trades():
             is_call = row["Type"] == "CALL"
             bg = "#e6f7f1" if is_call else "#fdecec"
             side = row["Side"]
-            if side == "ASK":
+            if side == "buy":
                 side_style = "color: #00cc96; font-weight: 600;"
-            elif side == "BID":
+            elif side == "sell":
                 side_style = "color: #ef5350; font-weight: 600;"
             else:
                 side_style = "color: #ff9800;"
@@ -604,7 +645,8 @@ def render_unusual_trades():
             "Time": datetime.fromtimestamp(w["ts"]).strftime("%H:%M:%S"),
             "Ticker": w["ticker"],
             "Type": w["opt_type"],
-            "Side": "BUY" if w["direction"] == "buy" else "SELL",
+            "Side": ("BUY" if w["direction"] == "buy"
+                     else "SELL" if w["direction"] == "sell" else "MID"),
             "Prints": w["prints"],
             "Strikes": w["strikes"],
             "Strike list": ", ".join(f"${k:g}" for k in w["strike_list"]),
@@ -631,8 +673,8 @@ def render_unusual_trades():
             "Exp": str(p["exp"]),
             "Size": p["size"],
             "Price": p["price"],
-            "Side": ("ASK" if p["direction"] == "buy"
-                     else "BID" if p["direction"] == "sell" else "MID"),
+            "Side": ("BUY" if p["direction"] == "buy"
+                     else "SELL" if p["direction"] == "sell" else "MID"),
             "Premium": p["premium"],
         } for p in print_rows])
         _render_styled_dataframe(

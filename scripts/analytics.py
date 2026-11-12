@@ -92,10 +92,6 @@ def compute_analytics(
     analytics["total_put_gex"] = totals["total_put_gex"]
     analytics["net_gex"] = totals["net_gex"]
     
-    # Calculate wall strength (GEX at wall / total GEX) - use totals dict
-    total_call_gex = totals["total_call_gex"]
-    total_put_gex = totals["total_put_gex"]
-    
     call_wall = _find_call_wall(strikes, spot)
     put_wall = _find_put_wall(strikes, spot)
     analytics["call_wall"] = call_wall
@@ -103,14 +99,6 @@ def compute_analytics(
     
     analytics["call_wall_strength"] = None
     analytics["put_wall_strength"] = None
-    
-    # Calculate wall strength using GEX only (primary metric)
-    total_call_gex = totals["total_call_gex"]
-    total_put_gex = totals["total_put_gex"]
-    total_call_vex = totals.get("total_call_vex", 0)
-    total_put_vex = totals.get("total_put_vex", 0)
-    total_call_cex = totals.get("total_call_cex", 0)
-    total_put_cex = totals.get("total_put_cex", 0)
     
     if call_wall:
         call_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - call_wall))
@@ -120,16 +108,6 @@ def compute_analytics(
             if top_3:
                 top_3_gex_sum = sum(abs(s["call_gex"]) for s in top_3)
                 analytics["call_wall_strength"] = round(top_3_gex_sum, 2)
-                top_3_vex_sum = sum(s["call_vex"] for s in top_3)
-                analytics["call_wall_vex_adjustment"] = round(-top_3_vex_sum * 0.01, 2)
-                analytics["call_wall_vex_score"] = 1 if analytics["call_wall_vex_adjustment"] < 0 else (-1 if analytics["call_wall_vex_adjustment"] > 0 else 0)
-                top_3_cex_sum = sum(s["call_cex"] for s in top_3)
-                analytics["call_wall_cex_adjustment"] = round(-top_3_cex_sum * (30 / 1440), 2)
-                analytics["call_wall_cex_score"] = 1 if analytics["call_wall_cex_adjustment"] < 0 else (-1 if analytics["call_wall_cex_adjustment"] > 0 else 0)
-                # Stability: combined vex+cex direction. |sum| >= 2 -> ±2,
-                # (0, 1] -> 1, [-1, 0) -> -1, exact 0 -> 0.
-                _call_stability_sum = analytics["call_wall_vex_score"] + analytics["call_wall_cex_score"]
-                analytics["call_wall_stability_score"] = 2 if _call_stability_sum > 1 else (1 if _call_stability_sum > 0 else (-2 if _call_stability_sum < -1 else (-1 if _call_stability_sum < 0 else 0)))
     if put_wall:
         put_wall_strike = min(strikes, key=lambda s: abs(s["strike"] - put_wall))
         if put_wall_strike:
@@ -138,16 +116,6 @@ def compute_analytics(
             if top_3:
                 top_3_gex_sum = sum(abs(s.get("put_gex", 0)) for s in top_3)
                 analytics["put_wall_strength"] = round(top_3_gex_sum, 2)
-                top_3_vex_sum = sum(s.get("put_vex", 0) for s in top_3)
-                analytics["put_wall_vex_adjustment"] = round(top_3_vex_sum * 0.01, 2)
-                analytics["put_wall_vex_score"] = 1 if top_3_vex_sum > 0 else (-1 if top_3_vex_sum < 0 else 0)
-                top_3_cex_sum = sum(s.get("put_cex", 0) for s in top_3)
-                analytics["put_wall_cex_adjustment"] = round(top_3_cex_sum * (30 / 1440), 2)
-                analytics["put_wall_cex_score"] = 1 if analytics["put_wall_cex_adjustment"] > 0 else (-1 if analytics["put_wall_cex_adjustment"] < 0 else 0)
-                # Stability: combined vex+cex direction. |sum| >= 2 -> ±2,
-                # (0, 1] -> 1, [-1, 0) -> -1, exact 0 -> 0.
-                _stability_sum = analytics["put_wall_vex_score"] + analytics["put_wall_cex_score"]
-                analytics["put_wall_stability_score"] = 2 if _stability_sum > 1 else (1 if _stability_sum > 0 else (-2 if _stability_sum < -1 else (-1 if _stability_sum < 0 else 0)))
 
     _call_wall_opts = [e for e in data if e["strike"] == call_wall and e["type"] == "CALL"] if call_wall else []
     _put_wall_opts = [e for e in data if e["strike"] == put_wall and e["type"] == "PUT"] if put_wall else []
@@ -194,6 +162,37 @@ def compute_analytics(
 
     largest_gamma = max(strikes, key=lambda s: s["total_gamma"], default=None)
     analytics["largest_gamma_strike"] = largest_gamma["strike"] if largest_gamma else None
+
+    # OI Support and Resistance (top OTM OI within 20 strikes of ATM)
+    atm_strike = min(strikes, key=lambda s: abs(s["strike"] - spot))["strike"] if strikes else None
+    oi_support = None
+    oi_resistance = None
+    if atm_strike:
+        above_atm = [s for s in strikes if s["strike"] >= atm_strike and s["strike"] <= atm_strike + 20]
+        top_call_oi_otm = max((s for s in above_atm if s["strike"] > spot), key=lambda s: s["call_oi"], default=None)
+        if top_call_oi_otm:
+            oi_resistance = top_call_oi_otm["strike"]
+        below_atm = [s for s in strikes if s["strike"] <= atm_strike and s["strike"] >= atm_strike - 20]
+        top_put_oi_otm = max((s for s in below_atm if s["strike"] < spot), key=lambda s: s["put_oi"], default=None)
+        if top_put_oi_otm:
+            oi_support = top_put_oi_otm["strike"]
+    analytics["oi_support"] = oi_support
+    analytics["oi_resistance"] = oi_resistance
+
+    # Volume Support and Resistance (top OTM Volume within 20 strikes of ATM)
+    volume_support = None
+    volume_resistance = None
+    if atm_strike:
+        above_atm = [s for s in strikes if s["strike"] >= atm_strike and s["strike"] <= atm_strike + 20]
+        top_call_vol_otm = max((s for s in above_atm if s["strike"] > spot), key=lambda s: s["call_volume"], default=None)
+        if top_call_vol_otm:
+            volume_resistance = top_call_vol_otm["strike"]
+        below_atm = [s for s in strikes if s["strike"] <= atm_strike and s["strike"] >= atm_strike - 20]
+        top_put_vol_otm = max((s for s in below_atm if s["strike"] < spot), key=lambda s: s["put_volume"], default=None)
+        if top_put_vol_otm:
+            volume_support = top_put_vol_otm["strike"]
+    analytics["volume_support"] = volume_support
+    analytics["volume_resistance"] = volume_resistance
 
     expected_pin = _find_expected_pin(strikes, spot, data_full)
     analytics["expected_pin"] = expected_pin
@@ -279,19 +278,16 @@ def _find_call_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[floa
     if not above:
         return None
     
-    # Take top 3 by GEX magnitude for weighted average
-    top_walls = sorted([s for s in above if s["call_gex"] != 0], key=lambda s: abs(s["call_gex"]), reverse=True)[:3]
+    # Top 1 GEX call-side OTM strike (Resistance)
+    top_wall = max([s for s in above if s["call_gex"] != 0], key=lambda s: abs(s["call_gex"]), default=None)
     
-    if not top_walls:
-        top_walls = [s for s in above if s.get("call_oi", 0) > 0]
+    if top_wall is None:
+        top_wall = max([s for s in above if s.get("call_oi", 0) > 0], key=lambda s: s.get("call_oi", 0), default=None)
     
-    if not top_walls:
+    if top_wall is None:
         return max(above, key=lambda s: s["strike"])["strike"]
     
-    total_gex = sum(abs(s["call_gex"]) for s in top_walls)
-    if total_gex > 0:
-        return sum(s["strike"] * abs(s["call_gex"]) / total_gex for s in top_walls)
-    return max(top_walls, key=lambda s: s.get("call_oi", 0))["strike"]
+    return top_wall["strike"]
 
 
 def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
@@ -311,109 +307,16 @@ def _find_put_wall(strikes: list[dict[str, Any]], spot: float) -> Optional[float
     if not below:
         return None
     
-    # Take top 3 by GEX magnitude for weighted average
-    top_walls = sorted([s for s in below if s.get("put_gex", 0) != 0], key=lambda s: abs(s.get("put_gex", 0)), reverse=True)[:3]
+    # Top 1 GEX put-side OTM strike (Support)
+    top_wall = max([s for s in below if s.get("put_gex", 0) != 0], key=lambda s: abs(s.get("put_gex", 0)), default=None)
     
-    if not top_walls:
-        top_walls = [s for s in below if s.get("put_oi", 0) > 0]
+    if top_wall is None:
+        top_wall = max([s for s in below if s.get("put_oi", 0) > 0], key=lambda s: s.get("put_oi", 0), default=None)
     
-    if not top_walls:
+    if top_wall is None:
         return max(below, key=lambda s: s["strike"])["strike"]
     
-    total_gex = sum(abs(s.get("put_gex", 0)) for s in top_walls)
-    if total_gex > 0:
-        return sum(s["strike"] * abs(s.get("put_gex", 0)) / total_gex for s in top_walls)
-    return max(top_walls, key=lambda s: s.get("put_oi", 0))["strike"]
-
-
-def _find_call_wall_cex(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    """Find the call wall using CEX (Charm Exposure) - sensitivity to time decay."""
-    if not strikes:
-        return None
-    
-    above = [s for s in strikes if s["strike"] > spot]
-    if not above:
-        return None
-    
-    total_call_cex = sum(abs(s.get("call_cex", 0)) for s in above)
-    threshold = max(100000, total_call_cex * 0.005) if total_call_cex > 0 else 100000
-    
-    with_cex = [s for s in above if abs(s.get("call_cex", 0)) >= threshold]
-    if with_cex:
-        top_walls = sorted(with_cex, key=lambda s: abs(s["call_cex"]), reverse=True)[:3]
-        total_cex = sum(abs(s["call_cex"]) for s in top_walls)
-        if total_cex > 0:
-            return sum(s["strike"] * abs(s["call_cex"]) / total_cex for s in top_walls)
-        return with_cex[0]["strike"]
-    
-    with_any_cex = [s for s in above if s.get("call_cex", 0) != 0]
-    if with_any_cex:
-        return max(with_any_cex, key=lambda s: abs(s["call_cex"]))["strike"]
-    
-    return max(above, key=lambda s: s["strike"])["strike"]
-
-
-def _find_put_wall_cex(strikes: list[dict[str, Any]], spot: float) -> Optional[float]:
-    """Find the put wall using CEX (Charm Exposure) - sensitivity to time decay."""
-    if not strikes:
-        return None
-    
-    below = [s for s in strikes if s["strike"] < spot]
-    if not below:
-        return None
-    
-    total_put_cex = sum(abs(s.get("put_cex", 0)) for s in below)
-    threshold = max(100000, total_put_cex * 0.005) if total_put_cex > 0 else 100000
-    
-    with_cex = [s for s in below if abs(s.get("put_cex", 0)) >= threshold]
-    if with_cex:
-        top_walls = sorted(with_cex, key=lambda s: abs(s.get("put_cex", 0)), reverse=True)[:3]
-        total_cex = sum(abs(s.get("put_cex", 0)) for s in top_walls)
-        if total_cex > 0:
-            return sum(s["strike"] * abs(s.get("put_cex", 0)) / total_cex for s in top_walls)
-        return with_cex[0]["strike"]
-    
-    with_any_cex = [s for s in below if s.get("put_cex", 0) != 0]
-    if with_any_cex:
-        return max(with_any_cex, key=lambda s: abs(s.get("put_cex", 0)))["strike"]
-    
-    return max(below, key=lambda s: s["strike"])["strike"]
-    if not strikes:
-        return None
-    
-    below = [s for s in strikes if s["strike"] < spot]
-    if not below:
-        return None
-    
-    # Calculate total put GEX+VEX+CEX for threshold
-    total_put_gex = sum(abs(s.get("put_gex", 0)) for s in below)
-    total_put_vex = sum(abs(s.get("put_vex", 0)) for s in below)
-    total_put_cex = sum(abs(s.get("put_cex", 0)) for s in below)
-    total_put_combined = total_put_gex + total_put_vex + total_put_cex
-    
-    # Threshold: minimum 1M or 0.5% of total put combined exposure
-    threshold = max(1000000, total_put_combined * 0.005) if total_put_combined > 0 else 1000000
-    
-    # Find all strikes above threshold (check absolute combined magnitude)
-    with_exposure = [s for s in below if abs(s.get("put_gex", 0)) + abs(s.get("put_vex", 0)) + abs(s.get("put_cex", 0)) >= threshold]
-    if with_exposure:
-        # Return weighted average of top 3 walls by combined GEX+VEX+CEX
-        top_walls = sorted(with_exposure, key=lambda s: abs(s.get("put_gex", 0)) + abs(s.get("put_vex", 0)) + abs(s.get("put_cex", 0)), reverse=True)[:3]
-        total_combined = sum(abs(s.get("put_gex", 0)) + abs(s.get("put_vex", 0)) + abs(s.get("put_cex", 0)) for s in top_walls)
-        if total_combined > 0:
-            return sum(s["strike"] * (abs(s.get("put_gex", 0)) + abs(s.get("put_vex", 0)) + abs(s.get("put_cex", 0))) / total_combined for s in top_walls)
-        return with_exposure[0]["strike"]
-    
-    # Fallback: check absolute GEX without threshold
-    with_any_gex = [s for s in below if s.get("put_gex", 0) != 0]
-    if with_any_gex:
-        return max(with_any_gex, key=lambda s: abs(s.get("put_gex", 0)))["strike"]
-    
-    # Last resort: use OI
-    with_oi = [s for s in below if s.get("put_oi", 0) > 0]
-    if with_oi:
-        return max(with_oi, key=lambda s: s.get("put_oi", 0))["strike"]
-    return max(below, key=lambda s: s["strike"])["strike"]
+    return top_wall["strike"]
 
 
 def _find_gamma_flip(strikes: list[dict[str, Any]]) -> Optional[float]:

@@ -1,8 +1,6 @@
 import asyncio
 import logging
-import math
 import threading
-import time as _time_mod
 
 from scripts._constants import STREAM_RECONNECT_DELAY, STREAM_RETRY_DELAY, STREAM_RETRY_BACKOFF
 
@@ -10,49 +8,15 @@ logger = logging.getLogger(__name__)
 
 import pandas as pd
 from schwab.streaming import StreamClient
-from websockets.exceptions import ConnectionClosed
 
 from scripts._constants import MAX_BAR_ROWS
-from scripts.option_streaming_service import _get_stream_symbol
-
-
-def _exp_neg(x: float) -> float:
-    """Fast ``e^(-x)`` helper."""
-    return math.exp(-x)
-
-
-def _median_of(values) -> float:
-    """Median of an iterable (always non-empty by the callers' contract)."""
-    if not values:
-        return 0.0
-    s = sorted(values)
-    n = len(s)
-    mid = n // 2
-    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
-
-
-# Width (seconds) of the edge bands used by the robust liquidity-flow window
-# diff: resting depth is median-estimated over the newest/oldest 5 s of the
-# trailing 60 s window instead of differencing the two extreme samples, so
-# one large OPTIONS_BOOK refresh at a window edge cannot dominate the reading.
-_LIQUIDITY_FLOW_BAND_SECS = 5.0
 
 
 class StreamingService:
-    """Subscribes to Schwab LEVELONE_EQUITIES plus OPTIONS_BOOK for the chart
-    symbol and every tracked ticker.  Extracts raw tick data
-    (LAST_PRICE + TRADE_TIME_MILLIS + LAST_SIZE) plus BID_PRICE/ASK_PRICE to
-    infer trade direction, and aggregates into 1-second OHLCV bars with a
-    buy/sell volume split for delta.
-
-    The Level 2 OPTIONS books (keyed per underlying stream symbol) are the
-    single source for book_imbalance / flow_speed / flow_acceleration — see
-    ``trend_data``.  OPTIONS_BOOK requires full OCC option-contract symbols
-    (not underlyings), so the ATM call/put contracts for every tracked
-    ticker are subscribed (see ``set_book_contracts``) and their resting
-    volume is aggregated per underlying so the per-ticker Order Flow grid
-    and the wall-zone / Telegram alerts all consume L2 book pressure rather
-    than option-quote-derived imbalance.
+    """Subscribes to Schwab LEVELONE_EQUITIES for the chart symbol.
+    Extracts raw tick data (LAST_PRICE + TRADE_TIME_MILLIS + LAST_SIZE)
+    plus BID_PRICE/ASK_PRICE to infer trade direction, and aggregates into
+    1-second OHLCV bars with a buy/sell volume split for delta.
     """
 
     def __init__(self, async_client, loop):
@@ -86,28 +50,8 @@ class StreamingService:
         self._bid_price: float | None = None
         self._ask_price: float | None = None
         self._last_price: float | None = None
-
-        # Level 2 order book snapshots.  OPTIONS_BOOK messages are keyed by
-        # OCC option-contract symbol (e.g. "AAPL  260905C00195000"); the
-        # per-underlying subscription/aggregation maps are kept alongside.
-        self._book_symbols: set[str] = set()        # underlying stream symbols to keep books for
-        self._books_options: dict[str, dict] = {}   # OCC contract symbol -> latest OPTIONS_BOOK content msg
-        # underlying stream symbol -> [OCC contract symbols] to subscribe, and
-        # the reverse lookup (both padded and space-stripped OCC forms) used to
-        # route incoming book messages back to their underlying for aggregation.
-        self._book_contracts: dict[str, list[str]] = {}
-        self._contract_to_underlying: dict[str, str] = {}
-        self._subscribed_contracts: set[str] = set()  # contracts currently subscribed via OPTIONS_BOOK
-        # Per-symbol L2 book-imbalance history: stream_symbol -> list[(ts, ratio)],
-        # pruned to the last 60s, used to derive flow_speed / flow_acceleration.
-        self._book_imb_history: dict[str, list] = {}
-        # Per-symbol L2 resting-depth history: stream_symbol -> list[(ts,
-        # bid_vol, ask_vol) of depth at the best levels], pruned to 60s,
-        # used to derive liquidity_flow (net liquidity added/drained over
-        # the window, side-aware so a bid/ask rotation is distinguishable
-        # from a genuine drain).
-        self._book_depth_history: dict[str, list] = {}
-        self._prev_trend: dict[str, str] = {}        # stream_symbol -> last trend label (reversal)
+        self._prev_price: float | None = None
+        self._last_direction: str = ""
 
     @property
     def symbol(self) -> str | None:
@@ -126,11 +70,6 @@ class StreamingService:
     def has_data(self) -> bool:
         with self._lock:
             return self._current_bar is not None or bool(self._bars)
-
-    @property
-    def last_error(self) -> str | None:
-        with self._lock:
-            return self._last_error
 
     def get_candles(self) -> pd.DataFrame:
         """Return snapshot of completed 1s bars plus the live incomplete bar.
@@ -165,6 +104,8 @@ class StreamingService:
             self._bid_price = None
             self._ask_price = None
             self._last_price = None
+            self._prev_price = None
+            self._last_direction = ""
         self._symbol = symbol
         self._running = True
         self._stream_task = asyncio.run_coroutine_threadsafe(
@@ -241,13 +182,43 @@ class StreamingService:
                 # Unknown direction — split evenly
                 bar["buy_vol"] += size // 2
                 bar["sell_vol"] += size - (size // 2)
+        
+        # Store current price and direction for next tick's Lee-Ready comparison
+        self._prev_price = price
+        self._last_direction = direction
 
     def _infer_dir(self, price: float) -> str:
         if self._bid_price is not None and self._ask_price is not None:
             spread = self._ask_price - self._bid_price
             if spread > 0:
                 mid = (self._ask_price + self._bid_price) / 2
-                return "buy" if price >= mid else "sell"
+                if price > mid:
+                    return "buy"
+                elif price < mid:
+                    return "sell"
+                else:
+                    # Price = mid: use Lee-Ready logic
+                    if self._prev_price is not None:
+                        if price > self._prev_price:
+                            return "buy"
+                        elif price < self._prev_price:
+                            return "sell"
+                        else:
+                            # Price = prev_price: use last direction
+                            return self._last_direction
+                    return ""
+        
+        # Lee-Ready classification using tick rule
+        # If no bid/ask available, use price momentum
+        if self._prev_price is not None:
+            if price > self._prev_price:
+                return "buy"
+            elif price < self._prev_price:
+                return "sell"
+            else:
+                # Price = prev_price: use last direction
+                return self._last_direction
+        
         return ""
 
     async def _stream(self):
@@ -293,31 +264,8 @@ class StreamingService:
                     except Exception:
                         pass
 
-        # ---- Level 2 book handlers (one message may carry many symbols) - #
-        def _options_book_handler(msg):
-            with self._lock:
-                for content in (msg.get("content") or []):
-                    # Schwab book content carries the symbol either as the
-                    # numeric SYMBOL field (0) or as the non-numeric "key"
-                    # member; some feeds omit one or the other.
-                    sym = content.get("SYMBOL") or content.get("key")
-                    if sym is None:
-                        continue
-                    # Store per OCC contract; also index by the stripped form
-                    # in case the root padding is dropped in some messages.
-                    self._books_options[sym] = content
-                    self._books_options[sym.replace(" ", "")] = content
-                    # Route back to the underlying so the aggregated
-                    # book-imbalance history for the ticker advances.
-                    und = self._contract_to_underlying.get(sym)
-                    if und is None:
-                        und = self._contract_to_underlying.get(sym.replace(" ", ""))
-                    if und is not None:
-                        self._update_book_imbalance(und)
-
         # Add handlers before subscribing
         sc.add_level_one_equity_handler(_l1_handler)
-        sc.add_options_book_handler(_options_book_handler)
 
         try:
             await sc.login()
@@ -331,7 +279,6 @@ class StreamingService:
         while self._running and self._symbol:
             try:
                 await sc.level_one_equity_subs([self._symbol])
-                await self._subscribe_books(sc)
             except Exception as e:
                 with self._lock:
                     self._last_error = f"Subs failed: {e}"
@@ -357,7 +304,6 @@ class StreamingService:
                         while self._running and self._symbol:
                             try:
                                 await sc.level_one_equity_subs([self._symbol])
-                                await self._subscribe_books(sc)
                             except Exception:
                                 await asyncio.sleep(STREAM_RETRY_BACKOFF)
                                 continue
@@ -398,458 +344,3 @@ class StreamingService:
         re-subscribe its LEVELONE_OPTIONS after the equity feed reconnects."""
         self._on_reconnect_cbs.append(callback)
 
-    # ------------------------------------------------------------------ #
-    # Level 2 book trend (subscribed per tracked ticker)
-    # ------------------------------------------------------------------ #
-
-    def subscribe_book_symbols(self, stream_symbols: list[str]) -> None:
-        """Declare the set of underlying stream symbols we want to keep
-        Level 2 books for.
-
-        Safe to call frequently (e.g. once per grid refresh): it diffs
-        against the current key set and drops book state (histories and
-        snapshots) for symbols that are no longer tracked.  The actual
-        OPTIONS_BOOK subscription symbols are the ATM contracts registered
-        via ``set_book_contracts`` — callers should update both together.
-        """
-        want = [s.upper().lstrip("$") for s in stream_symbols if s]
-        with self._lock:
-            to_add = [s for s in want if s not in self._book_symbols]
-            to_remove = [s for s in self._book_symbols if s not in want]
-            for s in to_add:
-                self._book_symbols.add(s)
-            for s in to_remove:
-                self._book_symbols.discard(s)
-                self._book_imb_history.pop(s, None)
-                self._book_depth_history.pop(s, None)
-                self._prev_trend.pop(s, None)
-                for c in self._book_contracts.get(s, []):
-                    self._books_options.pop(c, None)
-                    self._books_options.pop(c.replace(" ", ""), None)
-
-    def set_book_contracts(self, contracts: dict[str, list[str]]) -> None:
-        """Register the OCC option-contract symbols to stream via
-        OPTIONS_BOOK, keyed by underlying stream symbol, e.g.::
-
-            {"SPY": ["SPY  260905C00550000", "SPY  260905P00550000"]}
-
-        OPTIONS_BOOK subscriptions require full OCC option-contract symbols,
-        not underlyings, so this mapping is what makes the book feed arrive.
-        Safe to call on every grid refresh: when the registered set changes
-        it issues a full ``OPTIONS_BOOK`` SUBS (Schwab's SUBS replaces the
-        feed, so dropped contracts are torn down server-side) plus UNSUBS for
-        any contracts that moved.  Books and history stay keyed by the
-        *underlying* stream symbol, so ``trend_data`` and the Order Flow grid
-        are unchanged.
-        """
-        want = {}
-        for und, occ in (contracts or {}).items():
-            und = und.upper().lstrip("$")
-            occ = [c for c in occ if c]
-            if und and occ:
-                want[und] = occ
-        with self._lock:
-            if want == self._book_contracts:
-                return
-            self._book_contracts = want
-            self._contract_to_underlying = {
-                c: und for und, occ in want.items() for c in occ
-            }
-            # Also route space-stripped OCC symbols (some book messages drop
-            # the root padding) back to the same underlying.
-            self._contract_to_underlying.update({
-                c.replace(" ", ""): und
-                for und, occ in want.items() for c in occ
-            })
-            canonical = {c for occ in want.values() for c in occ}
-            to_unsub = [c for c in self._subscribed_contracts if c not in canonical]
-            for c in to_unsub:
-                # Drop stale snapshots for contracts that changed strike/expiry.
-                self._books_options.pop(c, None)
-                self._books_options.pop(c.replace(" ", ""), None)
-            self._subscribed_contracts = canonical
-            # Full authoritative set: SUBS replaces the feed, so always send
-            # the complete current set to self-heal any dropped subscription.
-            to_sub = [c for occ in want.values() for c in occ]
-            sc = self._sc
-            loop = self._loop
-        if sc is not None and loop is not None and (to_sub or to_unsub):
-            asyncio.run_coroutine_threadsafe(
-                self._apply_book_subscriptions(to_sub, to_unsub), loop)
-
-    async def _apply_book_subscriptions(self, subscribe, unsubscribe):
-        sc = self._sc
-        if sc is None:
-            return
-        # Socket not open yet (initial login or re-login in progress): skip.
-        # All subscribed OCC contracts are re-subscribed after the next login
-        # via _subscribe_books, so nothing is lost by dropping this send.
-        if getattr(sc, "_socket", None) is None:
-            return
-        try:
-            if subscribe:
-                await sc.options_book_subs(subscribe)
-            if unsubscribe:
-                await sc.options_book_unsubs(unsubscribe)
-        except ConnectionClosed:
-            # Expected race: the websocket was torn down (e.g. re-login or a
-            # normal server-side close) between scheduling this send and it
-            # running — "received 1000 (OK); then sent 1000 (OK)".  The
-            # stream loop re-subscribes all contracts after the next login
-            # via _subscribe_books, so nothing is lost.
-            pass
-        except Exception as e:
-            # Don't wedge silently: if a SUBS is rejected (bad symbol, budget,
-            # socket race) the next refresh's full SUBS retries it.  Surface
-            # it so the failure is visible instead of invisible.
-            logger.error("[StreamingService] OPTIONS_BOOK subscribe error: %s", e)
-
-    async def _subscribe_books(self, sc: StreamClient):
-        """Subscribe OPTIONS_BOOK for the ATM OCC contracts of the chart
-        symbol and every tracked ticker.  Called from ``_stream`` right
-        after login and after each re-login so tracked-ticker books survive
-        reconnects."""
-        with self._lock:
-            underlyings = set(self._book_symbols)
-            if self._symbol:
-                underlyings.add(self._symbol)
-            contracts = []
-            seen = set()
-            for und in underlyings:
-                for c in self._book_contracts.get(und, []):
-                    if c not in seen:
-                        seen.add(c)
-                        contracts.append(c)
-        if contracts:
-            await sc.options_book_subs(contracts)
-
-    def _book_volume_for_symbol(self, symbol: str) -> tuple[float, float] | None:
-        """Sum Level-2 OPTIONS-book resting volume for one underlying stream
-        symbol, aggregated across the ATM call/put OCC contracts registered
-        for it.  Uses a **weighted imbalance** that combines two factors:
-
-        1. **Depth proximity** — levels closer to the midpoint (best bid / best
-           ask) decay exponentially by level index:  ``w_level = e^(-λ * idx)``
-           with λ = ln(2)/3 so the 3rd level is halved.
-        2. **Price-distance** — volume farther from the mid-price gets lower
-           weight:  ``w_price = 1 / (1 + |level_price - mid| / mid)``.
-
-        Returns ``(weighted_bid_vol, weighted_ask_vol)`` or None when no
-        contract book has arrived yet.
-
-        Assumes *self._lock* is held (called from handlers and trend_data).
-        """
-        contracts = self._book_contracts.get(symbol)
-        if not contracts:
-            return None
-        bid_vol = 0.0
-        ask_vol = 0.0
-        found = False
-        _LAMBDA = 0.231049  # ln(2)/3  →  half-life at level index 3
-        for c in contracts:
-            content = self._books_options.get(c)
-            if content is None:
-                content = self._books_options.get(c.replace(" ", ""))
-            if not content:
-                continue
-            found = True
-            # Compute mid-price from best available quotes; fallback to 1.0
-            bids = content.get("BIDS") or []
-            asks = content.get("ASKS") or []
-            best_bid_price = None
-            best_ask_price = None
-            if bids:
-                try:
-                    best_bid_price = float(bids[0].get("PRICE") or 0)
-                except (TypeError, ValueError):
-                    pass
-            if asks:
-                try:
-                    best_ask_price = float(asks[0].get("PRICE") or 0)
-                except (TypeError, ValueError):
-                    pass
-            if best_bid_price and best_ask_price and (best_bid_price + best_ask_price) > 0:
-                mid = (best_bid_price + best_ask_price) / 2.0
-            else:
-                mid = 1.0
-            # Weighted ask volume — asks sorted ascending; idx 0 = best ask
-            for idx, ask in enumerate(asks):
-                try:
-                    vol = float(ask.get("TOTAL_VOLUME") or 0)
-                    if vol <= 0:
-                        continue
-                    # Level proximity: best ask (idx=0) gets weight 1.0
-                    level_w = _exp_neg(_LAMBDA * idx)
-                    # Price-distance from mid
-                    ask_price = float(ask.get("PRICE") or 0)
-                    if ask_price > 0:
-                        price_w = mid / (mid + abs(ask_price - mid))
-                    else:
-                        price_w = 1.0
-                    ask_vol += vol * level_w * price_w
-                except (TypeError, ValueError):
-                    pass
-            # Weighted bid volume — bids sorted descending; idx 0 = best bid
-            for idx, bid in enumerate(bids):
-                try:
-                    vol = float(bid.get("TOTAL_VOLUME") or 0)
-                    if vol <= 0:
-                        continue
-                    level_w = _exp_neg(_LAMBDA * idx)
-                    bid_price = float(bid.get("PRICE") or 0)
-                    if bid_price > 0:
-                        price_w = mid / (mid + abs(bid_price - mid))
-                    else:
-                        price_w = 1.0
-                    bid_vol += vol * level_w * price_w
-                except (TypeError, ValueError):
-                    pass
-        if not found:
-            return None
-        return bid_vol, ask_vol
-
-    def _book_imbalance_for_symbol(self, symbol: str) -> float | None:
-        """Aggregate Level-2 bid/ask volume imbalance for one stream symbol,
-        summing across the OPTIONS book only.  Returns a ratio in
-        [-1, 1] (positive = bullish pressure) or None when no book yet.
-
-        Assumes *self._lock* is held (called from handlers and trend_data).
-        """
-        vols = self._book_volume_for_symbol(symbol)
-        if vols is None:
-            return None
-        bid_vol, ask_vol = vols
-        total = bid_vol + ask_vol
-        if total <= 0:
-            return None
-        return (bid_vol - ask_vol) / total
-
-    def _update_book_imbalance(self, symbol: str) -> None:
-        """Recompute and record the book-imbalance and resting-depth history
-        for a symbol.
-
-        Assumes *self._lock* is held (called from the book handlers).
-        """
-        vols = self._book_volume_for_symbol(symbol)
-        if vols is None:
-            return
-        bid_vol, ask_vol = vols
-        total = bid_vol + ask_vol
-        if total <= 0:
-            return
-        now = _time_mod.time()
-        hist = self._book_imb_history.setdefault(symbol, [])
-        hist.append((now, (bid_vol - ask_vol) / total))
-        cutoff = now - 60
-        while hist and hist[0][0] < cutoff:
-            hist.pop(0)
-        depth = self._book_depth_history.setdefault(symbol, [])
-        depth.append((now, bid_vol, ask_vol))
-        while depth and depth[0][0] < cutoff:
-            depth.pop(0)
-
-    def _flow_speed_and_accel(self, symbol: str) -> tuple[float, float]:
-        """Derive flow_speed / flow_acceleration from the L2 book-imbalance
-        series.
-
-        ``flow_speed`` is the first difference of the ratio over the trailing
-        60 s window (``history[-1] - history[0]``).  ``flow_acceleration`` is
-        the second difference: the change over the recent half of the window
-        minus the change over the older half.  The halves are split at the
-        exact **time** midpoint of the window (``mid_ts``), so older/recent
-        cover equal wall-clock spans even when book updates arrive in bursts
-        rather than uniformly.  Sign semantics match the legacy option-flow
-        momentum math so the same >0.3 thresholds apply downstream.
-
-        Assumes *self._lock* is held.  The 60 s pruning is handled by
-        ``_update_book_imbalance`` on each book update, so this method
-        skips redundant cleanup (avoiding double pop(0) on the shared list).
-        """
-        history = self._book_imb_history.get(symbol)
-        if not history or len(history) < 2:
-            return 0.0, 0.0
-        # NOTE: _update_book_imbalance already prunes the history to the
-        # trailing 60 s on every book update, so no second cleanup needed.
-        # first difference of the ratio over the trailing 60 s window
-        flow_speed = history[-1][1] - history[0][1]
-        # second difference: (change over recent half) - (change over older
-        # half).  Split at the window's midpoint by timestamp so the halves
-        # are time-balanced regardless of sampling cadence.  `mid` is the
-        # first sample at/after mid_ts, clamped to keep both halves non-empty.
-        mid_ts = history[0][0] + (history[-1][0] - history[0][0]) / 2.0
-        mid = len(history) - 1
-        for i in range(1, len(history)):
-            if history[i][0] >= mid_ts:
-                mid = i
-                break
-        mid = max(1, min(len(history) - 1, mid))
-        previous_flow = history[mid - 1][1] - history[0][1]
-        recent_flow = history[-1][1] - history[mid][1]
-        flow_acceleration = recent_flow - previous_flow
-        return flow_speed, flow_acceleration
-
-    def _liquidity_flow_sides(self, symbol: str) -> tuple[float | None, float | None, float | None]:
-        """Side-aware, noise-robust net L2 liquidity change over the trailing
-        60 s: ``(total, bid, ask)`` net depth change in contracts at the best
-        levels.
-
-        Rather than differencing the two extreme samples of the window — a
-        single large OPTIONS_BOOK refresh at either edge would dominate the
-        result — the resting depth is taken as the median over the newest
-        and oldest ``_LIQUIDITY_FLOW_BAND_SECS`` bands of the window and
-        the band medians are differenced.  The bid/ask split separates a
-        genuine one-sided drain (break risk) from a rotation (bids pulled
-        while asks refill), which nets to zero in the total.
-
-        Positive = liquidity is being posted (book refilling); negative =
-        liquidity is being consumed (book draining).  Returns
-        ``(None, None, None)`` when fewer than 2 depth samples exist.
-
-        Assumes *self._lock* is held.
-        """
-        depth = self._book_depth_history.get(symbol)
-        if not depth or len(depth) < 2:
-            return None, None, None
-        now = _time_mod.time()
-        try:
-            while depth and depth[0][0] < now - 60:
-                depth.pop(0)
-        except Exception:
-            return None, None, None
-        if len(depth) < 2:
-            return None, None, None
-        old_cut = depth[0][0] + _LIQUIDITY_FLOW_BAND_SECS
-        new_cut = depth[-1][0] - _LIQUIDITY_FLOW_BAND_SECS
-        # Both bands are always non-empty: the first sample is <= old_cut
-        # and the last is >= new_cut by construction.  When the whole
-        # history spans less than one band the bands overlap and the flow
-        # correctly collapses toward 0 instead of amplifying churn.
-        # Median (not mean) within each band so a lone oversized refresh
-        # inside a burst cannot skew the band's depth estimate.
-        old = [(b, a) for (t, b, a) in depth if t <= old_cut]
-        new = [(b, a) for (t, b, a) in depth if t >= new_cut]
-        old_bid = _median_of([b for b, _ in old])
-        old_ask = _median_of([a for _, a in old])
-        new_bid = _median_of([b for b, _ in new])
-        new_ask = _median_of([a for _, a in new])
-        bid_flow = new_bid - old_bid
-        ask_flow = new_ask - old_ask
-        return bid_flow + ask_flow, bid_flow, ask_flow
-
-    def _liquidity_flow(self, symbol: str) -> float | None:
-        """Net L2 liquidity change over the trailing 60 s: change in resting
-        depth at the best levels (contracts of liquidity added [+]/drained
-        [-]), computed from robust band medians of the window edges (see
-        ``_liquidity_flow_sides``).  Returns None when fewer than 2 depth
-        samples exist.
-
-        Positive = liquidity is being posted (book refilling); negative =
-        liquidity is being consumed (book draining — a break risk).
-
-        Assumes *self._lock* is held.
-        """
-        total, _, _ = self._liquidity_flow_sides(symbol)
-        return total
-
-    def trend_data(self, stream_symbol: str) -> dict:
-        """L2-sourced trend snapshot for a stream symbol, matching the dict
-
-        shape previously produced by
-        ``StreamingService.get_ticker_trend_data``:
-
-              {trend, book_imbalance, flow_speed, flow_acceleration,
-               liquidity_flow, bid_liquidity_flow, ask_liquidity_flow,
-               book_depth, trend_reversal, book_imbalance_history,
-               flow_history}
-
-        ``book_imbalance`` is the current L2 OPTIONS-book bid/ask volume
-        ratio, aggregated across the ATM call/put OCC contracts subscribed
-        for the symbol (``_books_options`` — see
-        ``_book_imbalance_for_symbol``); ``flow_speed`` /
-        ``flow_acceleration`` are the first and second differences of that
-        ratio over the trailing 60s window; ``liquidity_flow`` is the net
-        change in resting depth at the best levels over the same window
-        (contracts added/drained), computed from robust band medians of the
-        window edges (``_liquidity_flow_sides``) with the per-side
-        ``bid_liquidity_flow`` / ``ask_liquidity_flow`` split alongside, and
-        ``book_depth`` is the current aggregated resting depth for
-        magnitude context.  All trend thresholds (>±0.3)
-        match the option-flow derivation, so downstream consumers
-        (``flow.maybe_fire_wall_zone_alerts`` and the grid Trend column,
-        plus the Telegram formatter) consume the trend and trend_reversal
-        fields directly.
-        """
-        with self._lock:
-            ratio = self._book_imbalance_for_symbol(stream_symbol)
-            history = list(self._book_imb_history.get(stream_symbol) or [])
-            flow_speed, flow_acceleration = self._flow_speed_and_accel(stream_symbol)
-            liquidity_flow, bid_liq_flow, ask_liq_flow = self._liquidity_flow_sides(stream_symbol)
-            _depth_vols = self._book_volume_for_symbol(stream_symbol)
-            book_depth = (_depth_vols[0] + _depth_vols[1]) if _depth_vols else None
-
-            # trend direction from L2 book pressure:
-            # 1) Determine the raw directional label from book_imbalance + flow_speed
-            if ratio is None or len(history) < 2:
-                raw_trend = "flat"
-            elif ratio > 0.3 and flow_speed > 0:
-                raw_trend = "up"
-            elif ratio < -0.3 and flow_speed < 0:
-                raw_trend = "down"
-            else:
-                raw_trend = "flat"
-
-            # 2) Upgrade to strong (UP/DOWN) when book_imbalance is strong
-            #    AND flow_speed shows momentum — acceleration magnitude
-            #    boosts the label but is NOT a sign gate (a strong trend
-            #    remains valid even while acceleration dips negative).
-            if raw_trend == "up" and abs(flow_speed) > 0.2:
-                trend = "UP"
-            elif raw_trend == "down" and abs(flow_speed) > 0.2:
-                trend = "DOWN"
-            else:
-                trend = raw_trend
-
-            prev = self._prev_trend.get(stream_symbol)
-            self._prev_trend[stream_symbol] = trend
-
-        reversal: str | None = None
-        if prev is not None and prev != trend:
-            # Detect bullish/bearish reversals across all directional
-            # transitions (not just plain down→up / up→down), so that
-            # strong trends that flip direction also fire reversals.
-            _was_bullish = prev in ("up", "UP", "bullish")
-            _was_bearish = prev in ("down", "DOWN", "bearish")
-            _is_bullish = trend in ("up", "UP", "bullish")
-            _is_bearish = trend in ("down", "DOWN", "bearish")
-            if _was_bearish and _is_bullish:
-                reversal = "bullish"
-            elif _was_bullish and _is_bearish:
-                reversal = "bearish"
-
-        now = _time_mod.time()
-        book_imbalance_history = [(t, r) for (t, r) in history if t >= now - 60]
-        return {
-            "trend": trend,
-            "book_imbalance": ratio,
-            "flow_speed": flow_speed,
-            "flow_acceleration": flow_acceleration,
-            "liquidity_flow": liquidity_flow,
-            "bid_liquidity_flow": bid_liq_flow,
-            "ask_liquidity_flow": ask_liq_flow,
-            "book_depth": book_depth,
-            "trend_reversal": reversal,
-            "book_imbalance_history": book_imbalance_history,
-            "flow_history": [],
-        }
-
-
-    def get_ticker_trend_data(self, display_symbol: str) -> dict:
-        """L2-sourced trend dict for a display symbol.
-
-        Convenience wrapper: maps the display symbol to its stream symbol
-        (the L2 OPTIONS-book key) via ``_get_stream_symbol`` and delegates
-        to ``trend_data``.  Returns neutral defaults (trend flat, book_imbalance
-        None, flow_speed and flow_acceleration 0) when no book has been
-        subscribed, since ``trend_data`` guards the empty-history case.
-        """
-        return self.trend_data(_get_stream_symbol(display_symbol))

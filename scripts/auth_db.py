@@ -132,23 +132,6 @@ class AuthError(Exception):
     """User-facing login/approval failure."""
 
 
-def get_user(user_id: int) -> dict | None:
-    with closing(_connect()) as conn:
-        _ensure_schema(conn)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT id, email, created_at, last_login FROM users WHERE id = ?",
-            (user_id,),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def user_count() -> int:
-    with closing(_connect()) as conn:
-        _ensure_schema(conn)
-        return int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-
-
 # ---------------- magic-link tokens & access requests ----------------
 
 _TOKEN_TTL_MINUTES = 30

@@ -25,9 +25,6 @@ from typing import Any, Iterable, Optional
 
 from scripts import config
 
-from scripts._constants import (FLOW_RATIO_GREEN_THRESHOLD, FLOW_RATIO_RED_THRESHOLD,
-                         ABSORPTION_HIGH, ABSORPTION_LOW)
-
 
 logger = logging.getLogger(__name__)
 
@@ -111,10 +108,7 @@ def notify_alerts(
     cw: Optional[float] = None,
     wall_mark: Optional[float] = None,
     trend_alert: Optional[str] = None,
-    absorption: Optional[float] = None,
     absorbed_at_wall: Optional[float] = None,
-    net_flow: Optional[float] = None,
-    flow_ratio: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
     """Push a batch of alert strings to Telegram as one message.
@@ -131,7 +125,7 @@ def notify_alerts(
     # actionable when the market is closed, and stale quotes would only
     # re-fire dupes overnight.
     try:
-        from scripts.flow import is_market_open
+        from scripts._utils import is_market_open
         if not is_market_open():
             logger.debug("market closed — suppressing Telegram alerts for %s",
                           symbol or "?")
@@ -140,8 +134,7 @@ def notify_alerts(
         logger.warning("is_market_open check failed: %s", exc)
     text = _format(alerts, symbol=symbol, spot=spot, gex=gex,
                     wall_zone=wall_zone, pw=pw, cw=cw, wall_mark=wall_mark, trend_alert=trend_alert,
-                    absorption=absorption, absorbed_at_wall=absorbed_at_wall,
-                    net_flow=net_flow, flow_ratio=flow_ratio)
+                    absorbed_at_wall=absorbed_at_wall)
     return send_telegram(text, disable_notification=disable_notification)
 
 
@@ -171,6 +164,10 @@ def diff_alerts(
         "spot": spot,
         "wall_zone": None,
         "atm_strike": analytics.get("atm_strike"),
+        "oi_support": analytics.get("oi_support"),
+        "oi_resistance": analytics.get("oi_resistance"),
+        "volume_support": analytics.get("volume_support"),
+        "volume_resistance": analytics.get("volume_resistance"),
     }
 
     if not prev:
@@ -220,11 +217,8 @@ def diff_alerts(
     return new_alerts, cur
 
 
-def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, absorption: Optional[float] = None, absorbed_at_wall: Optional[float] = None, net_flow: Optional[float] = None, flow_ratio: Optional[float] = None) -> str:
+def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[float], gex: Optional[float] = None, wall_zone: Optional[str] = None, pw: Optional[float] = None, cw: Optional[float] = None, wall_mark: Optional[float] = None, trend_alert: Optional[str] = None, absorbed_at_wall: Optional[float] = None, oi_support: Optional[float] = None, oi_resistance: Optional[float] = None, volume_support: Optional[float] = None, volume_resistance: Optional[float] = None) -> str:
     """Build an HTML-formatted message from a list of alert strings."""
-    # Trend alerts carry the flow-metric signal line, so those metrics are
-    # folded into it instead of duplicated as separate header rows.
-    _compact = trend_alert is not None
     header_lines = []
     if symbol:
         header_lines.append(f"<b>{_escape_html(symbol)}</b>")
@@ -238,17 +232,25 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         wall_val = pw if wall_zone == "Support" else cw
         wall_tag = f"${wall_val:,.2f}" if wall_val is not None else "pw" if wall_zone == "Support" else "cw"
         header_lines.append(f"{emoji} Near {wall_zone} {wall_tag}")
-    if absorption is not None and not _compact:
-        emoji = "🟢" if absorption >= ABSORPTION_HIGH else "🔴" if absorption < ABSORPTION_LOW else "🟡"
-        header_lines.append(f"{emoji} Absorption: <code>{absorption:,.0f}</code> vol/$1")
+        # Show OI and Volume support/resistance when in support zone
+        if wall_zone == "Support" and (oi_support is not None or volume_support is not None):
+            support_lines = []
+            if oi_support is not None:
+                support_lines.append(f"OI Support: <code>${oi_support:,.2f}</code>")
+            if volume_support is not None:
+                support_lines.append(f"Vol Support: <code>${volume_support:,.2f}</code>")
+            if support_lines:
+                header_lines.append(" · ".join(support_lines))
+        elif wall_zone == "Resistance" and (oi_resistance is not None or volume_resistance is not None):
+            resistance_lines = []
+            if oi_resistance is not None:
+                resistance_lines.append(f"OI Resistance: <code>${oi_resistance:,.2f}</code>")
+            if volume_resistance is not None:
+                resistance_lines.append(f"Vol Resistance: <code>${volume_resistance:,.2f}</code>")
+            if resistance_lines:
+                header_lines.append(" · ".join(resistance_lines))
     if absorbed_at_wall is not None:
         header_lines.append(f"🟡 Wall absorbed: <code>{absorbed_at_wall:,.0f}</code> contracts")
-    if net_flow is not None and not _compact:
-        emoji = "🟢" if net_flow > 0 else "🔴" if net_flow < 0 else "🟡"
-        header_lines.append(f"{emoji} Net Flow (60s): <code>{net_flow:+,.0f}</code>")
-    if flow_ratio is not None and not _compact:
-        emoji = "🟢" if flow_ratio > FLOW_RATIO_GREEN_THRESHOLD else "🔴" if flow_ratio < FLOW_RATIO_RED_THRESHOLD else "🟡"
-        header_lines.append(f"{emoji} Flow Ratio: <code>{flow_ratio:.2f}</code>")
     body_lines = []
     if trend_alert:
         _buy = trend_alert in ("bullish", "up")
@@ -257,10 +259,6 @@ def _format(alerts: Iterable[str], *, symbol: Optional[str], spot: Optional[floa
         _segs = [f"{emoji} <b>{trend_alert.upper()}</b> - {suggestion}"]
         if wall_mark is not None:
             _segs[0] += f" ${wall_mark:,.2f}"
-        if net_flow is not None:
-            _segs.append(f"Net {net_flow:+,.0f}")
-        if absorption is not None:
-            _segs.append(f"Abs {absorption:,.0f}")
         body_lines.append(" · ".join(_segs))
     body_lines.extend(f"{_escape_html(a)}" for a in alerts if a)
     body = "\n".join(body_lines)

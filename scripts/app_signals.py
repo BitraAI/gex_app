@@ -60,21 +60,11 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     # Update ATM service with walls so the Order Flow grid displays them
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
-        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"),
-                                 analytics.get("put_wall_stability_score"),
-                                 analytics.get("call_wall_stability_score"))
+        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
 
     if etf_analytics:
-        if analytics.get("net_gex", 0) == 0:
-            for key in ("net_gex", "total_call_gex", "total_put_gex",
-                         "max_positive_gex", "max_negative_gex",
-                         "max_positive_gex_strike", "max_negative_gex_strike",
-                         "dealer_position"):
-                if key in etf_analytics:
-                    analytics[key] = etf_analytics[key]
-        if analytics.get("ssvi_surface") is None:
-            analytics["ssvi_surface"] = etf_analytics.get("ssvi_surface")
-            analytics["iv_skew"] = etf_analytics.get("iv_skew")
+        from scripts.chain_parser import _merge_etf_analytics
+        analytics = _merge_etf_analytics(analytics, etf_analytics)
 
     rv = run_async(get_20d_rv(st.session_state.client, symbol))
     if rv is None:
@@ -100,9 +90,7 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
         _put_wall = analytics.get("put_wall")
         _call_wall = analytics.get("call_wall")
         if _put_wall is not None or _call_wall is not None:
-            atm_svc.set_ticker_walls(_sym, _put_wall, _call_wall,
-                                     analytics.get("put_wall_stability_score"),
-                                     analytics.get("call_wall_stability_score"))
+            atm_svc.set_ticker_walls(_sym, _put_wall, _call_wall)
         # For index symbols (SPX, RUT, NDX) set the correct spot via
         # the REST option chain parse — the streaming feed only gives
         # us the ETF proxy (SPY, IWM, QQQ) price.
@@ -254,6 +242,7 @@ def render_trade_signals():
             st.info("Load data to see strategy signals")
             return
         if not s.get("strikes"):
+            st.info("No options data available. Please load data from the Options Data tab first.")
             return
         with st.expander("How to read these signals", expanded=False):
             st.markdown("Data &mdash; Each row is a single option (Type + Strike + Expiration). Only **OTM + ATM** options with positive OI and price are used.\n\n**VRP** &mdash; `(IV - RV) x 100`. &gt;+5% option expensive (sell premium). &lt;-2% option cheap (buy premium).\n\n**IV Skew (25D)** &mdash; `Put IV - Call IV`. Positive -> puts expensive. Negative -> calls expensive.\n\n**IV Rank** &mdash; Where the latest daily return ranks in the trailing 52-week range of daily returns. &gt;70 high (sell premium), &lt;30 low (buy premium).\n\n**Market Bias** &mdash; Auto-detected from gamma flip, net GEX, IV skew, OI wall, IV rank.\n\n**Strategies** &mdash; Long/Short Calls/Puts, Spreads, Iron Condor, Butterfly, Straddle, Strangle, Calendar.")

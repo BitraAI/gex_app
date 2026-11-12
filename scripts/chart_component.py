@@ -1143,12 +1143,15 @@ def build_init_data(
         })
 
     if indicators:
+        vol_map = buy_map = sell_map = None
         for name in indicators:
             cfg = INDICATORS.get(name)
             if cfg is None:
                 continue
+            if name in ("Volume", "Volume Profile", "VWAP"):
+                if vol_map is None:
+                    vol_map, buy_map, sell_map = _build_volume_maps(candles, et_offset)
             if name == "Volume":
-                vol_map, buy_map, sell_map = _build_volume_maps(candles, et_offset)
                 buy_vol = []
                 sell_vol = []
                 for c in cd:
@@ -1233,7 +1236,6 @@ def build_init_data(
                     series_list.append({"type": "Line", "key": "ema50", "data": ema50_data, "options": {"color": cfg.get("color", "#ab63fa"), "lineWidth": cfg.get("lineWidth", 2), "lastValueVisible": False, "priceLineVisible": False}})
                 continue
             if name == "Volume Profile":
-                vol_map, buy_map, sell_map = _build_volume_maps(candles, et_offset)
                 vp_vols = []
                 for c in cd:
                     vol = vol_map.get(c["time"], 0)
@@ -1243,7 +1245,6 @@ def build_init_data(
                     vp_vols.append({"time": c["time"], "high": c["high"], "low": c["low"], "buy": float(bv), "sell": float(sv)})
                 continue
             if name == "VWAP":
-                vol_map, _bw, _sw = _build_volume_maps(candles, et_offset)
                 vw_times = [c["time"] for c in cd]
                 vw_highs = [c["high"] for c in cd]
                 vw_lows = [c["low"] for c in cd]

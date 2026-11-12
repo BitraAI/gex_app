@@ -229,7 +229,7 @@ class AtmOptionVolumeService:
         # Ticker symbols whose front expiration has been explicitly verified
         # via the Schwab option-expiration-chain API.  Used to avoid
         # re-fetching on every grid render.
-        self._expiration_verified: set[str] = set()
+        # REMOVED: _expiration_verified - was added but never read
 
         # Ticker symbols whose put/call walls have been fetched via a full
         # option-chain REST query.  Used to pace the lazy background fetch
@@ -367,7 +367,6 @@ class AtmOptionVolumeService:
             self._ticker_flows.clear()
             self._sym_to_ticker.clear()
             self._last_sub_ok_set = None
-            self._expiration_verified.clear()
             self._walls_verified.clear()
             self._wall_refresh_ts.clear()
 
@@ -442,10 +441,11 @@ class AtmOptionVolumeService:
                     "delta_buy": 0.0,
                     "delta_sell": 0.0,
                     "flow_history": [],
-                    "vol_history": deque(),
                     "spot_history": deque(),
                     "exec_history": deque(),
                     "atm_delta_flow_history": deque(),
+                    "last_size": 0,
+                    "expiration_flows": [],
                     "flow_speed": 0,
                     "flow_acceleration": 0,
                     "book_imbalance": None,
@@ -864,6 +864,129 @@ class AtmOptionVolumeService:
                 return None
             return ticker["spot"]
 
+    def get_ticker_net_flow(self, display_symbol: str) -> tuple[float, float, float, float]:
+        """Calculate Net Flow and Flow Ratio from the 4 most active expirations with non-zero volume.
+        
+        Net Flow = (bullish_flow - bearish_flow) where:
+        - bullish_flow = (call_buy x contracts x 100 x delta) + (put_sell x contracts x 100 x delta)
+        - bearish_flow = (call_sell x contracts x 100 x delta) + (put_buy x contracts x 100 x delta)
+        
+        Flow Ratio = bullish_flow / (bullish_flow + bearish_flow)
+        
+        Returns (Net Flow, Flow Ratio, Rolling Bullish, Rolling Bearish) tuple.
+        Rolling values are the 1-minute aggregation of raw contract counts weighted by delta.
+        """
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return 0.0, 0.0, 0.0, 0.0
+            
+            last_size = ticker.get("last_size", 0)
+            if last_size <= 0:
+                return 0.0, 0.0, 0.0, 0.0
+            
+            # Get expiration flows
+            ef = ticker.get("expiration_flows", [])
+            if not ef:
+                return 0.0, 0.0, 0.0, 0.0
+            
+            # Sort by volume (descending) and take top 4 with non-zero volume
+            sorted_exp = sorted(ef, key=lambda x: x.get("volume", 0), reverse=True)
+            top4 = [e for e in sorted_exp if e.get("volume", 0) > 0][:4]
+            
+            if not top4:
+                return 0.0, 0.0, 0.0, 0.0
+            
+            # Use most recent last_size for contract_size scaling
+            contract_size = last_size * 100
+            net_flow = 0.0
+            total_bullish = 0.0
+            total_bearish = 0.0
+            rolling_bullish = 0.0
+            rolling_bearish = 0.0
+            now = _time_mod.time()
+            for exp_data in top4:
+                # Get actual deltas for calls and puts
+                cd = ticker.get("call_delta")
+                pd = ticker.get("put_delta")
+                if not isinstance(cd, (int, float)) or cd == 0:
+                    cd = 0.5
+                if not isinstance(pd, (int, float)) or pd == 0:
+                    pd = -0.5
+                
+                # Calculate flow from raw contract counts
+                call_buy = exp_data.get("call_buy", 0)
+                call_sell = exp_data.get("call_sell", 0)
+                put_buy = exp_data.get("put_buy", 0)
+                put_sell = exp_data.get("put_sell", 0)
+                
+                # Bullish flow: buying calls + selling puts
+                bullish = (call_buy * cd + put_sell * abs(pd)) * contract_size
+                # Bearish flow: selling calls + buying puts
+                bearish = (call_sell * cd + put_buy * abs(pd)) * contract_size
+                
+                net_flow += (bullish - bearish)
+                total_bullish += bullish
+                total_bearish += bearish
+                
+                # Sum rolling 1-minute flow from deque (raw counts already weighted by delta and last_size)
+                # contract_size = last_size * 100 is embedded in the deque values
+                rb = exp_data.get("bullish_raw", deque())
+                rb_total = sum(v for _, v in rb if now - _ < 60)
+                rolling_bullish += rb_total
+                
+                rb2 = exp_data.get("bearish_raw", deque())
+                rb2_total = sum(v for _, v in rb2 if now - _ < 60)
+                rolling_bearish += rb2_total
+            
+            # Calculate flow ratio: bullish / (bullish + bearish)
+            flow_ratio = total_bullish / (total_bullish + total_bearish) if (total_bullish + total_bearish) > 0 else 0.0
+            
+            return net_flow, flow_ratio, rolling_bullish, rolling_bearish
+
+    def get_ticker_snapshot(self, display_symbol: str) -> dict:
+        """Return a dict with all relevant per-ticker data in a single lock acquisition."""
+        with self._lock:
+            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
+            if ticker is None:
+                return {}
+            call = call_bid = call_ask = None
+            if ticker.get("call_mark"):
+                call = ticker.get("call_mark")
+            elif ticker.get("call_bid") is not None and ticker.get("call_ask") is not None:
+                call_bid = ticker["call_bid"]
+                call_ask = ticker["call_ask"]
+                call = (call_bid + call_ask) / 2 if call_bid <= call_ask else None
+            
+            put = put_bid = put_ask = None
+            if ticker.get("put_mark"):
+                put = ticker.get("put_mark")
+            elif ticker.get("put_bid") is not None and ticker.get("put_ask") is not None:
+                put_bid = ticker["put_bid"]
+                put_ask = ticker["put_ask"]
+                put = (put_bid + put_ask) / 2 if put_bid <= put_ask else None
+            
+            return {
+                "spot": ticker.get("spot", 0.0),
+                "opt_prices": {
+                    "call_bid": call_bid,
+                    "call_ask": call_ask,
+                    "call": call,
+                    "put_bid": put_bid,
+                    "put_ask": put_ask,
+                    "put": put,
+                },
+                "wall_prices": {
+                    "put_wall_call_price": ticker.get("put_wall_call_price"),
+                    "call_wall_put_price": ticker.get("call_wall_put_price"),
+                    "call_wall_call_price": ticker.get("call_wall_call_price"),
+                    "put_wall_put_price": ticker.get("put_wall_put_price"),
+                },
+                "put_wall": ticker.get("put_wall"),
+                "call_wall": ticker.get("call_wall"),
+                "last_size": ticker.get("last_size", 0),
+            }
+
     def get_ticker_atm_strike(self, display_symbol: str) -> float | None:
         """Return the front-expiration ATM strike for a tracked ticker,
         or None if not tracked / no spot known yet.
@@ -971,9 +1094,6 @@ class AtmOptionVolumeService:
             if ticker is not None:
                 old_exp = ticker.get("expiration")
                 ticker["expiration"] = expiration
-                self._expiration_verified.add(
-                    _normalize_display_symbol(display_symbol)
-                )
                 # Re-subscribe if expiration changed to correct contracts
                 if old_exp != expiration and self._running and self._expiration:
                     sc = self._stream_client
@@ -1274,7 +1394,6 @@ class AtmOptionVolumeService:
                     "delta_buy": 0.0,
                     "delta_sell": 0.0,
                     "flow_history": [],
-                    "vol_history": deque(),
                     "spot_history": deque(),
                     "exec_history": deque(),
                     "atm_delta_flow_history": deque(),
@@ -1859,6 +1978,16 @@ class AtmOptionVolumeService:
         behind the Net Flow / Flow Ratio displays and alerts."""
         if ticker is None:
             return
+        
+        # Determine expiration from trade_sym (OCC symbol) or use front expiration
+        exp = None
+        if trade_sym:
+            _, _, ey, em, ed = _parse_stream_option_symbol(trade_sym)
+            if ey > 0:
+                exp = f"{ey:04d}-{em:02d}-{ed:02d}"
+        if not exp:
+            exp = ticker.get("expiration") or self._expiration
+        
         if opt_type == "CALL":
             direction = self._infer_dir(price, ticker["call_bid"], ticker["call_ask"])
         else:
@@ -1876,6 +2005,9 @@ class AtmOptionVolumeService:
                        float(price), int(size), direction))
             while len(ph) > _PRINT_HISTORY_MAX:
                 ph.popleft()
+        
+        # Store last trade size for Level-1 data correlation
+        ticker["last_size"] = int(size)
 
         # Per-trade delta resolution, best source first:
         #   1. the traded contract's own live delta from the stream,
@@ -1953,6 +2085,73 @@ class AtmOptionVolumeService:
         elif signed < 0:
             ticker["delta_sell"] = ticker.get("delta_sell", 0.0) - signed
 
+        # Track per-expiration flow for Net Flow calculation across 4 expirations
+        # Store raw contract counts per expiration for later Net Flow calculation
+        # with last_size and delta. Format: list of dicts with expiration, 
+        # call_buy, call_sell, put_buy, put_sell counts
+        if exp:
+            ef = ticker.setdefault("expiration_flows", [])
+            # Find or create entry for this expiration
+            found = None
+            for entry in ef:
+                if entry["expiration"] == exp:
+                    found = entry
+                    break
+            if not found:
+                found = {
+                    "expiration": exp,
+                    "volume": 0,
+                    "call_buy": 0, "call_sell": 0,
+                    "put_buy": 0, "put_sell": 0,
+                    "bullish_raw": deque(),
+                    "bearish_raw": deque(),
+                }
+                ef.append(found)
+            
+            # Accumulate raw contract counts
+            found["volume"] += size
+            last_size = ticker.get("last_size", 0)
+            if last_size <= 0:
+                last_size = 1
+            if direction == "buy":
+                if opt_type == "CALL":
+                    found["call_buy"] += size
+                else:
+                    found["put_sell"] += size
+            elif direction == "sell":
+                if opt_type == "CALL":
+                    found["call_sell"] += size
+                else:
+                    found["put_buy"] += size
+            
+            # Track rolling 1-minute raw flow for institutional activity detection
+            now = _time_mod.time()
+            cd = ticker.get("call_delta")
+            pd = ticker.get("put_delta")
+            if not isinstance(cd, (int, float)) or cd == 0:
+                cd = 0.5
+            if not isinstance(pd, (int, float)) or pd == 0:
+                pd = -0.5
+            
+            # Calculate raw flow contribution for this trade (includes last_size and 100 contract multiplier)
+            if direction == "buy":
+                trade_bullish = (opt_type == "CALL" and size * last_size * 100 * cd) or (opt_type == "PUT" and size * last_size * 100 * abs(pd))
+                trade_bearish = 0.0
+            else:
+                trade_bearish = (opt_type == "CALL" and size * last_size * 100 * cd) or (opt_type == "PUT" and size * last_size * 100 * abs(pd))
+                trade_bullish = 0.0
+            
+            # Add to rolling windows (raw counts, not multiplied by contract_size yet)
+            # contract_size will be applied during Net Flow calculation
+            found["bullish_raw"].append((now, trade_bullish))
+            found["bearish_raw"].append((now, trade_bearish))
+            
+            # Clean old entries (> 60 seconds)
+            while found["bullish_raw"] and found["bullish_raw"][0][0] < now - 60:
+                found["bullish_raw"].popleft()
+            while found["bearish_raw"] and found["bearish_raw"][0][0] < now - 60:
+                found["bearish_raw"].popleft()
+
         # Rolling 60 s window of delta-weighted cumulative ATM volume for
         # order absorption (delta over the window is the recent aggressive
         # flow) and of the cumulative net executed flow (delta_buy - delta_sell)
@@ -1986,10 +2185,34 @@ class AtmOptionVolumeService:
         while dvh_avg and dvh_avg[0][0] < now - 30:
             dvh_avg.popleft()
 
-    def _infer_dir(self, price: float, bid: float | None, ask: float | None) -> str:
+    def _infer_dir(self, price: float, bid: float | None, ask: float | None, prev_price: float | None = None, last_direction: str = "") -> str:
         if bid is not None and ask is not None:
             spread = ask - bid
             if spread > 0:
                 mid = (ask + bid) / 2
-                return "buy" if price >= mid else "sell"
+                if price > mid:
+                    return "buy"
+                elif price < mid:
+                    return "sell"
+                else:
+                    # Price = mid: use Lee-Ready tick test
+                    if prev_price is not None:
+                        if price > prev_price:
+                            return "buy"
+                        elif price < prev_price:
+                            return "sell"
+                        else:
+                            # Price = prev_price: use last direction
+                            return last_direction
+                    return ""
+        
+        # No valid spread available - use tick test if prev_price known
+        if price is not None and price > 0 and prev_price is not None:
+            if price > prev_price:
+                return "buy"
+            elif price < prev_price:
+                return "sell"
+            else:
+                return last_direction
+        
         return ""

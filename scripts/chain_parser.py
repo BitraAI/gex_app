@@ -19,6 +19,31 @@ from scripts.client import (
 logger = logging.getLogger(__name__)
 
 
+def _merge_etf_analytics(analytics: dict, etf_analytics: dict) -> dict:
+    """Merge ETF analytics into main analytics (GEX, surface, IV)."""
+    if analytics.get("net_gex", 0) == 0:
+        for key in ("net_gex", "total_call_gex", "total_put_gex",
+                    "max_positive_gex", "max_negative_gex",
+                    "max_positive_gex_strike", "max_negative_gex_strike",
+                    "dealer_position"):
+            if key in etf_analytics:
+                analytics[key] = etf_analytics[key]
+    if analytics.get("ssvi_surface") is None:
+        ssvi = etf_analytics.get("ssvi_surface")
+        if ssvi is not None:
+            analytics["ssvi_surface"] = ssvi
+    if analytics.get("atm_iv") is None:
+        iv = etf_analytics.get("atm_iv")
+        if iv is not None:
+            analytics["atm_iv"] = iv
+    # app_signals.py also merges iv_skew (for its own use)
+    if analytics.get("iv_skew") is None:
+        skew = etf_analytics.get("iv_skew")
+        if skew is not None:
+            analytics["iv_skew"] = skew
+    return analytics
+
+
 async def fetch_and_parse_chain(
     client,
     symbol: str,
@@ -151,17 +176,7 @@ async def compute_analytics_for_symbol(
     
     # Merge ETF analytics if available
     if result["etf_analytics"]:
-        if analytics.get("net_gex", 0) == 0:
-            for key in ("net_gex", "total_call_gex", "total_put_gex",
-                        "max_positive_gex", "max_negative_gex",
-                        "max_positive_gex_strike", "max_negative_gex_strike",
-                        "dealer_position"):
-                if key in result["etf_analytics"]:
-                    analytics[key] = result["etf_analytics"][key]
-        if analytics.get("ssvi_surface") is None and result["etf_analytics"].get("ssvi_surface") is not None:
-            analytics["ssvi_surface"] = result["etf_analytics"]["ssvi_surface"]
-        if analytics.get("atm_iv") is None and result["etf_analytics"].get("atm_iv") is not None:
-            analytics["atm_iv"] = result["etf_analytics"]["atm_iv"]
+        analytics = _merge_etf_analytics(analytics, result["etf_analytics"])
     
     # Compute additional metrics
     rv = 0.0
@@ -193,64 +208,3 @@ async def compute_analytics_for_symbol(
         "is_index_symbol": is_index,
     }
 
-
-async def compute_analytics_light(
-    client,
-    symbol: str,
-) -> dict[str, Any] | None:
-    """Compute light analytics (no IV rank/RV) for frequent wall refreshes.
-    
-    This is optimized for the "lightweight recompute" path used by
-    _compute_walls_for_symbol in flow.py.
-    
-    Args:
-        client: Schwab async client
-        symbol: Ticker symbol to analyze
-        
-    Returns:
-        dict with keys:
-            - analytics: Analytics dictionary (without iv_rank/rv)
-            - spot: Underlying spot price
-            - data: Parsed option chain data
-    """
-    # Normalize symbol
-    _sym = symbol.upper().lstrip("$")
-    is_index = _sym in STREAM_SYMBOL_MAP
-    
-    # Fetch and parse chain
-    result = await fetch_and_parse_chain(
-        client, symbol, include_quotes=True, is_index_symbol=is_index
-    )
-    
-    if not result["data"] or result["spot"] <= 0:
-        logger.warning("No option data for %s", symbol)
-        return None
-    
-    # Compute analytics
-    data = result["data"]
-    spot = result["spot"]
-    r = result["r"]
-    q = result["q"]
-    
-    analytics = compute_analytics(data, spot, r=r, q=q)
-    
-    # Merge ETF analytics if available
-    if result["etf_analytics"]:
-        if analytics.get("net_gex", 0) == 0:
-            for key in ("net_gex", "total_call_gex", "total_put_gex",
-                        "max_positive_gex", "max_negative_gex",
-                        "max_positive_gex_strike", "max_negative_gex_strike",
-                        "dealer_position"):
-                if key in result["etf_analytics"]:
-                    analytics[key] = result["etf_analytics"][key]
-        if analytics.get("ssvi_surface") is None and result["etf_analytics"].get("ssvi_surface") is not None:
-            analytics["ssvi_surface"] = result["etf_analytics"]["ssvi_surface"]
-        if analytics.get("atm_iv") is None and result["etf_analytics"].get("atm_iv") is not None:
-            analytics["atm_iv"] = result["etf_analytics"]["atm_iv"]
-    
-    return {
-        "analytics": analytics,
-        "spot": spot,
-        "data": data,
-        "sym": _sym,
-    }

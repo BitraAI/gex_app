@@ -11,6 +11,60 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
+
+def is_market_open() -> bool:
+    """Return True if US regular equity trading hours are currently open
+    (09:30-16:00 ET, Mon-Fri, excluding major holidays)."""
+    _ny = ZoneInfo("America/New_York")
+    now = datetime.now(_ny)
+    if now.weekday() >= 5:  # Sat/Sun
+        return False
+    # Check for US major holidays (fixed dates and observed dates)
+    holidays = [
+        (1, 1),    # New Year's Day
+        (1, 15),   # MLK Day (3rd Mon in Jan - approximated)
+        (2, 19),   # Presidents Day (3rd Mon in Feb - approximated)
+        (5, 27),   # Memorial Day (Last Mon in May - approximated)
+        (6, 19),   # Juneteenth
+        (7, 4),    # Independence Day
+        (9, 2),    # Labor Day (1st Mon in Sep - approximated)
+        (10, 14),  # Columbus Day (2nd Mon in Oct - approximated)
+        (11, 11),  # Veterans Day
+        (11, 28),  # Thanksgiving (4th Thu in Nov - approximated)
+        (12, 25),  # Christmas
+    ]
+    if (now.month, now.day) in holidays:
+        return False
+    # Check for observed holidays (when holiday falls on weekend)
+    if now.month == 1 and now.day == 16 and now.weekday() == 0:  # MLK observed
+        return False
+    if now.month == 2 and now.day == 20 and now.weekday() == 0:  # Presidents observed
+        return False
+    if now.month == 5 and now.day == 28 and now.weekday() == 0:  # Memorial observed
+        return False
+    if now.month == 9 and now.day == 3 and now.weekday() == 0:  # Labor observed
+        return False
+    if now.month == 10 and now.day == 15 and now.weekday() == 0:  # Columbus observed
+        return False
+    if now.month == 11 and now.day == 29 and now.weekday() == 0:  # Thanksgiving observed
+        return False
+    if now.month == 12 and now.day == 26 and now.weekday() == 0:  # Christmas observed
+        return False
+    if now.month == 12 and now.day == 31 and now.weekday() == 0:  # NY observed
+        return False
+    if now.month == 1 and now.day == 2 and now.weekday() == 0:  # NY observed
+        return False
+    if now.month == 7 and now.day == 5 and now.weekday() == 0:  # July 4 observed
+        return False
+    if now.month == 9 and now.day == 3 and now.weekday() == 0:  # Labor observed
+        return False
+    # Check if time is within trading hours (09:30-16:00 ET)
+    hour = now.hour
+    minute = now.minute
+    if hour < 9 or (hour == 9 and minute < 30) or hour >= 16:
+        return False
+    return True
+
 import pandas as pd
 
 
@@ -62,13 +116,6 @@ _NY_TZ = ZoneInfo("America/New_York")
 _secs_since_930_cache: tuple[tuple[int, int], float] | None = None  # ((hh, mm), secs)
 
 
-def is_market_open() -> bool:
-    """Return True if US regular equity trading hours are currently open
-    (09:30-16:00 ET, Mon-Fri, excluding major holidays)."""
-    from scripts.flow import is_market_open as _is_market_open
-    return _is_market_open()
-
-
 def secs_since_market_open() -> float:
     """Seconds elapsed since 09:30 ET today, clamped to the 09:30-16:00
     session (0..23400).  Cached per minute — recomputed for thousands of
@@ -93,70 +140,6 @@ def is_otm_or_atm(e: dict, spot: float) -> bool:
 def is_itm_or_atm(e: dict, spot: float) -> bool:
     """True for ITM-or-ATM options relative to ``spot`` (shared moneyness filter)."""
     return (e["type"] == "CALL" and e["strike"] <= spot) or (e["type"] == "PUT" and e["strike"] >= spot)
-
-
-def flow_metrics(call_buy, call_sell, put_buy, put_sell) -> tuple[int, int, float | None]:
-    """(net_flow, total_flow, flow_ratio) from the streamed per-side volumes.
-
-    ``None`` inputs count as 0; ``flow_ratio`` is None when there is no flow
-    at all yet (Telegram headers omit it, the Order Flow grid maps it to 0)."""
-    cb = call_buy or 0
-    cs = call_sell or 0
-    pb = put_buy or 0
-    ps = put_sell or 0
-    total = cb + ps + pb + cs
-    ratio = round((cb + ps) / total, 2) if total > 0 else None
-    net = cb + ps - pb - cs
-    return net, total, ratio
-
-
-def flow_metrics_delta_weighted(
-    call_buy, call_sell, put_buy, put_sell,
-    call_delta, put_delta
-) -> tuple[float, int, float | None]:
-    """Delta-weighted (net_flow, total_flow, flow_ratio) from the streamed per-side volumes.
-
-    Weights each side by the traded contract's delta to measure delta exposure
-    rather than raw contract count. This provides a more accurate view of
-    market sentiment by accounting for options' sensitivity to underlying moves.
-
-    Example:
-        If a call trade has delta=0.6 and size=10 contracts:
-        - Bullish delta exposure = 0.6 * 10 = 6
-        - This counts as 6 "delta-weighted" contracts toward bullish flow
-
-    Args:
-        call_buy, call_sell, put_buy, put_sell: Raw contract volumes
-        call_delta: Average delta for call trades (positive, 0-1)
-        put_delta: Average delta for put trades (positive magnitude, 0-1)
-
-    Returns:
-        net_flow: Delta-weighted net exposure (bullish - bearish)
-        total_flow: Total delta-weighted volume
-        flow_ratio: Bullish share of delta exposure (0.0-1.0)
-
-    Notes:
-        - Call buys + Put sells = bullish delta
-        - Put buys + Call sells = bearish delta
-        - Uses absolute delta values (e.g., 0.3 not -0.3 for puts)
-        - Returns None ratio when no flow
-        - Falls back to delta=0.5 if delta is not provided (0 or None)
-    """
-    cb = call_buy or 0
-    cs = call_sell or 0
-    pb = put_buy or 0
-    ps = put_sell or 0
-    cd = abs(call_delta) if call_delta else 0.5
-    pd = abs(put_delta) if put_delta else 0.5
-
-    bullish = cb * cd + ps * pd
-    bearish = pb * pd + cs * cd
-
-    total = bullish + bearish
-    ratio = round(bullish / total, 2) if total > 0 else None
-    net = bullish - bearish
-
-    return net, total, ratio
 
 
 def format_expiration(exp: str | None) -> str:

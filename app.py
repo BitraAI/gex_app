@@ -79,7 +79,6 @@ _SESSION_DEFAULTS = {
     "ticker_history": [],
     "streaming_service": None,
     "atm_option_service": None,
-    "candle_cache": {},
     "candle_dataframes": {},
     "candle_last_fetch": {},
     "expirations": [],
@@ -90,7 +89,6 @@ _SESSION_DEFAULTS = {
     "client": None,
     "show_calls": True,
     "show_puts": True,
-    "show_net_gex": True,
     "min_oi": 0,
     "min_vol": 0,
     "show_itm": True,
@@ -266,8 +264,9 @@ def main():
 
         if st.session_state.get("data"):
             render_metrics_frag()
-            render_tabs_frag()
-        else:
+        render_tabs_frag()
+        
+        if not st.session_state.get("data"):
             st.info("Enter a stock ticker in the sidebar and click Refresh to begin analysis")
             st.markdown(r"""
             ### Quick Start

@@ -224,6 +224,34 @@ def create_oi_by_strike(
         ))
         title = "Call vs Put Open Interest by Strike"
         ytitle = "Open Interest"
+        
+        atm_strike = min(strikes_sorted, key=lambda s: abs(s["strike"] - spot))["strike"] if strikes_sorted else None
+        if atm_strike:
+            above_atm = [s for s in strikes_sorted if s["strike"] >= atm_strike and s["strike"] <= atm_strike + 20]
+            top_call_oi_otm = max((s for s in above_atm if s["strike"] > spot), key=lambda s: s["call_oi"], default=None)
+            if top_call_oi_otm:
+                fig.add_vline(
+                    x=top_call_oi_otm["strike"],
+                    line_dash="dash",
+                    line_color="#ef553b",
+                    annotation_text=f"Resistance: ${top_call_oi_otm['strike']:.2f}",
+                    annotation_position="bottom",
+                    annotation_font_color="#ef553b",
+                )
+        
+        atm_strike = min(strikes_sorted, key=lambda s: abs(s["strike"] - spot))["strike"] if strikes_sorted else None
+        if atm_strike:
+            below_atm = [s for s in strikes_sorted if s["strike"] <= atm_strike and s["strike"] >= atm_strike - 20]
+            top_put_oi_otm = max((s for s in below_atm if s["strike"] < spot), key=lambda s: s["put_oi"], default=None)
+            if top_put_oi_otm:
+                fig.add_vline(
+                    x=top_put_oi_otm["strike"],
+                    line_dash="dash",
+                    line_color="#00cc96",
+                    annotation_text=f"Support: ${top_put_oi_otm['strike']:.2f}",
+                    annotation_position="top",
+                    annotation_font_color="#00cc96",
+                )
     
     elif mode == "volume":
         call_vals = [s["call_volume"] for s in strikes_sorted]
@@ -239,6 +267,33 @@ def create_oi_by_strike(
         ))
         title = "Call vs Put Volume by Strike"
         ytitle = "Volume"
+        
+        atm_strike = min(strikes_sorted, key=lambda s: abs(s["strike"] - spot))["strike"] if strikes_sorted else None
+        if atm_strike:
+            above_atm = [s for s in strikes_sorted if s["strike"] >= atm_strike and s["strike"] <= atm_strike + 20]
+            top_call_vol_otm = max((s for s in above_atm if s["strike"] > spot), key=lambda s: s["call_volume"], default=None)
+            if top_call_vol_otm:
+                fig.add_vline(
+                    x=top_call_vol_otm["strike"],
+                    line_dash="dash",
+                    line_color="#ef553b",
+                    annotation_text=f"Resistance: ${top_call_vol_otm['strike']:.2f}",
+                    annotation_position="bottom",
+                    annotation_font_color="#ef553b",
+                )
+        
+        if atm_strike:
+            below_atm = [s for s in strikes_sorted if s["strike"] <= atm_strike and s["strike"] >= atm_strike - 20]
+            top_put_vol_otm = max((s for s in below_atm if s["strike"] < spot), key=lambda s: s["put_volume"], default=None)
+            if top_put_vol_otm:
+                fig.add_vline(
+                    x=top_put_vol_otm["strike"],
+                    line_dash="dash",
+                    line_color="#00cc96",
+                    annotation_text=f"Support: ${top_put_vol_otm['strike']:.2f}",
+                    annotation_position="top",
+                    annotation_font_color="#00cc96",
+                )
 
     fig.add_vline(
         x=spot,
