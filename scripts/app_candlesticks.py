@@ -71,30 +71,18 @@ def render_candlesticks_frag():
     
     nf_color = "green" if net_flow > 0 else ("red" if net_flow < 0 else "#666")
     fr_color = "green" if flow_ratio > 0.70 else ("red" if flow_ratio < 0.30 else "#666")
-     
-    # Build Support/Resistance display
-    support_vals = []
-    if volume_support is not None:
-        support_vals.append(f"Vol: ${volume_support:,.0f}")
-    if oi_support is not None:
-        support_vals.append(f"OI: ${oi_support:,.0f}")
-    
-    resistance_vals = []
-    if volume_resistance is not None:
-        resistance_vals.append(f"Vol: ${volume_resistance:,.0f}")
-    if oi_resistance is not None:
-        resistance_vals.append(f"OI: ${oi_resistance:,.0f}")
-    
-    support_display = " | ".join(support_vals) if support_vals else ""
-    resistance_display = " | ".join(resistance_vals) if resistance_vals else ""
-    support_resistance_display = f"{support_display} {resistance_display}"
     
     st.markdown(
         '<div style="display:flex;align-items:center;justify-content:space-between;'
         'gap:12px;margin:0 0 10px 0;">'
         '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
         '<div style="flex:1;min-width:200px;text-align:center;">'
-        f'<span style="color:#666;">{support_resistance_display}</span>'
+        f'<span style="color:#666;">'
+        f'{"Vol: ${:,.0f} ".format(volume_support) if volume_support is not None else ""}'
+        f'{"Vol: ${:,.0f} ".format(volume_resistance) if volume_resistance is not None else ""}'
+        f'{"OI: ${:,.0f} ".format(oi_support) if oi_support is not None else ""}'
+        f'{"OI: ${:,.0f}".format(oi_resistance) if oi_resistance is not None else ""}'
+        '</span>'
         '</div>'
         '<div style="display:flex;gap:16px;font-size:0.9rem;">'
         f'<span style="color:{nf_color};">Net Flow: {net_flow:,.0f}</span>'
