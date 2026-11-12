@@ -1158,9 +1158,40 @@ def render_atm_order_flow_grid():
     def _fmt_money(v):
         return f"${v:,.2f}" if v is not None else ""
 
+    def _spot_cell_colorer(r):
+        spot = r.get("Spot", 0.0)
+        support = r.get("Support", None)
+        resistance = r.get("Resistance", None)
+        
+        if spot is None or spot == 0:
+            return ""
+        
+        # Convert support/resistance to float if they are strings
+        try:
+            support = float(support) if support is not None else None
+            resistance = float(resistance) if resistance is not None else None
+        except (TypeError, ValueError):
+            return ""
+        
+        # Green when spot is within 2% of support level (support zone)
+        if support is not None:
+            zone_pct = 0.02
+            support_zone_upper = support * (1 + zone_pct)
+            if spot >= support and spot <= support_zone_upper:
+                return "background-color:#90EE90;"
+        
+        # Red when spot is within 2% of resistance level (resistance zone)
+        if resistance is not None:
+            zone_pct = 0.02
+            resistance_zone_lower = resistance * (1 - zone_pct)
+            if spot >= resistance_zone_lower and spot <= resistance:
+                return "background-color:#FFB6C1;"
+        
+        return ""
+
     cols = [
         ("Ticker", "left", None, None),
-        ("Spot", "right", _fmt_money, None),
+        ("Spot", "right", _fmt_money, _spot_cell_colorer),
         ("Expiration", "center", lambda v: html.escape(format_expiration(v)) if v else "", None),
         ("Support", "right", None, None),
         ("Resistance", "right", None, None),
