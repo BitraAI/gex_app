@@ -37,7 +37,7 @@ def render_candlesticks_frag():
         st.info("Initialize authentication to load data")
         return
 
-# Title row: tab title on the left, Support/Resistance levels in center, Net Flow and Flow Ratio on the right.
+    # Title row: tab title on the left, Support/Resistance levels in center, Net Flow and Flow Ratio on the right.
     atm_svc = s.get("atm_option_service")
     _sym = s.get("symbol", "SPY").upper().lstrip("$")
     
