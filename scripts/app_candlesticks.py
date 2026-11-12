@@ -92,7 +92,7 @@ def render_candlesticks_frag():
         '</div>'
         f'<div style="display:flex;gap:16px;font-size:0.9rem;">'
         f'<span style="color:{nf_color};">Net Flow: {net_flow:,.0f}</span>'
-        f'<span style="color:{fr_color};">Flow Ratio: {flow_ratio:.2%}</span>'
+        f'<span style="color:{fr_color};">Flow Ratio: {flow_ratio:.2f}</span>'
         '</div>'
         '</div>',
         unsafe_allow_html=True,
