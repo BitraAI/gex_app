@@ -46,19 +46,25 @@ def render_candlesticks_frag():
     volume_support = None
     volume_resistance = None
     
+    # Get analytics from cache - use _ticker_analytics_cache from flow module
+    _ticker_ana = {}
+    if s.get("_ticker_analytics_cache"):
+        _ticker_ana = s.get("_ticker_analytics_cache", {}).get(_sym) or {}
+    
+    oi_support = _ticker_ana.get("oi_support")
+    oi_resistance = _ticker_ana.get("oi_resistance")
+    volume_support = _ticker_ana.get("volume_support")
+    volume_resistance = _ticker_ana.get("volume_resistance")
+    
+    # Get Net Flow and Flow Ratio if ATM service is available
+    net_flow = 0.0
+    flow_ratio = 0.0
     if atm_svc and _sym in atm_svc.tracked_tickers():
         try:
             net_flow, flow_ratio, _, _, _ = atm_svc.get_ticker_net_flow(_sym)
         except Exception:
             net_flow = 0.0
             flow_ratio = 0.0
-        
-        # Get analytics from cache
-        _ticker_ana = s.get("_ticker_analytics_cache", {}).get(_sym) or {}
-        oi_support = _ticker_ana.get("oi_support")
-        oi_resistance = _ticker_ana.get("oi_resistance")
-        volume_support = _ticker_ana.get("volume_support")
-        volume_resistance = _ticker_ana.get("volume_resistance")
     else:
         net_flow = 0.0
         flow_ratio = 0.0
