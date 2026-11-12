@@ -1172,9 +1172,8 @@ def render_atm_order_flow_grid():
                 net_flow, flow_ratio, rolling_bullish, rolling_bearish, has_institutional = atm_svc.get_ticker_net_flow(t_upper)
             else:
                 net_flow, flow_ratio, rolling_bullish, rolling_bearish, has_institutional = 0.0, 0.0, 0.0, 0.0, False
-            # Round to reduce flicker - only hash changes on meaningful moves
-            rows[-1]["Net Flow"] = round(net_flow, 2) if net_flow != 0 else 0.0
-            rows[-1]["Flow Ratio"] = round(flow_ratio, 4) if flow_ratio != 0 else 0.0
+            rows[-1]["Net Flow"] = net_flow
+            rows[-1]["Flow Ratio"] = flow_ratio
             rows[-1]["Has Institutional"] = has_institutional
             
             # Add OI Support, OI Resistance, Volume Support, Volume Resistance

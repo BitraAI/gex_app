@@ -957,6 +957,10 @@ class AtmOptionVolumeService:
             # Calculate flow ratio: bullish / (bullish + bearish)
             flow_ratio = total_bullish / (total_bullish + total_bearish) if (total_bullish + total_bearish) > 0 else 0.0
             
+            # Round for display and hash stability
+            net_flow = round(net_flow, 2)
+            flow_ratio = round(flow_ratio, 4)
+            
             return net_flow, flow_ratio, rolling_bullish, rolling_bearish, has_institutional
 
     def get_ticker_snapshot(self, display_symbol: str) -> dict:
