@@ -71,7 +71,7 @@ def render_candlesticks_frag():
     
     nf_color = "green" if net_flow > 0 else ("red" if net_flow < 0 else "#666")
     fr_color = "green" if flow_ratio > 0.70 else ("red" if flow_ratio < 0.30 else "#666")
-    
+     
     # Build Support/Resistance display
     support_vals = []
     if volume_support is not None:
