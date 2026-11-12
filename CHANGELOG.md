@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Asterisk marker** in Net Flow column for institutional trades (premium ≥ $100k) in past 60 seconds
 - **Pin Score** column in Order Flow grid - simpler metric than absorption showing volume absorbed per $1 net displacement
 - **Wall Strength** metrics in analytics - sum of top 3 call/put GEX (displayed in $XM format)
 - **VEX and CEX Wall Detection** - Individual VEX and CEX-specific wall functions (`_find_call_wall_vex()`, `_find_put_wall_vex()`, `_find_call_wall_cex()`, `_find_put_wall_cex()`)
