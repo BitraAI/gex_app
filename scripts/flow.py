@@ -1109,11 +1109,12 @@ def render_atm_order_flow_grid():
             
             # Add Net Flow and Flow Ratio (from 4 most active expirations)
             if atm_svc:
-                net_flow, flow_ratio, rolling_bullish, rolling_bearish = atm_svc.get_ticker_net_flow(t_upper)
+                net_flow, flow_ratio, rolling_bullish, rolling_bearish, has_institutional = atm_svc.get_ticker_net_flow(t_upper)
             else:
-                net_flow, flow_ratio, rolling_bullish, rolling_bearish = 0.0, 0.0, 0.0, 0.0
+                net_flow, flow_ratio, rolling_bullish, rolling_bearish, has_institutional = 0.0, 0.0, 0.0, 0.0, False
             rows[-1]["Net Flow"] = net_flow
             rows[-1]["Flow Ratio"] = flow_ratio
+            rows[-1]["Has Institutional"] = has_institutional
             
             # Add OI Support, OI Resistance, Volume Support, Volume Resistance
             # from the per-ticker analytics cache (each row shows its own
@@ -1138,7 +1139,8 @@ def render_atm_order_flow_grid():
          r["Call Price"], r["Put Price"],
          r.get("Net Flow"), r.get("Flow Ratio"),
          r.get("OI Support"), r.get("OI Resistance"),
-         r.get("Volume Support"), r.get("Volume Resistance"))
+         r.get("Volume Support"), r.get("Volume Resistance"),
+         r.get("Has Institutional"))
         for r in rows
     )
     data_hash = hash(data_key)
@@ -1197,7 +1199,7 @@ def render_atm_order_flow_grid():
         ("Resistance", "right", None, None),
         ("Put Price", "right", _fmt_money, None),
         ("Call Price", "right", _fmt_money, None),
-        ("Net Flow", "right", lambda v: f"<span style='color:{'green' if v > 0 else ('red' if v < 0 else 'inherit')}'>{v:,.0f}</span>" if v != 0 else "", None),
+        ("Net Flow", "right", None, None),
         ("Flow Ratio", "right", lambda v: f"<span style='color:{'green' if v > 0.70 else ('red' if v < 0.30 else 'inherit')}'>{v:.2f}</span>" if v != 0 else "", None),
         ("OI Support", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
         ("OI Resistance", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
@@ -1220,7 +1222,14 @@ def render_atm_order_flow_grid():
             align = col[1]
             fmt = col[2]
             colorer = col[3] if len(col) > 3 else None
-            text = fmt(r[name]) if fmt else str(r[name]) if r[name] is not None else ""
+            if name == "Net Flow":
+                v = r[name]
+                has_inst = r.get("Has Institutional", False)
+                text = f"<span style='color:{'green' if v > 0 else ('red' if v < 0 else 'inherit')}'>{v:,.0f}{'*' if has_inst else ''}</span>" if v != 0 else ""
+            elif fmt:
+                text = fmt(r[name])
+            else:
+                text = str(r[name]) if r[name] is not None else ""
             style = colorer(r) if colorer else ""
             if align == "right":
                 style += " text-align:right;"

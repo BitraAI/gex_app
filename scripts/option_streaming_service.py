@@ -864,7 +864,7 @@ class AtmOptionVolumeService:
                 return None
             return ticker["spot"]
 
-    def get_ticker_net_flow(self, display_symbol: str) -> tuple[float, float, float, float]:
+    def get_ticker_net_flow(self, display_symbol: str) -> tuple[float, float, float, float, bool]:
         """Calculate Net Flow and Flow Ratio from the 4 most active expirations with non-zero volume.
         
         Net Flow = (bullish_flow - bearish_flow) where:
@@ -873,29 +873,44 @@ class AtmOptionVolumeService:
         
         Flow Ratio = bullish_flow / (bullish_flow + bearish_flow)
         
-        Returns (Net Flow, Flow Ratio, Rolling Bullish, Rolling Bearish) tuple.
+        Returns (Net Flow, Flow Ratio, Rolling Bullish, Rolling Bearish, Has Institutional) tuple.
         Rolling values are the 1-minute aggregation of raw contract counts weighted by delta.
+        Institutional trades are single prints with premium >= $100k.
         """
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is None:
-                return 0.0, 0.0, 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0, False
             
             last_size = ticker.get("last_size", 0)
             if last_size <= 0:
-                return 0.0, 0.0, 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0, False
             
             # Get expiration flows
             ef = ticker.get("expiration_flows", [])
             if not ef:
-                return 0.0, 0.0, 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0, False
+            
+            # Check for institutional trades (blocks) in print history
+            ph = ticker.get("print_history")
+            has_institutional = False
+            if ph:
+                now = _time_mod.time()
+                cutoff = now - 60
+                for ts, trade_sym, opt_type, price, size, direction in list(ph):
+                    if ts < cutoff:
+                        continue
+                    premium = price * size * 100
+                    if premium >= _BLOCK_MIN_PREMIUM:
+                        has_institutional = True
+                        break
             
             # Sort by volume (descending) and take top 4 with non-zero volume
             sorted_exp = sorted(ef, key=lambda x: x.get("volume", 0), reverse=True)
             top4 = [e for e in sorted_exp if e.get("volume", 0) > 0][:4]
             
             if not top4:
-                return 0.0, 0.0, 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0, has_institutional
             
             # Use most recent last_size for contract_size scaling
             contract_size = last_size * 100
@@ -942,7 +957,7 @@ class AtmOptionVolumeService:
             # Calculate flow ratio: bullish / (bullish + bearish)
             flow_ratio = total_bullish / (total_bullish + total_bearish) if (total_bullish + total_bearish) > 0 else 0.0
             
-            return net_flow, flow_ratio, rolling_bullish, rolling_bearish
+            return net_flow, flow_ratio, rolling_bullish, rolling_bearish, has_institutional
 
     def get_ticker_snapshot(self, display_symbol: str) -> dict:
         """Return a dict with all relevant per-ticker data in a single lock acquisition."""
