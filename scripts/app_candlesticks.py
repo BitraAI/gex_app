@@ -46,15 +46,41 @@ def render_candlesticks_frag():
     volume_support = None
     volume_resistance = None
     
-    # Get analytics from cache - use _ticker_analytics_cache from flow module
+# Get analytics from cache - use _ticker_analytics_cache from flow module
     _ticker_ana = {}
     if s.get("_ticker_analytics_cache"):
         _ticker_ana = s.get("_ticker_analytics_cache", {}).get(_sym) or {}
     
+    # Extract and format Support/Resistance values
     oi_support = _ticker_ana.get("oi_support")
     oi_resistance = _ticker_ana.get("oi_resistance")
     volume_support = _ticker_ana.get("volume_support")
     volume_resistance = _ticker_ana.get("volume_resistance")
+    
+    # Round values to 2 decimals if they exist
+    if volume_support is not None:
+        volume_support = round(volume_support, 2)
+    if volume_resistance is not None:
+        volume_resistance = round(volume_resistance, 2)
+    if oi_support is not None:
+        oi_support = round(oi_support, 2)
+    if oi_resistance is not None:
+        oi_resistance = round(oi_resistance, 2)
+    
+    # Build display strings
+    support_text = ""
+    if volume_support is not None:
+        support_text += f"Vol: ${volume_support:.2f} "
+    if oi_support is not None:
+        support_text += f"OI: ${oi_support:.2f} "
+    
+    resistance_text = ""
+    if volume_resistance is not None:
+        resistance_text += f"Vol: ${volume_resistance:.2f} "
+    if oi_resistance is not None:
+        resistance_text += f"OI: ${oi_resistance:.2f} "
+    
+    all_text = f"{support_text}{resistance_text}".strip()
     
     # Get Net Flow and Flow Ratio if ATM service is available
     net_flow = 0.0
@@ -68,7 +94,7 @@ def render_candlesticks_frag():
     else:
         net_flow = 0.0
         flow_ratio = 0.0
-    
+        
     nf_color = "green" if net_flow > 0 else ("red" if net_flow < 0 else "#666")
     fr_color = "green" if flow_ratio > 0.70 else ("red" if flow_ratio < 0.30 else "#666")
     
@@ -77,12 +103,7 @@ def render_candlesticks_frag():
         'gap:12px;margin:0 0 10px 0;">'
         '<h2 style="margin:0;font-size:1.5rem;">Candlesticks</h2>'
         '<div style="flex:1;min-width:200px;text-align:center;">'
-        f'<span style="color:#666;">'
-        f'{"Vol Support: ${:,.2f} ".format(volume_support) if volume_support is not None else ""}'
-        f'{"Vol Resistance: ${:,.2f} ".format(volume_resistance) if volume_resistance is not None else ""}'
-        f'{"OI Support: ${:,.2f} ".format(oi_support) if oi_support is not None else ""}'
-        f'{"OI Resistance: ${:,.2f}".format(oi_resistance) if oi_resistance is not None else ""}'
-        '</span>'
+        f'<span style="color:#666;">{all_text}</span>'
         '</div>'
         '<div style="display:flex;gap:16px;font-size:0.9rem;">'
         f'<span style="color:{nf_color};">Net Flow: {net_flow:,.0f}</span>'
