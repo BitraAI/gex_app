@@ -68,15 +68,15 @@ def render_candlesticks_frag():
     # Build Support/Resistance display text
     support_text = ""
     if volume_support is not None:
-        support_text += f"Vol: ${round(volume_support, 2):.2f} "
+        support_text += f"Support - Vol: {round(volume_support, 2):.2f} "
     if oi_support is not None:
-        support_text += f"OI: ${round(oi_support, 2):.2f} "
+        support_text += f"OI: {round(oi_support, 2):.2f} "
     
     resistance_text = ""
     if volume_resistance is not None:
-        resistance_text += f"Vol: ${round(volume_resistance, 2):.2f} "
+        resistance_text += f"Resistance - Vol: {round(volume_resistance, 2):.2f} "
     if oi_resistance is not None:
-        resistance_text += f"OI: ${round(oi_resistance, 2):.2f} "
+        resistance_text += f"OI: {round(oi_resistance, 2):.2f} "
     
     all_support_resistance = f"{support_text}{resistance_text}".strip()
     
