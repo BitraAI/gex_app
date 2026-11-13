@@ -1150,12 +1150,11 @@ def render_atm_order_flow_grid():
                                f"{call_wall_val:,.2f}</span>"
                                ) if call_wall_val is not None else ""
 
-            # Grid pricing: Call Price column shows the CALL mark at the GEX
-            # support (put-wall) strike; Put Price column shows the CALL mark
-            # at the GEX resistance (call-wall) strike (i.e., the resistance
-            # price itself). Falls back to the ATM marks when a wall-level
-            # mark is unavailable.
-            _call_p = wall_prices.get("put_wall_call_price") or opt_prices.get("call_price")
+            # Grid pricing: Call Price column shows the support price (PUT
+            # mark at the put-wall). Put Price column shows the resistance
+            # price (CALL mark at the call-wall). Falls back to ATM marks
+            # when a wall-level mark is unavailable.
+            _call_p = wall_prices.get("put_wall_put_price") or opt_prices.get("put_price")
             _put_p = wall_prices.get("call_wall_call_price") or opt_prices.get("call_price")
 
             rows.append({
