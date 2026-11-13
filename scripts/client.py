@@ -332,14 +332,14 @@ async def fetch_price_history_intraday(
                 frequency=f,
                 start_datetime=now - timedelta(days=days_back),
                 end_datetime=now,
-                need_extended_hours_data=False,
+                need_extended_hours_data=True,
             )
         else:
             resp = await client.get_price_history(
                 symbol,
                 period_type=pt, period=per,
                 frequency_type=ft, frequency=f,
-                need_extended_hours_data=False,
+                need_extended_hours_data=True,
             )
 
         resp = _to_json(resp)
@@ -460,7 +460,7 @@ async def fetch_price_history_daily(
             period=period,
             frequency_type=client.PriceHistory.FrequencyType.DAILY,
             frequency=1,
-            need_extended_hours_data=False,
+            need_extended_hours_data=True,
         )
         resp = _to_json(resp)
         candles = resp.get("candles", []) if isinstance(resp, dict) else []
@@ -487,8 +487,8 @@ async def fetch_price_history_daily(
                 from zoneinfo import ZoneInfo
                 _ny = ZoneInfo("America/New_York")
                 today_ny = datetime.now(_ny).date()
-                # Filter 1m bars to today's NY-local date so we don't pull in
-                # any bars from yesterday after-hours that crossed midnight UTC.
+                # Filter 1m bars to today's NY-local date. Extended hours bars
+                # (pre-market and after-hours) are included in the API response.
                 todays_1m = []
                 for bar in intraday:
                     bdt = datetime.fromtimestamp(bar["datetime"] / 1000, tz=timezone.utc).astimezone(_ny)
@@ -585,7 +585,7 @@ async def get_20d_rv(client: AsyncClient, symbol: str, length: int = 20) -> floa
             period=client.PriceHistory.Period.ONE_YEAR,
             frequency_type=client.PriceHistory.FrequencyType.DAILY,
             frequency=client.PriceHistory.Frequency.DAILY,
-            need_extended_hours_data=False,
+            need_extended_hours_data=True,
         )
         resp = _to_json(resp)
         candles = resp.get("candles", []) if isinstance(resp, dict) else []
