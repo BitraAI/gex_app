@@ -19,9 +19,20 @@ the whole app — equity `StreamingService` and the ATM option
 ## Controls
 
 - **Timeframe** (`st.selectbox`): `1m, 2m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M`.
-- **Indicators** (`st.multiselect`, default `Andean Osc`, `EMA 50`,
-  `Trend`): `SMA 20`, `SMA 50`, `EMA 20`, `EMA 50`, `EMA 200`,
-  `Volume Profile`, `VWAP`, `Half Trend`, `Volume`, `Andean Osc`.
+- **Indicators** (`st.multiselect`, default `Andean Squeeze`, `Exponential Envelopes`, `VWAP`): `SMA 20`, `SMA 50`, `EMA 20`, `EMA 50`, `EMA 200`, `Volume Profile`, `VWAP`, `Half Trend`, `Volume`, `Andean Squeeze`, `Exponential Envelopes`.
+
+### Indicator Descriptions
+
+| Indicator | Description |
+|-----------|-------------|
+| **SMA 20/50** | Simple Moving Average (20/50-period) - smooths price data to identify trend direction |
+| **EMA 20/50/200** | Exponential Moving Average (20/50/200-period) - weighted more heavily toward recent prices |
+| **Volume Profile** | Visual representation of volume traded at each price level (VPVR) - shows point of control (POC), value area, and day range |
+| **VWAP** | Volume-Weighted Average Price - benchmark for average trading price, anchored at 09:30 ET session open |
+| **Half Trend** | Trend detection indicator that adapts to market volatility and momentum |
+| **Volume** | OHLCV candlesticks with buy/sell volume split - shows aggregated trading pressure |
+| **Andean Squeeze** | Momentum indicator combining Andean Oscillator with Squeeze detection - identifies volatility expansion opportunities |
+| **Exponential Envelopes** | Volatility-based envelope indicator (up/dn lines with dynamic colors) - **up line**: cyan if rising, pink if falling; **dn line**: green if rising, red if falling |
 
 The chart itself is rendered by `chart_component.render_chart` (Lightweight
 Charts HTML/JS). See `README.md` for the interactive pan/zoom and Y-range
@@ -119,6 +130,40 @@ load_candle_cache (parquet)                    ▼
 | `streaming_service.py` | `StreamingService` — equity WebSocket, 1s OHLCV aggregation, buy/sell split. |
 | `option_streaming_service.py` | `AtmOptionVolumeService` — ATM option flow (shares the StreamClient). |
 | `client.py` | `fetch_candles_smart`, `load_candle_cache`, `refresh_candles`, `TIMEFRAMES`, `fetch_quotes`. |
+
+## Indicators
+
+### Exponential Envelopes
+
+A volatility-based envelope indicator derived from the Andean oscillator, consisting of two lines that dynamically color based on trend direction:
+
+- **Up Line** (cyan/pink): Upper envelope
+  - **Cyan** (`#00bcd4`) when `up > up[1]` (rising)
+  - **Pink** (`#e91e63`) when `up <= up[1]` (falling or flat)
+  
+- **Down Line** (green/red): Lower envelope
+  - **Green** (`#00cc96`) when `dn > dn[1]` (rising)
+  - **Red** (`#ef553b`) when `dn <= dn[1]` (falling or flat)
+
+**Formula**: 
+- `up = up1 - bear` (element-wise: `up[i] = up1[i] - bear[i]`)
+- `dn = dn1 + bull` (element-wise: `dn[i] = dn1[i] + bull[i]`)
+
+Where:
+- `up1`, `up2`, `dn1`, `dn2` come from `_andean_core()` - the Andean oscillator's core calculations
+- `bull`, `bear` come from `_andean_powers()` - the statistical power calculations
+
+**Usage**: 
+- **Cyan up line** indicates strong bullish momentum - price may continue upward
+- **Pink up line** indicates weakening bullish momentum - potential reversal or consolidation
+- **Green down line** indicates strengthening bearish momentum
+- **Red down line** indicates weakening bearish momentum - potential reversal or consolidation
+
+The indicator helps identify trend strength and potential reversal points through color changes.
+
+### Andean Squeeze
+
+A momentum indicator combining the Andean Oscillator with Squeeze detection to identify volatility expansion opportunities.
 
 ## Notes / limitations
 

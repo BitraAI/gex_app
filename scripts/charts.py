@@ -1571,8 +1571,8 @@ def _exponential_envelopes(
     if not up1:
         return [], []
     bull, bear = _andean_powers(up1, up2, dn1, dn2)
-    up = [d1 + b for d1, b in zip(dn1, bull)]
-    dn = [u1 - be for u1, be in zip(up1, bear)]
+    up = [u1 - b for u1, b in zip(up1, bear)]
+    dn = [d1 + u for d1, u in zip(dn1, bull)]
     return up, dn
 
 

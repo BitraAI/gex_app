@@ -1248,19 +1248,19 @@ def build_init_data(
             if name == "Exponential Envelopes":
                 # Exponential Envelopes indicator
                 up, dn = _exponential_envelopes(opens, closes, cfg.get("length", 50))
-                # Upper envelope - green if rising, default color otherwise
+                # Upper envelope - cyan if up > up[1], else pink
                 up_data = []
                 for i in range(len(cd)):
-                    color = "#00cc96" if (i > 0 and up[i] > up[i - 1]) else "#FF8C42"
+                    color = "#00bcd4" if (i > 0 and up[i] > up[i - 1]) else "#e91e63"
                     up_data.append({"time": cd[i]["time"], "value": up[i], "color": color})
                 series_list.append({
                     "type": "Line", "key": "env_up", "data": up_data,
-                    "options": {"color": "#FF8C42", "lineWidth": 2, "lastValueVisible": False, "priceLineVisible": False},
+                    "options": {"color": "#e91e63", "lineWidth": 2, "lastValueVisible": False, "priceLineVisible": False},
                 })
-                # Lower envelope - red if falling, green otherwise
+                # Lower envelope - green if dn > dn[1], else red
                 dn_data = []
                 for i in range(len(cd)):
-                    color = "#ef553b" if (i > 0 and dn[i] < dn[i - 1]) else "#00cc96"
+                    color = "#00cc96" if (i > 0 and dn[i] > dn[i - 1]) else "#ef553b"
                     dn_data.append({"time": cd[i]["time"], "value": dn[i], "color": color})
                 series_list.append({
                     "type": "Line", "key": "env_dn", "data": dn_data,

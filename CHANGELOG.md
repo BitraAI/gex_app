@@ -3,11 +3,22 @@
 ## [Unreleased]
 
 ### Added
-- **Asterisk marker** in Net Flow column for institutional trades (premium ≥ $100k) in past 60 seconds
-- **Pin Score** column in Order Flow grid - simpler metric than absorption showing volume absorbed per $1 net displacement
-- **Wall Strength** metrics in analytics - sum of top 3 call/put GEX (displayed in $XM format)
-- **VEX and CEX Wall Detection** - Individual VEX and CEX-specific wall functions (`_find_call_wall_vex()`, `_find_put_wall_vex()`, `_find_call_wall_cex()`, `_find_put_wall_cex()`)
-- **VEX/CEX Wall Confirmation** - VEX and CEX-based wall metrics tracked separately for confirmation analysis
+- **Exponential Envelopes indicator** with dynamic color coding based on trend direction - up line (cyan if rising, pink if falling), down line (green if rising, red if falling)
+- **Andean Squeeze indicator** - momentum indicator combining Andean Oscillator with Squeeze detection
+- Documentation for Exponential Envelopes and Andean Squeeze indicators in CANDLESTICS.md
+
+### Changed
+- **Liquidity Flow** threshold now dynamic: `max(25, 3% of avg book depth)` instead of static 25 contracts
+- **Absorption** now uses delta-weighted volume (same as Flow Ratio) instead of raw volume
+- **Absorption** denominator smoothed: `vol_60 / (spot_path + 0.05)` for smoother transitions
+- **GEX Formula**: Fixed to use `(spot/100)^2` instead of `spot^2` for correct scaling
+- **VEX Formula**: Fixed to use `(spot/100)^2` for spot normalization (consistent with GEX)
+- **CEX Formula**: Fixed sign convention - CALL positive, PUT negative (matches GEX/VEX)
+- **Dealer Position**: Now includes strength indicator (Strong/Moderate/Weak)
+- Updated conviction score liquidity flow threshold from 2% to 3%
+- **Exponential Envelopes formula** - updated lines 1574-1575 in `charts.py` to use `up = up1 - bear` and `dn = dn1 + bull` (element-wise list operations)
+- **Exponential Envelopes indicator colors** in `chart_component.py` - changed to cyan/pink for up line and green/red for down line based on trend direction
+- **Indicator options** in `app_candlesticks.py` - added "Andean Squeeze" and "Exponential Envelopes" to the indicator multiselect dropdown
 
 ### Changed
 - **Liquidity Flow** threshold now dynamic: `max(25, 3% of avg book depth)` instead of static 25 contracts
@@ -30,6 +41,7 @@
 - Liquidity Flow now shows bid/ask flows separately
 - Side-aware warnings: Underlines red when ask liquidity drains on bullish trend (bearish signal)
 - Improved color coding for Liquidity Flow magnitude levels
+- **Indicator documentation** - added comprehensive descriptions for all candlestick indicators including Exponential Envelopes with formula, color logic, and usage guidance
 
 ### Removed
 - Flow Ratio (Raw) and Flow Vol (raw) columns from Order Flow grid (per user preference for delta-weighted metrics only)
@@ -58,3 +70,6 @@
 - Removed global `get_next_earnings_date` import from `app_extras.py` and `app_signals.py`, added local imports where needed
 - Removed global imports for `fetch_candles_smart`, `fetch_price_history_daily`, `save_candle_cache` from `app_data.py`, added local imports where needed
 - Fixed ETF fallback logic in `app_data.py` to use `etf_analytics` when fallback chain is used
+- Updated architecture documentation in README.md to include chart_component.py and its role in rendering custom indicators
+- Updated CANDLESTICS.md with comprehensive indicator descriptions and Exponential Envelopes formula
+- Updated FLOW.md to reference chart_component.py in the file reference section

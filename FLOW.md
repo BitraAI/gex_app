@@ -217,6 +217,7 @@ automatically via `ensure_atm_streaming`.
 | `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. `check_alerts()` sends single-ticker Telegram alerts. |
 | `client.py` | `fetch_quotes` — REST spot pre-fetch for all tickers + ~2 s option-mark refresh (Call/Put Price columns). |
 | `telegram_notifier.py` | `notify_alerts()`, `diff_alerts()`, `_format()`, `send_telegram()` — builds and posts HTML Telegram messages; detects wall-change / gamma-flip / dealer-flip / price-crossing diffs. |
+| `chart_component.py` | `render_chart` — Lightweight Charts HTML/JS component with indicators (SMA, EMA, VWAP, Volume Profile, Half Trend, Andean Squeeze, **Exponential Envelopes** with dynamic coloring based on trend direction). |
 
 ## Architecture: streaming & spot feeding
 
