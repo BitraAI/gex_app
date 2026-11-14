@@ -350,22 +350,7 @@ def compute_state():
         ]
         st.session_state.by_exp_all_version = _data_ver
     st.session_state.analytics = analytics
-    _iv_skew = analytics.get("iv_skew")
-    _put_iv = analytics.get("put_iv_25d")
-    _call_iv = analytics.get("call_iv_25d")
-    _atm_iv = analytics.get("atm_iv")
-    if _iv_skew is not None:
-        st.session_state.iv_skew_history.append({
-            "datetime": int(pd.Timestamp.now(tz="UTC").value // 1_000_000),
-            "iv_skew": _iv_skew,
-            "put_iv_25d": _put_iv,
-            "call_iv_25d": _call_iv,
-            "atm_iv": _atm_iv,
-        })
-        # Cap the history: rows accumulate while the app runs and would grow
-        # unbounded (built into the chart payload on every fragment tick).
-        if len(st.session_state.iv_skew_history) > 300:
-            st.session_state.iv_skew_history = st.session_state.iv_skew_history[-300:]
+
     st.session_state.expirations = sorted(set(
         e["expiration"] for e in st.session_state.data
     ))
