@@ -16,6 +16,7 @@ from scripts.option_streaming_service import _normalize_display_symbol
 from scripts.flow import run_async
 from scripts.app_data import _fetch_option_chain_core, _update_atm_service
 from scripts.app_tables import _get_filtered_data_for_walls
+from scripts._utils import _normalize_sel_exp
 
 
 def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
