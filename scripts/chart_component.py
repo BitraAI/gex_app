@@ -150,12 +150,10 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         const MAIN_H = (d.heights && d.heights.main) || 420;
         const VOL_H = (d.heights && d.heights.vol) || 0;
         const OSC_H = (d.heights && d.heights.osc) || 0;
-        const IV_SKEW_H = (d.heights && d.heights.iv_skew) || 0;
 
         const panes = [{id: 'right', h: MAIN_H}];
         if (d.volume_series) panes.push({id: 'volume', h: VOL_H});
         if (d.andean_series) panes.push({id: 'osc', h: OSC_H});
-        if (d.iv_skew_series) panes.push({id: 'iv_skew', h: IV_SKEW_H});
 
         const paneIds = new Set(panes.map(function(p) { return p.id; }));
         const PANE_H_DEFAULT = 100;
@@ -175,7 +173,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         collectPaneIds(d.series);
         collectPaneIds(d.volume_series);
         collectPaneIds(d.andean_series);
-        collectPaneIds(d.iv_skew_series);
 
         const TOTAL_H = panes.reduce(function(s, p) { return s + p.h; }, 0);
         const GAP = 4;
@@ -263,7 +260,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
         for (const s of d.series || []) { addSeries(s); }
         for (const s of d.volume_series || []) { addSeries(s); }
         for (const s of d.andean_series || []) { addSeries(s); }
-        for (const s of d.iv_skew_series || []) { addSeries(s); }
 
         const paneEdges = {};
         let y = 0;
@@ -298,7 +294,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             }
         }
         applyPanePriceFormat(d.andean_series);
-        applyPanePriceFormat(d.iv_skew_series);
 
         const AXIS_W = 60;
         const indicatorPanes = panes.filter(function(p) { return p.id !== 'right'; });
@@ -310,7 +305,7 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             axisOverlays.push({paneId: p.id, canvas: ov, ctx: ov.getContext('2d'), lastSig: null});
         }
 
-        function formatTick(v, isVolume, isPct) {
+        function formatTick(v, isVolume) {
             if (v == null || isNaN(v)) return '';
             if (isVolume) {
                 const a = Math.abs(v);
@@ -319,7 +314,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
                 if (a >= 1e3) return (v / 1e3).toFixed(1) + 'K';
                 return String(Math.round(v));
             }
-            if (isPct) return (v * 100).toFixed(2) + '%%';
             return v.toFixed(2);
         }
 
@@ -328,7 +322,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             const edges = paneEdges[ov.paneId];
             if (!series || !edges) return;
             const isVolume = (ov.paneId === 'volume');
-            const isIVSkew = (ov.paneId === 'iv_skew' || ov.paneId === 'iv_skew_hist');
             let topP, botP;
             try {
                 topP = series.coordinateToPrice(edges.top);
@@ -381,7 +374,7 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
                 ctx.lineTo(4, localY);
                 ctx.stroke();
                 ctx.fillStyle = tc;
-                ctx.fillText(formatTick(val, isVolume, isIVSkew), stripW - 4, localY);
+                ctx.fillText(formatTick(val, isVolume), stripW - 4, localY);
             }
         }
 
@@ -841,7 +834,7 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             if (!list) return;
             for (let i = 0; i < list.length; i++) keys.push(list[i].type + '|' + (list[i].key || ''));
         }
-        collect(d.series); collect(d.volume_series); collect(d.andean_series); collect(d.iv_skew_series);
+        collect(d.series); collect(d.volume_series); collect(d.andean_series);
         if (d.vp_vols && d.vp_vols.length) keys.push('vp|1');
         keys.sort();
         // NOTE: wall levels (call/put wall) are intentionally NOT part of the
@@ -972,7 +965,6 @@ def build_host_js(root_id: str = _ROOT_ID) -> str:
             __applyList(cur.byKey, serList);
             __applyList(cur.byKey, init.volume_series);
             __applyList(cur.byKey, init.andean_series);
-            __applyList(cur.byKey, init.iv_skew_series);
             try {
                 if (window[CHART_KEY + '__setVp'] && init.vp_vols) window[CHART_KEY + '__setVp'](init.vp_vols);
             } catch (_) {}
@@ -1069,6 +1061,25 @@ def _bar_volume_split(c: dict, vol: float, buy_map: dict, sell_map: dict) -> tup
     return bv, sv
 
 
+# Cache for the flat wall line data (one constant value per bar). The wall
+# level is unchanged on the vast majority of 2-second ticks, so rebuilding
+# ~1500 dicts per wall per tick is pure waste; keyed on
+# (level, bar count, first/last timestamp) so any bar change invalidates it.
+_WALL_DATA_CACHE: dict[tuple[float, int, int, int], list[dict]] = {}
+
+
+def _flat_wall_data(level: float, cd: list[dict]) -> list[dict]:
+    key = (float(level), len(cd), cd[0]["time"], cd[-1]["time"])
+    cached = _WALL_DATA_CACHE.get(key)
+    if cached is None:
+        cached = [{"time": c["time"], "value": level} for c in cd]
+        # Keep the cache tiny: only the most recent wall levels matter.
+        if len(_WALL_DATA_CACHE) > 8:
+            _WALL_DATA_CACHE.clear()
+        _WALL_DATA_CACHE[key] = cached
+    return cached
+
+
 def build_init_data(
     candles: list[dict],
     indicators: list[str] | None = None,
@@ -1129,17 +1140,16 @@ def build_init_data(
         "options": candlestick_options,
     })
 
-    if call_wall is not None:
+    for _key, _level, _color, _title in (
+        ("call_wall", call_wall, "#ef553b", "Resistance"),
+        ("put_wall", put_wall, "#00cc96", "Support"),
+    ):
+        if _level is None:
+            continue
         series_list.append({
-            "type": "Line", "key": "call_wall", "flat": 1,
-            "data": [{"time": cd[i]["time"], "value": call_wall} for i in range(len(cd))],
-            "options": {"color": "#ef553b", "lineWidth": 1, "lineStyle": 2, "title": "Resistance"},
-        })
-    if put_wall is not None:
-        series_list.append({
-            "type": "Line", "key": "put_wall", "flat": 1,
-            "data": [{"time": cd[i]["time"], "value": put_wall} for i in range(len(cd))],
-            "options": {"color": "#00cc96", "lineWidth": 1, "lineStyle": 2, "title": "Support"},
+            "type": "Line", "key": _key, "flat": 1,
+            "data": _flat_wall_data(_level, cd),
+            "options": {"color": _color, "lineWidth": 1, "lineStyle": 2, "title": _title},
         })
 
     if indicators:
@@ -1165,7 +1175,7 @@ def build_init_data(
                 ]
                 continue
             if name == "Andean Squeeze":
-                bull, bear, osc, signal = _andean_oscillator(opens, closes, cfg["length"], cfg["sigLength"])
+                osc, signal = _andean_oscillator(opens, closes, cfg["length"], cfg["sigLength"])
                 _oscd = []
                 for i in range(len(cd)):
                     o = osc[i]
@@ -1237,7 +1247,7 @@ def build_init_data(
                 continue
             if name == "Exponential Envelopes":
                 # Exponential Envelopes indicator
-                up, dn, bull_bear = _exponential_envelopes(opens, closes, cfg.get("length", 50), cfg.get("sigLength", 9))
+                up, dn = _exponential_envelopes(opens, closes, cfg.get("length", 50))
                 # Upper envelope - green if rising, default color otherwise
                 up_data = []
                 for i in range(len(cd)):
@@ -1346,73 +1356,6 @@ def build_init_data(
     return result
 
 
-def _build_iv_skew_data(iv_skew_history: list, et_offset: int) -> dict | None:
-    """Build IV Skew series data for the chart."""
-    if not iv_skew_history:
-        return None
-    try:
-        from scripts.charts import _get_est_offset
-        try:
-            et_offset = _get_est_offset()
-        except Exception:
-            et_offset = 0
-    except Exception:
-        pass
-
-    series = []
-    hist_data = []
-    for row in iv_skew_history:
-        t = _convert_time(row.get("datetime", 0), et_offset)
-        # Rows are appended with the "iv_skew" key; accept the legacy
-        # "value" key as well.
-        val = row.get("iv_skew", row.get("value"))
-        hist_data.append({"time": t, "value": float(val) if val is not None else 0})
-    # LWC series require unique timestamps; history rows are captured at
-    # millisecond resolution but chart times are seconds — collapse dupes
-    # (last value wins).
-    if len(hist_data) > 1:
-        by_t = {}
-        for pt in hist_data:
-            by_t[pt["time"]] = pt
-        hist_data = [by_t[t] for t in sorted(by_t)]
-
-    if hist_data:
-        series.append({
-            "type": "Line",
-            "key": "iv_skew",
-            "data": hist_data,
-            "options": {"color": "#9c27b0", "lineWidth": 2, "priceScaleId": "iv_skew", "priceLineVisible": False, "lastValueVisible": False},
-        })
-
-    # IV Skew Histogram (positive = premium, negative = discount). Same source
-    # value as the line: `iv_skew` is already signed; falling back to a
-    # dedicated "histogram" key when present.
-    hist_bar_data = []
-    for row in iv_skew_history:
-        t = _convert_time(row.get("datetime", 0), et_offset)
-        val = row.get("histogram")
-        if val is None:
-            val = row.get("iv_skew")
-        if val is not None:
-            color = "#26a69a" if val >= 0 else "#ef5350"
-            hist_bar_data.append({"time": t, "value": float(val), "color": color})
-    if len(hist_bar_data) > 1:
-        by_t = {}
-        for pt in hist_bar_data:
-            by_t[pt["time"]] = pt
-        hist_bar_data = [by_t[t] for t in sorted(by_t)]
-
-    if hist_bar_data:
-        series.append({
-            "type": "Histogram",
-            "key": "iv_skew_hist",
-            "data": hist_bar_data,
-            "options": {"priceScaleId": "iv_skew_hist", "priceLineVisible": False, "lastValueVisible": False},
-        })
-
-    return {"series": series} if series else None
-
-
 def render_chart_host():
     """Render the persistent chart host element (constant body).
 
@@ -1422,34 +1365,17 @@ def render_chart_host():
     st.html(get_host_html(), unsafe_allow_javascript=True, width="stretch")
 
 
-def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_close=None, status=None, symbol="SPY", iv_skew_history=None):
+def render_chart(candles, indicators=None, call_wall=None, put_wall=None, last_close=None, status=None, symbol="SPY"):
     main_height = 420
     vol_height = 100 if (indicators and "Volume" in indicators) else 0
     osc_height = 100 if (indicators and "Andean Squeeze" in indicators) else 0
-    iv_skew_height = 100 if (indicators and "IV Skew (25Δ)" in indicators) and iv_skew_history and len(iv_skew_history) > 0 else 0
-    iv_skew_hist_height = 50 if (indicators and "IV Skew (25Δ)" in indicators) and iv_skew_history and len(iv_skew_history) > 0 else 0
-
-    # Try to get ET offset for consistent time conversion
-    try:
-        from scripts.charts import _get_est_offset
-        et_offset = _get_est_offset()
-    except Exception:
-        et_offset = 0
 
     init_data = build_init_data(candles, indicators, call_wall, put_wall, last_close=last_close)
     if status:
         init_data["status"] = status
-
-    # Build IV skew data if available
-    if iv_skew_history and len(iv_skew_history) > 0:
-        iv_skew_result = _build_iv_skew_data(iv_skew_history, et_offset)
-        if iv_skew_result:
-            init_data["iv_skew_series"] = iv_skew_result.get("series", [])
-
     init_data["symbol"] = symbol
     init_data["heights"] = {
         "main": main_height, "vol": vol_height, "osc": osc_height,
-        "iv_skew": iv_skew_height, "iv_skew_hist": iv_skew_hist_height,
     }
     init_data["theme"] = {"bg": "#ffffff", "text": "#1e293b", "grid": "#e9eef3"}
 

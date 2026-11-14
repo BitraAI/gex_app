@@ -14,7 +14,7 @@ from scripts.analytics import compute_analytics
 from scripts.signals import generate_recommendations, assess_market_bias, _tte_from_dtes
 from scripts.option_streaming_service import _normalize_display_symbol
 from scripts.flow import run_async
-from scripts.app_data import _fetch_option_chain_core
+from scripts.app_data import _fetch_option_chain_core, _update_atm_service
 from scripts.app_tables import _get_filtered_data_for_walls
 
 
@@ -27,12 +27,9 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     Returns ``None`` if data cannot be loaded.
     """
     # Pre-filter the raw chain to selected expirations (Trade Signals scan).
-    sel_exp = (
-        st.session_state.selected_expirations
-        if hasattr(st.session_state, "selected_expirations")
-        and st.session_state.selected_expirations
-        else None
-    )
+    # The sidebar widget writes `selected_expiration` (singular); normalize
+    # its str/list shape to the list the chain filter expects.
+    sel_exp = _normalize_sel_exp(st.session_state.get("selected_expiration"))
     core = _fetch_option_chain_core(symbol, selected_expirations=sel_exp)
     if core is None:
         return None
@@ -51,16 +48,9 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
 
     # Use filtered data for wall calculations (same 41 strikes as charts)
     # This ensures Support (Put Wall) and Resistance (Call Wall) match between Chart and ATM Order Flow
-    selected_expirations = st.session_state.get("selected_expiration", [])
-    if isinstance(selected_expirations, str):
-        selected_expirations = []
+    selected_expirations = _normalize_sel_exp(st.session_state.get("selected_expiration"))
     filtered_data = _get_filtered_data_for_walls(data, selected_expirations)
     analytics = compute_analytics(filtered_data, spot, r=r, q=q, data_full=data)
-
-    # Update ATM service with walls so the Order Flow grid displays them
-    atm_svc = st.session_state.get("atm_option_service")
-    if atm_svc:
-        atm_svc.set_ticker_walls(_sym, analytics.get("put_wall"), analytics.get("call_wall"))
 
     if etf_analytics:
         from scripts.chain_parser import _merge_etf_analytics
@@ -73,24 +63,11 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
     from scripts.client import get_next_earnings_date
     earnings_date = run_async(get_next_earnings_date(st.session_state.client, symbol))
 
-    # Update ATM service with correct expiration for this ticker
-    if data and spot > 0:
-        expirations = sorted(set(e["expiration"] for e in data))
-        if expirations:
-            atm_svc = st.session_state.get("atm_option_service")
-            if atm_svc:
-                atm_svc.set_ticker_expiration(_sym, expirations[0])
-                # Second-nearest expiration feeds the rolling Flow Ratio
-                # / Net Flow (two ATM pairs per ticker).
-                if len(expirations) > 1:
-                    atm_svc.set_ticker_expiration2(_sym, expirations[1])
-    # Store Put Wall (support) and Call Wall (resistance) for the grid
+    # Update ATM service with correct expiration + final (ETF-merged) walls
+    # so the Order Flow grid displays them.
+    _update_atm_service(_sym, data, spot, analytics)
     atm_svc = st.session_state.get("atm_option_service")
     if atm_svc:
-        _put_wall = analytics.get("put_wall")
-        _call_wall = analytics.get("call_wall")
-        if _put_wall is not None or _call_wall is not None:
-            atm_svc.set_ticker_walls(_sym, _put_wall, _call_wall)
         # For index symbols (SPX, RUT, NDX) set the correct spot via
         # the REST option chain parse — the streaming feed only gives
         # us the ETF proxy (SPY, IWM, QQQ) price.
@@ -103,28 +80,27 @@ def _run_ticker_signals(symbol: str) -> dict[str, Any] | None:
         # applies to ALL tracked tickers — index symbols need it
         # (they have no own LEVELONE_OPTIONS stream) and equity
         # tickers benefit too as a fallback before WebSocket ticks arrive.
-        if atm_svc:
-            _atm_k = min(
-                (e["strike"] for e in filtered_data),
-                key=lambda k: abs(k - spot),
-                default=None,
+        _atm_k = min(
+            (e["strike"] for e in filtered_data),
+            key=lambda k: abs(k - spot),
+            default=None,
+        )
+        _call_mark = None
+        _put_mark = None
+        if _atm_k is not None:
+            _atm_exps = sorted(
+                {e["expiration"] for e in filtered_data
+                 if e["strike"] == _atm_k}
             )
-            _call_mark = None
-            _put_mark = None
-            if _atm_k is not None:
-                _atm_exps = sorted(
-                    {e["expiration"] for e in filtered_data
-                     if e["strike"] == _atm_k}
-                )
-                if _atm_exps:
-                    _front = _atm_exps[0]
-                    for e in filtered_data:
-                        if e["strike"] == _atm_k and e["expiration"] == _front:
-                            if e["type"] == "CALL" and _call_mark is None:
-                                _call_mark = e.get("mark")
-                            elif e["type"] == "PUT" and _put_mark is None:
-                                _put_mark = e.get("mark")
-            atm_svc.set_ticker_option_prices(_sym, _call_mark, _put_mark)
+            if _atm_exps:
+                _front = _atm_exps[0]
+                for e in filtered_data:
+                    if e["strike"] == _atm_k and e["expiration"] == _front:
+                        if e["type"] == "CALL" and _call_mark is None:
+                            _call_mark = e.get("mark")
+                        elif e["type"] == "PUT" and _put_mark is None:
+                            _put_mark = e.get("mark")
+        atm_svc.set_ticker_option_prices(_sym, _call_mark, _put_mark)
 
     return {"data": data, "spot": spot, "analytics": analytics, "rv": rv, "symbol": _sym, "earnings_date": earnings_date}
 
@@ -281,7 +257,7 @@ def render_trade_signals():
                     full_chain = s.get("data") or []
                     rc = _build_signals(
                         full_chain, s.spot, s.analytics, _rv, pt, stg,
-                        atm_range=s.get("strikes_atm_range", 20),
+                        atm_range=20,
                         by_exp_all=_by_exp_all_from(full_chain, s.spot) or s.get("by_exp_all"),
                         selected_expirations=None,
                         dte_min=dte_min, dte_max=dte_max,
@@ -312,7 +288,7 @@ def render_trade_signals():
                                 continue
                             rc = _build_signals(
                                 res["data"], res["spot"], res["analytics"], res["rv"], pt, stg,
-                                atm_range=s.get("strikes_atm_range", 20),
+                                atm_range=20,
                                 by_exp_all=_by_exp_all_from(res["data"], res["spot"]),
                                 dte_min=dte_min, dte_max=dte_max,
                                 compute_bias=False,

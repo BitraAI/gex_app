@@ -1,25 +1,35 @@
-# Packaging: makes `from email_service import send_email` work with a bare
-# venv interpreter. `pip install -e .` exposes ONLY the scripts/email_service
-# module at the top level — no other scripts/* names get installed, so they
-# can never shadow third-party packages in site-packages.
+# Project metadata + dependency pins for `uv run` / `uv sync`.
+# The app itself is run as `streamlit run app.py` from the repo root (run.sh);
+# `scripts` and `schwab_mcp` are plain source packages, nothing is installed
+# from them into site-packages.
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "email-service"
+name = "gex-app"
 version = "1.0.0"
-description = "gex_app's SMTP email_service module exposed at the top level"
+description = "GammaEx: Schwab-powered gamma exposure / options flow dashboard"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "streamlit>=1.58.0",
+    "streamlit-lightweight-charts-v5>=0.1.8",
+    "plotly>=6.8.0",
+    "numpy>=1.26.0",
+    "pandas>=2.0.0",
+    "schwab-py>=1.5.1",
+    "mcp>=2.0.0",
+    "uvicorn>=0.30.0",
+    "tzdata",
+    "feedparser>=6.0",
+    "yfinance>=1.5.0",
+    "scipy>=1.13.0",
+]
 
 [tool.setuptools]
-package-dir = { "" = "scripts" }
-py-modules = ["email_service"]
-
-# Test runner (previously lived in pyproject.toml before it was dropped):
-# makes `pytest` import repo roots and default to the tests/ dir.
-[tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
-
+# Nothing is installed from the source tree: the app is launched via
+# `streamlit run app.py` from the repo root (see run.sh), and scripts/ +
+# schwab_mcp/ are imported in-place via sys.path. The empty list prevents
+# setuptools' auto-discovery from choking on the two top-level packages.
+packages = []
+py-modules = []

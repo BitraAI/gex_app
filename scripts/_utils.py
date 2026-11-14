@@ -12,6 +12,20 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 
+def _normalize_sel_exp(sel: Any) -> list[str]:
+    """Normalize the sidebar's ``selected_expiration`` value to a list.
+
+    The Streamlit widget may hold a single string, a list/tuple of strings,
+    or be unset; the chain filters want a list of expiration strings.
+    Shared by the six call sites that previously re-implemented the
+    ``isinstance(sel, str)`` dance inline."""
+    if not sel:
+        return []
+    if isinstance(sel, str):
+        return [sel]
+    return list(sel)
+
+
 def is_market_open() -> bool:
     """Return True if US regular equity trading hours are currently open
     (09:30-16:00 ET, Mon-Fri, excluding major holidays)."""

@@ -16,7 +16,7 @@ import streamlit as st
 
 from scripts import client as client_mod
 from scripts._constants import STREAM_SYMBOL_MAP
-from scripts._utils import compute_strike_increment, is_otm_or_atm, is_itm_or_atm
+from scripts._utils import compute_strike_increment, is_otm_or_atm, is_itm_or_atm, _normalize_sel_exp
 from scripts.client import (create_client, fetch_option_chain, get_yield,
                              get_interest_rate, get_20d_rv, get_next_earnings_date,
                              fetch_candles_smart, load_candle_cache)
@@ -257,22 +257,9 @@ def fetch_data(symbol: str) -> bool:
     prefetch_daily_candles(symbol)
     apply_filters()
     compute_state()
-    # Update ATM service with correct front expiration for this ticker
-    if data and spot > 0:
-        expirations = sorted(set(e["expiration"] for e in data))
-        if expirations:
-            atm_svc = st.session_state.get("atm_option_service")
-            if atm_svc:
-                atm_svc.set_ticker_expiration(_sym, expirations[0])
-                # Second-nearest expiration feeds the rolling Flow Ratio
-                # / Net Flow (two ATM pairs per ticker).
-                if len(expirations) > 1:
-                    atm_svc.set_ticker_expiration2(_sym, expirations[1])
-    # Store Put Wall (support) and Call Wall (resistance) for the grid
-    atm_svc = st.session_state.get("atm_option_service")
-    if atm_svc:
-        _ana = st.session_state.get("analytics") or {}
-        atm_svc.set_ticker_walls(_sym, _ana.get("put_wall"), _ana.get("call_wall"))
+    # Update ATM service with correct front expiration for this ticker,
+    # then store Put Wall (support) / Call Wall (resistance) for the grid.
+    _update_atm_service(_sym, data, spot, st.session_state.get("analytics") or {})
     # Populate the per-ticker strike increment (used by
     # maybe_fire_wall_zone_alerts to size the wall-refresh / big-move
     # thresholds).  Without this, the default 1.0 is used until the first
@@ -308,10 +295,6 @@ def apply_filters():
 
     filtered = list(data)
 
-    if cfg.get("min_oi", 0) > 0:
-        filtered = [e for e in filtered if e["open_interest"] >= cfg["min_oi"]]
-    if cfg.get("min_vol", 0) > 0:
-        filtered = [e for e in filtered if e["volume"] >= cfg["min_vol"]]
     if not cfg.get("show_itm", True):
         filtered = [e for e in filtered if is_otm_or_atm(e, spot)]
     if not cfg.get("show_otm", True):
@@ -332,8 +315,11 @@ def compute_state():
     show_calls = st.session_state.show_calls
     show_puts = st.session_state.show_puts
 
-    atm_range = st.session_state.get("strikes_atm_range", 20)
-    if atm_range > 0 and data:
+    # Strike window: keep the 20 strikes nearest ATM (matches the chart's
+    # 41-strike window). No widget lets the user change this, so it's a
+    # constant rather than a session key.
+    atm_range = 20
+    if data:
         strikes_sorted = sorted(set(e["strike"] for e in data))
         atm_strike = min(strikes_sorted, key=lambda s: abs(s - spot))
         atm_idx = strikes_sorted.index(atm_strike)
@@ -348,16 +334,14 @@ def compute_state():
         e for e in aggregate_by_expiration(data, show_calls, show_puts, spot)
         if e.get("call_oi", 0) + e.get("put_oi", 0) > 0 or e.get("atm_iv", 0) > 0
     ]
-    _sel_exp = st.session_state.get("selected_expiration", [])
-    if isinstance(_sel_exp, str):
-        _sel_exp = [_sel_exp]
+    _sel_exp = _normalize_sel_exp(st.session_state.get("selected_expiration"))
     _sel_exp_for_skew = _sel_exp[0] if _sel_exp else None
     analytics = compute_analytics(data, spot, show_calls, show_puts, data_full=st.session_state.data, r=st.session_state.get("r", 0.0), q=st.session_state.get("q", 0.0), expiration=_sel_exp_for_skew)
 
     st.session_state.strikes = strikes
     st.session_state.by_exp = by_exp
     # Cache by_exp_all: only recompute when data changes (tracked by id).
-    # Filter changes (min_oi, show_itm, etc.) should NOT trigger a re-aggregation.
+    # Filter changes (show_itm, etc.) should NOT trigger a re-aggregation.
     _data_ver = id(st.session_state.data)
     if st.session_state.get("by_exp_all_version", 0) != _data_ver:
         st.session_state.by_exp_all = [
@@ -421,6 +405,27 @@ def check_alerts(analytics: dict, spot: float):
 
 
 CANDLE_TTL_SECS = 600  # 10 minutes
+
+
+def _update_atm_service(sym: str, data: list[dict], spot: float, analytics: dict):
+    """Push expiration + wall levels for *sym* into the ATM option service.
+
+    Shared by ``fetch_data`` (main chart refresh) and ``_run_ticker_signals``
+    (Trade Signals scan) — previously the same block was copy-pasted in both.
+    """
+    if not (data and spot > 0):
+        return
+    atm_svc = st.session_state.get("atm_option_service")
+    if not atm_svc:
+        return
+    expirations = sorted(set(e["expiration"] for e in data))
+    if expirations:
+        atm_svc.set_ticker_expiration(sym, expirations[0])
+        # Second-nearest expiration feeds the rolling Flow Ratio
+        # / Net Flow (two ATM pairs per ticker).
+        if len(expirations) > 1:
+            atm_svc.set_ticker_expiration2(sym, expirations[1])
+    atm_svc.set_ticker_walls(sym, analytics.get("put_wall"), analytics.get("call_wall"))
 
 
 def _candles_need_refresh(symbol: str, tf: str) -> bool:

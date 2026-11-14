@@ -22,7 +22,7 @@ from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY
 from scripts._utils import compute_strike_increment, format_expiration, is_market_open
 from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol
 from scripts.client import fetch_quotes
-from scripts.calculations import calculate_atm_strike
+from scripts.calculations import calculate_atm_strike, get_strike_spacing
 from scripts.signals import build_strategy_alerts
 from scripts.telegram_notifier import diff_alerts, notify_alerts
 
@@ -692,8 +692,6 @@ def maybe_fire_wall_zone_alerts() -> None:
         if wall_zone is not None and _flow_vol is not None and next_state.get("_zone_entry_vol") is not None:
             _absorbed_at_wall = max(0.0, _flow_vol - next_state["_zone_entry_vol"])
 
-        pass
-
         last_ts = (prev or {}).get("last_alert_ts", 0.0)
         next_state["last_alert_ts"] = last_ts
         next_state["_prev_call_wall"] = call_wall
@@ -701,13 +699,13 @@ def maybe_fire_wall_zone_alerts() -> None:
         next_state["_wall_stable_count"] = _wall_stable
         # Wall-broke alerts are high-confidence (directional pierce confirmed),
         # so they fire regardless of wall stability.
-        _cache = _ticker_analytics_cache.get(t_upper.split(":")[0]) or {}
+        # (_cache mirrors analytics' oi/volume support keys — same lookup.)
         if new_alerts and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
             next_state["last_alert_ts"] = now
             next_state["_last_alert_texts"] = new_alerts
             state[t_upper] = next_state
             notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
-                          gex=_cache.get("net_gex"),
+                          gex=_ticker_ana.get("net_gex"),
                           wall_zone=wall_zone, pw=put_wall, cw=call_wall,
                           wall_mark=analytics.get("call_wall_mark") if wall_zone == "Resistance" else analytics.get("put_wall_mark"),
                           absorbed_at_wall=_absorbed_at_wall,
@@ -727,27 +725,35 @@ def maybe_fire_wall_zone_alerts() -> None:
 async def _compute_walls_for_symbol(client, symbol: str) -> dict | None:
     """Lightweight recompute: fetch chain + parse + compute analytics only.
 
-    Used for frequent wall refreshes — skips rate/yield/RV/IV-rank so the
-    latest walls can be fetched much more often without hammering the API.
-    Returns ``None`` when the chain cannot be loaded.
+    Used for frequent wall refreshes — skips rate-fetch extras, RV and
+    IV-rank so the latest walls can be fetched much more often without
+    hammering the API.  Returns ``None`` when the chain cannot be loaded.
     """
     from scripts.chain_parser import fetch_and_parse_chain
-    
+    from scripts.analytics import compute_analytics
+    from scripts.chain_parser import _merge_etf_analytics
+
     _sym = symbol.upper().lstrip("$")
     is_index = _sym in STREAM_SYMBOL_MAP
-    
+
     result = await fetch_and_parse_chain(
         client, symbol, include_quotes=True, is_index_symbol=is_index
     )
-    
+
     if not result["data"] or result["spot"] <= 0:
         logger.warning("no option data for %s", symbol)
         return None
-    
+
+    analytics = compute_analytics(
+        result["data"], result["spot"], r=result.get("r", 0.0), q=result.get("q", 0.0)
+    )
+    if result["etf_analytics"]:
+        analytics = _merge_etf_analytics(analytics, result["etf_analytics"])
+
     return {
-        "analytics": result["analytics"],
+        "analytics": analytics,
         "spot": result["spot"],
-        "data": result["data"]
+        "data": result["data"],
     }
 
 
@@ -1235,20 +1241,22 @@ def render_atm_order_flow_grid():
         except (TypeError, ValueError):
             return ""
         
-        # Green when spot is within 2% of support level (support zone)
-        if support is not None:
-            zone_pct = 0.02
-            support_zone_upper = support * (1 + zone_pct)
-            if spot >= support and spot <= support_zone_upper:
-                return "background-color:#90EE90;"
-        
-        # Red when spot is within 2% of resistance level (resistance zone)
-        if resistance is not None:
-            zone_pct = 0.02
-            resistance_zone_lower = resistance * (1 - zone_pct)
-            if spot >= resistance_zone_lower and spot <= resistance:
-                return "background-color:#FFB6C1;"
-        
+        # Zone width is a quarter of the strike spacing (chain-derived when
+        # known, price-bucket heuristic as fallback).
+        t_upper = _normalize_display_symbol(r.get("Ticker", "")) if r.get("Ticker") else None
+        spacing = _strike_inc.get(t_upper) if t_upper else None
+        if not spacing:
+            spacing = get_strike_spacing(spot)
+        zone = spacing * 0.25
+
+        # Green when spot is within the support zone band
+        if support is not None and support <= spot <= support + zone:
+            return "background-color:#90EE90;"
+
+        # Red when spot is within the resistance zone band
+        if resistance is not None and resistance - zone <= spot <= resistance:
+            return "background-color:#FFB6C1;"
+
         return ""
 
     cols = [
@@ -1257,8 +1265,8 @@ def render_atm_order_flow_grid():
         ("Expiration", "center", lambda v: html.escape(format_expiration(v)) if v else "", None),
         ("Support", "right", None, None),
         ("Resistance", "right", None, None),
-        ("Put Price", "right", _fmt_money, None),
         ("Call Price", "right", _fmt_money, None),
+        ("Put Price", "right", _fmt_money, None),
         ("Net Flow", "right", None, None),
         ("Flow Ratio", "right", lambda v: f"<span style='color:{'green' if v > 0.70 else ('red' if v < 0.30 else 'inherit')}'>{v:.2f}</span>" if v != 0 else "", None),
         ("OI Support", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),

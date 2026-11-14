@@ -248,7 +248,7 @@ class AtmOptionVolumeService:
         # Per-ticker flow tracking (all tracked tickers including primary)
         # _ticker_flows: display_symbol -> {stream_symbol, spot, atm_strike,
         #   call_sym, put_sym, call_bid, call_ask, put_bid, put_ask,
-        #   bullish, bearish, flow_history, trend}
+        #   bullish, bearish}
         self._ticker_flows: dict[str, dict] = {}
         # Reverse lookup: option_symbol -> display_symbol
         self._sym_to_ticker: dict[str, str] = {}
@@ -414,8 +414,6 @@ class AtmOptionVolumeService:
                     "expiration": self._expiration,
                     "call_wall": None,
                     "put_wall": None,
-                    "put_wall_stability": None,
-                    "call_wall_stability": None,
                     "call_sym": None,
                     "put_sym": None,
                     "call_bid": None,
@@ -436,22 +434,10 @@ class AtmOptionVolumeService:
                     "call_delta": None,
                     "put_delta": None,
                     "expiration2": None,
-                    "exp2_call_delta": None,
-                    "exp2_put_delta": None,
                     "delta_buy": 0.0,
                     "delta_sell": 0.0,
-                    "flow_history": [],
-                    "spot_history": deque(),
-                    "exec_history": deque(),
-                    "atm_delta_flow_history": deque(),
                     "last_size": 0,
                     "expiration_flows": [],
-                    "flow_speed": 0,
-                    "flow_acceleration": 0,
-                    "book_imbalance": None,
-                    "book_imbalance_history": [],
-                    "trend": "flat",
-                    "trend_reversal": None,
                 }
 
     def stop(self):
@@ -489,201 +475,6 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return None, None
             return ticker["bullish"], ticker["bearish"]
-
-    def get_ticker_absorption(self, display_symbol: str) -> float | None:
-        """Return the current order absorption for a tracked ticker:
-        delta-weighted cumulative ATM option volume over the trailing 60 s
-        divided by the spot *path length* over the same window (contracts
-        per $1).
-
-        The denominator is the sum of absolute per-sample spot moves, not
-        the net displacement: a tape that whipsaws ±$2 and closes flat has
-        travelled a lot and must NOT read as pinned — only a price that
-        stays put (a genuine pin) yields a high ratio.
-
-        Uses delta-weighted volume (same as Flow Ratio) for consistency.
-
-        High absorption means the book/level soaked up heavy flow with
-        little price movement (price pinned); low absorption means the
-        price is drifting on thin flow.  Returns None when the ticker is
-        untracked, the 60 s flow is below ``_ABSORPTION_MIN_VOL``, or
-        fewer than 2 samples exist in either window.
-
-        The spot window is sampled on each call (the grid polls every 2 s),
-        so no extra bookkeeping is needed on the streaming hot path."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            now = _time_mod.time()
-            spot = ticker.get("spot", 0.0) or 0.0
-            sh = ticker.setdefault("spot_history", deque())
-            dvh = ticker.setdefault("delta_vol_history", deque())
-            while sh and sh[0][0] < now - 60:
-                sh.popleft()
-            while dvh and dvh[0][0] < now - 60:
-                dvh.popleft()
-            if spot > 0:
-                sh.append((now, spot))
-                while sh and sh[0][0] < now - 60:
-                    sh.popleft()
-            if len(dvh) < 2 or len(sh) < 2:
-                return None
-            vol_60 = dvh[-1][1] - dvh[0][1]
-            if vol_60 < _ABSORPTION_MIN_VOL:
-                return None
-            # Chop-adjusted price movement: total path travelled by spot
-            # over the window (sum of |Δ| per sample), with smooth floor
-            # so a dead-flat feed yields finite absorption instead of inf.
-            spot_path = sum(abs(cur[1] - prev[1])
-                            for prev, cur in zip(sh, list(sh)[1:]))
-            return vol_60 / (spot_path + _ABSORPTION_MIN_SPOT_MOVE)
-
-    def get_ticker_pin_score(self, display_symbol: str) -> float | None:
-        """Return the current pin score for a tracked ticker: delta-weighted
-        volume over trailing 60 s divided by net spot displacement (contracts
-        per $1).  Simpler than absorption for users who want to know "how
-        much flow did the price absorb?" without the path-length complexity.
-
-        Formula: vol_60 / (abs(net_displacement) + 0.05)
-
-        A high pin score means heavy flow with little net movement (price
-        pinned); a low score means flow caused significant movement.
-        Unlike absorption, this ignores price whipsaw and only cares about
-        net displacement.
-
-        Returns None when the ticker is untracked or the 60 s flow is below
-        ``_ABSORPTION_MIN_VOL`` or fewer than 2 samples exist."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            now = _time_mod.time()
-            sh = ticker.setdefault("spot_history", deque())
-            dvh = ticker.setdefault("delta_vol_history", deque())
-            while sh and sh[0][0] < now - 60:
-                sh.popleft()
-            while dvh and dvh[0][0] < now - 60:
-                dvh.popleft()
-            if len(dvh) < 2 or len(sh) < 2:
-                return None
-            vol_60 = dvh[-1][1] - dvh[0][1]
-            if vol_60 < _ABSORPTION_MIN_VOL:
-                return None
-            net_displacement = abs(sh[-1][1] - sh[0][1])
-            return vol_60 / (net_displacement + 0.05)
-
-    def get_ticker_executed_net60(self, display_symbol: str) -> float | None:
-        """Return (buy_vol, sell_vol, net_60) for a tracked ticker:
-        session-cumulative delta-adjusted executed ATM volume (buying calls
-        / selling puts -> buy; selling calls / buying puts -> sell), plus
-        the net_delta (delta_buy - delta_sell) over the trailing 60 s
-        window.  Any element is None when the ticker is untracked or no
-        data exists yet."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None, None, None
-            buy = ticker.get("buy_vol", 0)
-            sell = ticker.get("sell_vol", 0)
-            now = _time_mod.time()
-            eh = ticker.setdefault("exec_history", deque())
-            while eh and eh[0][0] < now - 60:
-                eh.popleft()
-            net_60 = None
-            if len(eh) >= 2:
-                net_60 = eh[-1][1] - eh[0][1]
-            return buy, sell, net_60
-
-    def get_ticker_flow_metrics_60s(self, display_symbol: str) -> tuple[float | None, float | None]:
-        """Rolling 60 s (net_flow, flow_ratio) — DELTA-WEIGHTED.
-
-        Returns delta-weighted flow metrics that account for options' sensitivity
-        to underlying price moves. Delta weighting provides a more accurate view
-        of market sentiment by treating deep ITM options (high delta) as more
-        significant than OTM options (low delta).
-
-        Returns:
-            Tuple of (net_flow, flow_ratio) where:
-            - net_flow: bull_60 - bear_60 (positive = bullish bias)
-            - flow_ratio: bull_60 / (bull_60 + bear_60) (0.5 = neutral)
-
-        Example:
-            If 60s trades include:
-            - 10 calls @ delta=0.6 (bullish) = 6 delta-weighted
-            - 5 puts @ delta=0.3 (bearish) = 1.5 delta-weighted
-            - net_flow = 6 - 1.5 = +4.5
-            - flow_ratio = 6 / 7.5 = 0.80 (80% bullish)
-
-        Uses the trailing-60 s change in cumulative delta-weighted
-        sides (``Δ delta_buy − Δ delta_sell``) as ``net_flow`` (identical
-        to ``get_ticker_executed_net60[:-1][2]``'s ``net_60``) and
-        ``Δ delta_buy / (Δ delta_buy + Δ delta_sell)`` as ``flow_ratio``.
-        The delta-weighted net feeds the Order Flow grid's Net Flow cell, the
-        title-row chip, and the Telegram header; the delta-weighted ratio
-        feeds the grid's Flow Ratio cell, the title-row chip, and the
-        Telegram Flow Ratio header. ``None`` when the ticker is untracked
-        or the window has fewer than two samples (no flow yet / quiet
-        book).
-
-        Because the values are differenced over a sliding window they
-        redraw themselves every second and need no wall-cross reset: flow
-        measured against the old level simply ages out after a minute.
-        Samples record the cumulative counters at each executed trade, so
-        the window measures trades between the oldest and newest samples
-        inside it — matching the absorption / executed-flow semantics."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None, None
-            now = _time_mod.time()
-            dfh = ticker.setdefault("atm_delta_flow_history", deque())
-            while dfh and dfh[0][0] < now - 60:
-                dfh.popleft()
-            if len(dfh) < 2:
-                return None, None
-            bull_60 = dfh[-1][1] - dfh[0][1]
-            bear_60 = dfh[-1][2] - dfh[0][2]
-            total_60 = bull_60 + bear_60
-            if total_60 <= 0:
-                return None, None
-            return bull_60 - bear_60, round(bull_60 / total_60, 2)
-
-    def get_ticker_call_buy(self, display_symbol: str) -> int | None:
-        """Return cumulative call buy volume for a tracked ticker,
-        or None if not tracked / no data yet."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            return ticker.get("cumulative_call_buy", 0)
-
-    def get_ticker_call_sell(self, display_symbol: str) -> int | None:
-        """Return cumulative call sell volume for a tracked ticker,
-        or None if not tracked / no data yet."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            return ticker.get("cumulative_call_sell", 0)
-
-    def get_ticker_put_buy(self, display_symbol: str) -> int | None:
-        """Return cumulative put buy volume for a tracked ticker,
-        or None if not tracked / no data yet."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            return ticker.get("cumulative_put_buy", 0)
-
-    def get_ticker_put_sell(self, display_symbol: str) -> int | None:
-        """Return cumulative put sell volume for a tracked ticker,
-        or None if not tracked / no data yet."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            return ticker.get("cumulative_put_sell", 0)
 
     def get_ticker_option_prices(self, display_symbol: str) -> dict:
         """Return {call_price, put_price} mid-market for a tracked ticker,
@@ -1021,24 +812,6 @@ class AtmOptionVolumeService:
                 return calculate_atm_strike(ticker["spot"])
             return None
 
-    def get_ticker_call_sym(self, display_symbol: str) -> str | None:
-        """Return the ATM call OCC symbol currently subscribed for a tracked
-        ticker, or None if not tracked / not subscribed yet."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            return ticker.get("call_sym")
-
-    def get_ticker_put_sym(self, display_symbol: str) -> str | None:
-        """Return the ATM put OCC symbol currently subscribed for a tracked
-        ticker, or None if not tracked / not subscribed yet."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            return ticker.get("put_sym")
-
     def get_ticker_quote_symbols(self, display_symbol: str) -> dict:
         """Return {label: OCC symbol} for the option quotes that keep the
         Call/Put Price columns live:
@@ -1164,20 +937,15 @@ class AtmOptionVolumeService:
         # Mark for re-fetch on the next ensure_atm_streaming cycle.
         self._walls_verified.discard(norm)
 
-    def set_ticker_walls(self, display_symbol: str, put_wall: float | None, call_wall: float | None,
-                         put_stability: int | None = None, call_stability: int | None = None):
+    def set_ticker_walls(self, display_symbol: str, put_wall: float | None, call_wall: float | None):
         """Store the Put Wall (support) and Call Wall (resistance) for a
         tracked ticker.  These are read from REST option-chain analytics
-        and displayed in the Order Flow grid.  ``put_stability`` /
-        ``call_stability`` carry the raw stability scores (±1/±2/0) used
-        for the Support / Resistance columns' arrow indicators."""
+        and displayed in the Order Flow grid."""
         with self._lock:
             ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
             if ticker is not None:
                 ticker["put_wall"] = put_wall
                 ticker["call_wall"] = call_wall
-                ticker["put_wall_stability"] = put_stability
-                ticker["call_wall_stability"] = call_stability
                 norm = _normalize_display_symbol(display_symbol)
                 self._walls_verified.add(norm)
                 # Stamp the refresh time so the throttle in
@@ -1204,26 +972,6 @@ class AtmOptionVolumeService:
                     ticker["call_delta"] = call_delta
                 if put_delta is not None:
                     ticker["put_delta"] = put_delta
-
-    def set_ticker_atm_deltas2(self, display_symbol: str,
-                               call_delta: float | None,
-                               put_delta: float | None):
-        """Store the SECOND-nearest expiration's ATM Call/Put deltas.
-
-        These are the per-expiration fallback for delta-weighting prints
-        from the second ATM pair: `_process_trade_ticker` weights each
-        trade by its own contract's live streamed DELTA and falls back to
-        these only when the stream has not delivered a delta for that
-        contract yet (previously every print — front or second expiry —
-        was weighted by the FRONT expiration's deltas); raw Net Flow /
-        Flow Ratio buckets are unaffected (they are pure counts)."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is not None:
-                if call_delta is not None:
-                    ticker["exp2_call_delta"] = call_delta
-                if put_delta is not None:
-                    ticker["exp2_put_delta"] = put_delta
 
     def set_ticker_option_prices(self, display_symbol: str,
                                   call_price: float | None,
@@ -1384,8 +1132,6 @@ class AtmOptionVolumeService:
                     "expiration": self._expiration,
                     "call_wall": None,
                     "put_wall": None,
-                    "put_wall_stability": None,
-                    "call_wall_stability": None,
                     "call_sym": None,
                     "put_sym": None,
                     "call_bid": None,
@@ -1408,20 +1154,8 @@ class AtmOptionVolumeService:
                     "call_delta": None,
                     "put_delta": None,
                     "expiration2": None,
-                    "exp2_call_delta": None,
-                    "exp2_put_delta": None,
                     "delta_buy": 0.0,
                     "delta_sell": 0.0,
-                    "flow_history": [],
-                    "spot_history": deque(),
-                    "exec_history": deque(),
-                    "atm_delta_flow_history": deque(),
-                    "flow_speed": 0,
-                    "flow_acceleration": 0,
-                    "book_imbalance": None,
-                    "book_imbalance_history": [],
-                    "trend": "flat",
-                    "trend_reversal": None,
                 }
             if ticker is not None:
                 old = ticker["spot"]
@@ -1484,22 +1218,6 @@ class AtmOptionVolumeService:
             if ticker is None:
                 return None
             return ticker.get("call_wall")
-
-    def get_ticker_put_stability(self, display_symbol: str) -> int | None:
-        """Return the stored put_wall_stability_score (±1/±2/0) or None."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            return ticker.get("put_wall_stability")
-
-    def get_ticker_call_stability(self, display_symbol: str) -> int | None:
-        """Return the stored call_wall_stability_score (±1/±2/0) or None."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            return ticker.get("call_wall_stability")
 
     def bulk_update_spots(self, spot_map: dict[str, float]):
         """Set spot prices for multiple tickers at once and trigger a single
@@ -1629,10 +1347,6 @@ class AtmOptionVolumeService:
                             _tk["call_bid"] = float(bid)
                         if ask is not None:
                             _tk["call_ask"] = float(ask)
-                        if bid_size is not None:
-                            _tk["current_bid_size"] = float(bid_size)
-                        if ask_size is not None:
-                            _tk["current_ask_size"] = float(ask_size)
                     elif contract_type in ("PUT", "P"):
                         if underlying is not None and not _is_idx:
                             _tk["spot"] = float(underlying)
@@ -1640,10 +1354,6 @@ class AtmOptionVolumeService:
                             _tk["put_bid"] = float(bid)
                         if ask is not None:
                             _tk["put_ask"] = float(ask)
-                        if bid_size is not None:
-                            _tk["current_bid_size"] = float(bid_size)
-                        if ask_size is not None:
-                            _tk["current_ask_size"] = float(ask_size)
 
                 # Maintain cross-ticker bid/ask consistency for the primary symbol
                 if ticker and is_primary:
@@ -2030,26 +1740,11 @@ class AtmOptionVolumeService:
 
         # Per-trade delta resolution, best source first:
         #   1. the traded contract's own live delta from the stream,
-        #   2. the REST chain ATM delta of the contract's own expiration
-        #      (front vs second pair — a second-expiry print must not be
-        #      weighted with the front expiry's delta),
+        #   2. the REST chain front-expiration ATM delta,
         #   3. the static ±0.5 fallback.
         _d = None
         if isinstance(delta, (int, float)) and delta:
             _d = float(delta)
-        if _d is None:
-            _t = trade_sym or ""
-            _is_exp2 = bool(_t) and _t in (
-                (ticker.get("call_sym2") or "").replace(" ", ""),
-                (ticker.get("put_sym2") or "").replace(" ", ""),
-            )
-            if _is_exp2:
-                _cd2 = ticker.get("exp2_call_delta")
-                _pd2 = ticker.get("exp2_put_delta")
-                if opt_type == "CALL" and isinstance(_cd2, (int, float)) and _cd2:
-                    _d = _cd2
-                elif opt_type == "PUT" and isinstance(_pd2, (int, float)) and _pd2:
-                    _d = _pd2
         if _d is None:
             _cd = ticker.get("call_delta")
             _pd = ticker.get("put_delta")
@@ -2170,39 +1865,6 @@ class AtmOptionVolumeService:
                 found["bullish_raw"].popleft()
             while found["bearish_raw"] and found["bearish_raw"][0][0] < now - 60:
                 found["bearish_raw"].popleft()
-
-        # Rolling 60 s window of delta-weighted cumulative ATM volume for
-        # order absorption (delta over the window is the recent aggressive
-        # flow) and of the cumulative net executed flow (delta_buy - delta_sell)
-        # for the 60 s net line.
-        now = _time_mod.time()
-        dvh = ticker.setdefault("delta_vol_history", deque())
-        dvh.append((now, ticker.get("delta_buy", 0.0) + ticker.get("delta_sell", 0.0)))
-        while dvh and dvh[0][0] < now - 60:
-            dvh.popleft()
-        eh = ticker.setdefault("exec_history", deque())
-        eh.append((now, ticker.get("delta_buy", 0.0) - ticker.get("delta_sell", 0.0)))
-        while eh and eh[0][0] < now - 60:
-            eh.popleft()
-        # Rolling 60 s window of the raw cumulative bullish/bearish
-        # contract buckets — still recorded as a reference (kept cheap).
-        fh = ticker.setdefault("atm_flow_history", deque())
-        fh.append((now, ticker["bullish"], ticker["bearish"]))
-        while fh and fh[0][0] < now - 60:
-            fh.popleft()
-        # Rolling 60 s window of the cumulative delta-weighted sides
-        # (delta_buy / delta_sell) — differenced over the window by
-        # get_ticker_flow_metrics_60s to yield the delta-weighted
-        # Flow Ratio of the Order Flow grid / title-row chips / Telegram.
-        dfh = ticker.setdefault("atm_delta_flow_history", deque())
-        dfh.append((now, ticker.get("delta_buy", 0.0), ticker.get("delta_sell", 0.0)))
-        while dfh and dfh[0][0] < now - 60:
-            dfh.popleft()
-        # Track avg delta volume for liquidity flow threshold calculation
-        dvh_avg = ticker.setdefault("delta_vol_history_avg", deque())
-        dvh_avg.append((now, ticker.get("delta_buy", 0.0) + ticker.get("delta_sell", 0.0)))
-        while dvh_avg and dvh_avg[0][0] < now - 30:
-            dvh_avg.popleft()
 
     def _infer_dir(self, price: float, bid: float | None, ask: float | None, prev_price: float | None = None, last_direction: str = "") -> str:
         if bid is not None and ask is not None:

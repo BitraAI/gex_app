@@ -153,7 +153,13 @@ def render_candlesticks_frag():
             except Exception:
                 logger.exception("Candlestick refresh failed for %s %s", symbol, timeframe)
 
-        historical_df = load_candle_cache(symbol, timeframe)
+        # Prefer the frame already held in session state (stored by
+        # refresh_candles / prefetch_daily_candles) over a Parquet re-read:
+        # this fragment ticks every 2s and pd.read_parquet from disk on every
+        # tick was the largest constant cost in the render path.
+        historical_df = s.candle_dataframes.get(f"{symbol}|{timeframe}")
+        if historical_df is None or historical_df.empty:
+            historical_df = load_candle_cache(symbol, timeframe)
 
         # --- Build chart DataFrame ---
         chart_df = pd.DataFrame()
@@ -166,7 +172,9 @@ def render_candlesticks_frag():
             chart_df = chart_df.drop_duplicates(subset=["datetime"], keep="last")
             chart_label = f"Historical {timeframe}"
         else:
-            historical_df = load_candle_cache(symbol, "1d")
+            historical_df = s.candle_dataframes.get(f"{symbol}|1d")
+            if historical_df is None or historical_df.empty:
+                historical_df = load_candle_cache(symbol, "1d")
             if not historical_df.empty:
                 recent = historical_df.tail(500).dropna(subset=["open", "high", "low", "close"])
                 chart_df = recent[["datetime", "open", "high", "low", "close", "volume"]].copy()
@@ -447,34 +455,6 @@ def render_candlesticks_frag():
             except Exception:
                 pass
 
-        # Merge ATM option volume into chart df when available
-        # atm_df index is int64 milliseconds — same unit as chart_df["datetime"].
-        # Warnings are shown near the chart (see Option_Volume_Profile block below);
-        # this block only attaches ATM volume columns to chart_df.
-        if "Option_Volume_Profile" in selected_indicators:
-            atm_svc = st.session_state.get("atm_option_service")
-            if atm_svc and atm_svc.is_running:
-                try:
-                    atm_df = atm_svc.get_candles()
-                    if not atm_df.empty:
-                        atm_df = atm_df.reset_index()
-                        atm_df["datetime"] = atm_df["datetime"].astype("int64")
-                        # Floor ATM 1-second bucket timestamps to the chart's
-                        # timeframe boundary so they match chart_df["datetime"].
-                        _tf_min_atm = (client_mod.TIMEFRAMES.get(timeframe) or {}).get("minutes")
-                        atm_df = floor_dataframe_timestamps(atm_df, "datetime", timeframe, _tf_min_atm)
-                        atm_agg = atm_df.groupby("datetime").agg({
-                            "call_buy_vol": "sum", "call_sell_vol": "sum",
-                            "put_buy_vol": "sum", "put_sell_vol": "sum",
-                            "total_buy_vol": "sum", "total_sell_vol": "sum",
-                        }).reset_index()
-                        chart_df = chart_df.merge(atm_agg, on="datetime", how="left")
-                        for col in ["call_buy_vol", "call_sell_vol", "put_buy_vol", "put_sell_vol", "total_buy_vol", "total_sell_vol"]:
-                            if col in chart_df.columns:
-                                chart_df[col] = chart_df[col].fillna(0).astype(int)
-                except Exception:
-                    pass
-
         # Persist in session state. chart_df["datetime"] stays as int64 ms because
         # chart_component.render_chart converts it to UNIX-seconds time keys for
         # lightweight-charts (with the proper EST offset).
@@ -542,30 +522,19 @@ def render_candlesticks_frag():
             _pw = _analytics.get("put_wall")
 
         # Websocket streaming status — overlaid on the candlesticks chart.
-        # The equity StreamClient feeds the live candles (and, when
-        # Option_Volume_Profile is selected, the option-trade aggregation), so its
-        # status is shown regardless of which indicators are selected.  We
-        # resolve a single status string + level here and hand it to
-        # render_chart() via the `status` parameter; an absolute-positioned
-        # badge inside the chart container draws it on top of the canvas.
+        # The equity StreamClient feeds the live candles, so its status is
+        # shown regardless of which indicators are selected.  We resolve a
+        # single status string + level here and hand it to render_chart() via
+        # the `status` parameter; an absolute-positioned badge inside the
+        # chart container draws it on top of the canvas.
         _eq_svc = st.session_state.get("streaming_service")
-        _atm_svc = st.session_state.get("atm_option_service")
         _status = None
         if _eq_svc is None:
             _status = {"text": "Stream not initialized", "level": "warning"}
         elif not _eq_svc.is_running:
             _status = {"text": f"Starting {stream_symbol} stream...", "level": "info"}
         elif _eq_svc.is_connected and _eq_svc.has_data:
-            _msg = f"Receiving {stream_symbol} ticks · {_eq_svc.ticks_received}"
-            if "Option_Volume_Profile" in selected_indicators and _atm_svc is not None:
-                if _atm_svc.is_running and _atm_svc.has_data:
-                    _n = _atm_svc.ticks_received
-                    _msg += f" · { _n } option tick{'s' if _n != 1 else ''}"
-                elif _atm_svc.is_running and not _atm_svc.has_data:
-                    _msg += " · waiting for option trades..."
-                elif not _atm_svc.is_running:
-                    _msg += " · option flow not subscribed"
-            _status = {"text": _msg, "level": "success"}
+            _status = {"text": f"Receiving {stream_symbol} ticks · {_eq_svc.ticks_received}", "level": "success"}
         elif _eq_svc.is_connected and not _eq_svc.has_data:
             _status = {"text": f"Connected · waiting for {stream_symbol} trades...", "level": "info"}
         elif not _eq_svc.is_connected:
@@ -582,23 +551,6 @@ def render_candlesticks_frag():
         # Chart payload (data) is rendered inside candles_container
         # This updates the chart data every tick without recreating the chart DOM
         if candles_payload:
-            iv_skew_indicator_enabled = any(ind in selected_indicators for ind in ["IV Skew (25Δ)"])
-            _iv_skew_hist = s.get("iv_skew_history") or []
-            if iv_skew_indicator_enabled and _analytics.get("iv_skew") is not None:
-                # Second-resolution timestamp (kept in ms). Storing ms would
-                # collapse to duplicate seconds client-side, shrinking the
-                # series every other tick and forcing full setData repaints.
-                _now_ms = (int(pd.Timestamp.now(tz="UTC").value // 1_000_000)) * 1000
-                if not _iv_skew_hist or _iv_skew_hist[-1].get("datetime") != _now_ms:
-                    _iv_skew_hist = list(_iv_skew_hist)
-                    _iv_skew_hist.append({
-                        "datetime": _now_ms,
-                        "iv_skew": _analytics["iv_skew"],
-                        "put_iv_25d": _analytics.get("put_iv_25d"),
-                        "call_iv_25d": _analytics.get("call_iv_25d"),
-                        "atm_iv": _analytics.get("atm_iv"),
-                    })
-            s["iv_skew_history"] = _iv_skew_hist[-300:] if len(_iv_skew_hist) > 300 else _iv_skew_hist
             render_chart(
                 candles_payload,
                 indicators=selected_indicators,
@@ -607,7 +559,6 @@ def render_candlesticks_frag():
                 last_close=last_close,
                 status=_status,
                 symbol=symbol,
-                iv_skew_history=_iv_skew_hist if iv_skew_indicator_enabled else [],
             )
         st.caption(f"{s.candlestick_label} bars ({len(s.candlestick_data)})")
 

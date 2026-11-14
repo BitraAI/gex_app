@@ -1194,10 +1194,27 @@ def create_iv_richness_by_strike(
 
 
 def _get_est_offset() -> int:
+    """ET wall-clock UTC offset in seconds, cached for 5 minutes.
+
+    Called several times per 2-second chart fragment tick; a fresh ZoneInfo
+    lookup + datetime.now() each time is pure waste. The offset only changes
+    on DST transitions (twice a year), so a short TTL is plenty accurate.
+    """
     from zoneinfo import ZoneInfo
     from datetime import datetime
+    import time
+    global _EST_OFFSET_CACHE
+    now = time.time()
+    cached = _EST_OFFSET_CACHE
+    if cached is not None and now - cached[0] < 300:
+        return cached[1]
     offset = ZoneInfo("America/New_York").utcoffset(datetime.now()).total_seconds()
-    return int(offset)
+    offset = int(offset)
+    _EST_OFFSET_CACHE = (now, offset)
+    return offset
+
+
+_EST_OFFSET_CACHE: tuple[float, int] | None = None
 
 
 INDICATORS = {
@@ -1211,7 +1228,7 @@ INDICATORS = {
     "EMA 50": {"period": 50, "color": "#FFD700", "lineWidth": 2},
     "Volume Profile": {},
     "VWAP": {"color": "#9400D3", "lineWidth": 2},
-    "Exponential Envelopes": {"length": 50, "sigLength": 9},
+    "Exponential Envelopes": {"length": 50},
 }
 
 
@@ -1470,18 +1487,26 @@ def _anchored_vwap(
     return out
 
 
-def _andean_oscillator(
+def _andean_core(
     opens: list[float],
     closes: list[float],
     length: int = 50,
-    sigLength: int = 9,
 ) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Shared recursive-envelope core of the Andean Oscillator and the
+    Exponential Envelopes indicator (identical up1/up2/dn1/dn2 recursion
+    seeded from the first close).
+
+    Returns (up1, up2, dn1, dn2), each the same length as ``closes``.
+    """
+    n = len(closes)
+    if n == 0:
+        return [], [], [], []
     alpha = 2.0 / (length + 1)
     up1 = [closes[0]]
     up2 = [closes[0] * closes[0]]
     dn1 = [closes[0]]
     dn2 = [closes[0] * closes[0]]
-    for i in range(1, len(closes)):
+    for i in range(1, n):
         c = closes[i]
         o = opens[i]
         c2 = c * c
@@ -1490,106 +1515,92 @@ def _andean_oscillator(
         up2.append(max(max(c2, o2), up2[-1] - (up2[-1] - c2) * alpha))
         dn1.append(min(min(c, o), dn1[-1] + (c - dn1[-1]) * alpha))
         dn2.append(min(min(c2, o2), dn2[-1] + (c2 - dn2[-1]) * alpha))
+    return up1, up2, dn1, dn2
+
+
+def _andean_powers(
+    up1: list[float],
+    up2: list[float],
+    dn1: list[float],
+    dn2: list[float],
+) -> tuple[list[float], list[float]]:
+    """Bull (lower-envelope) / bear (upper-envelope) statistical powers
+    sqrt(E[x^2] - E[x]^2) shared by both envelope-based indicators."""
     bull = []
     bear = []
-    osc = []
-    signal = []
-    for i in range(len(closes)):
-        br = dn2[i] - dn1[i] * dn1[i]
-        ber = up2[i] - up1[i] * up1[i]
-        b = br ** 0.5 if br > 0 else 0.0
-        be = ber ** 0.5 if ber > 0 else 0.0
-        bull.append(b)
-        bear.append(be)
-        osc.append(b - be)
+    for u1, u2, d1, d2 in zip(up1, up2, dn1, dn2):
+        br = d2 - d1 * d1
+        ber = u2 - u1 * u1
+        bull.append(br ** 0.5 if br > 0 else 0.0)
+        bear.append(ber ** 0.5 if ber > 0 else 0.0)
+    return bull, bear
+
+
+def _andean_oscillator(
+    opens: list[float],
+    closes: list[float],
+    length: int = 50,
+    sigLength: int = 9,
+) -> tuple[list[float], list[float]]:
+    """Andean Oscillator: returns (oscillator, signal-EMA)."""
+    up1, up2, dn1, dn2 = _andean_core(opens, closes, length)
+    if not up1:
+        return [], []
+    bull, bear = _andean_powers(up1, up2, dn1, dn2)
+    osc = [b - be for b, be in zip(bull, bear)]
     sigAlpha = 2.0 / (sigLength + 1)
-    for i in range(len(closes)):
-        if i == 0:
-            sig = osc[0]
-        else:
-            sig = signal[-1] + sigAlpha * (osc[i] - signal[-1])
+    signal = []
+    for i, o in enumerate(osc):
+        sig = o if i == 0 else signal[-1] + sigAlpha * (o - signal[-1])
         signal.append(sig)
-    return bull, bear, osc, signal
+    return osc, signal
 
 
 def _exponential_envelopes(
     opens: list[float],
     closes: list[float],
     length: int = 50,
-    sigLength: int = 9,
-) -> tuple[list[float], list[float], list[float]]:
+) -> tuple[list[float], list[float]]:
+    """Exponential Envelopes indicator (ThinkScript logic), sharing the
+    Andean core recursion: the up line rides the lower envelope plus its
+    statistical power, the dn line the upper envelope minus its power.
+
+    Returns (up_line, dn_line).
     """
-    Exponential Envelopes indicator based on ThinkScript logic.
-    
-    Returns (up_line, dn_line, bull_bear_diff) where:
-    - up_line: Upper envelope
-    - dn_line: Lower envelope
-    - bull_bear_diff: Difference between bull and bear powers
-    """
-    alpha = 2.0 / (length + 1)
-    n = len(closes)
-    
-    if n == 0:
-        return [], [], []
-    
-    # Initialize arrays
-    up1 = [0.0] * n
-    up2 = [0.0] * n
-    dn1 = [0.0] * n
-    dn2 = [0.0] * n
-    
-    # Seed first values
-    up1[0] = closes[0]
-    up2[0] = closes[0] * closes[0]
-    dn1[0] = closes[0]
-    dn2[0] = closes[0] * closes[0]
-    
-    # Recursive exponential envelopes
-    for i in range(1, n):
-        c = closes[i]
-        o = opens[i]
-        c2 = c * c
-        o2 = o * o
-        
-        up1[i] = max(max(c, o), up1[i-1] - (up1[i-1] - c) * alpha)
-        up2[i] = max(max(c2, o2), up2[i-1] - (up2[i-1] - c2) * alpha)
-        dn1[i] = min(min(c, o), dn1[i-1] + (c - dn1[i-1]) * alpha)
-        dn2[i] = min(min(c2, o2), dn2[i-1] + (c2 - dn2[i-1]) * alpha)
-    
-    # Calculate bull and bear powers
-    bull = []
-    bear = []
-    for i in range(n):
-        br = dn2[i] - dn1[i] * dn1[i]
-        ber = up2[i] - up1[i] * up1[i]
-        b = br ** 0.5 if br > 0 else 0.0
-        be = ber ** 0.5 if ber > 0 else 0.0
-        bull.append(b)
-        bear.append(be)
-    
-    # Calculate envelopes
-    up = []  # Upper envelope
-    dn = []  # Lower envelope
-    for i in range(n):
-        up_line = dn1[i] + bull[i]
-        dn_line = up1[i] - bear[i]
-        up.append(up_line)
-        dn.append(dn_line)
-    
-    return up, dn, [bull[i] - bear[i] for i in range(n)]
+    up1, up2, dn1, dn2 = _andean_core(opens, closes, length)
+    if not up1:
+        return [], []
+    bull, bear = _andean_powers(up1, up2, dn1, dn2)
+    up = [d1 + b for d1, b in zip(dn1, bull)]
+    dn = [u1 - be for u1, be in zip(up1, bear)]
+    return up, dn
 
 
 def _squeeze_detector(closes, highs, lows, sqzLength=20, highDev=2.0, midDev=1.5, lowDev=1.0):
     if len(closes) < sqzLength:
         return [], [], []
     bbMiddle = _sma(closes, sqzLength)
-    bbUpper = []
-    for i in range(sqzLength - 1, len(closes)):
-        idx = i - sqzLength + 1
-        slice_ = closes[i - sqzLength + 1: i + 1]
-        mean = sum(slice_) / len(slice_)
-        std = (sum((x - mean) ** 2 for x in slice_) / len(slice_)) ** 0.5
-        bbUpper.append(bbMiddle[idx] + highDev * std)
+    # Rolling variance via the running window sums (sum and sum-of-squares
+    # slide in O(1) per bar) — avoids the previous O(n·sqzLength) re-slicing,
+    # and reuses bbMiddle instead of recomputing the window mean.
+    n = len(closes)
+    rolling_sum = 0.0
+    rolling_sq = 0.0
+    bbUpper = [0.0] * (n - sqzLength + 1)
+    for i in range(n):
+        c = closes[i]
+        rolling_sum += c
+        rolling_sq += c * c
+        if i >= sqzLength:
+            old = closes[i - sqzLength]
+            rolling_sum -= old
+            rolling_sq -= old * old
+        if i >= sqzLength - 1:
+            idx = i - sqzLength + 1
+            mean = rolling_sum / sqzLength
+            var = rolling_sq / sqzLength - mean * mean
+            std = var ** 0.5 if var > 0 else 0.0
+            bbUpper[idx] = bbMiddle[idx] + highDev * std
     tr = []
     for i in range(len(closes)):
         if i == 0:
@@ -1657,7 +1668,7 @@ STYLE = """
     /* Keep the candlestick chart container a fixed-size box so clearing
        its children during a 2s fragment re-render doesn't momentarily
        collapse the page layout (which would let scroll anchoring jump). */
-    div[id^="lwc_candlestick_"] {
+    div[id="lwc_candlestick"] {
         overflow-anchor: none !important;
         contain: size layout style !important;
         min-height: 420px !important;

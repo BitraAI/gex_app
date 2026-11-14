@@ -12,7 +12,7 @@ from typing import Optional
 
 from scripts import persistent_session
 from scripts._constants import INDEX_SYMBOLS
-from scripts._utils import is_otm_or_atm, is_itm_or_atm
+from scripts._utils import is_otm_or_atm, is_itm_or_atm, _normalize_sel_exp
 from scripts.calculations import aggregate_by_strike
 from scripts.analytics import _filter_strikes_near_atm
 from scripts.signals import _tte_from_dtes
@@ -21,7 +21,7 @@ from scripts.option_streaming_service import (_normalize_display_symbol,
 from scripts.app_data import sync_index_poller, fetch_data
 
 
-def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime], rv: float = 0.0, iv_rank: float | None = None, iv_skew: float | None = None):
+def render_metrics(analytics: dict, spot: float, last_refresh: Optional[datetime], rv: float = 0.0, iv_rank: float | None = None):
     col1, col2, col3, col4 = st.columns(4)
     col1.markdown(
         f'<div class="gex-metric"><div class="label">Current Price</div>'
@@ -180,8 +180,7 @@ def render_metrics_frag():
     metrics_container = st.container()
     with metrics_container:
         iv_rank = s.get("iv_rank")
-        iv_skew = s.analytics.get('iv_skew')
-        render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=iv_rank, iv_skew=iv_skew)
+        render_metrics(s.analytics, spot, s.last_refresh, rv=s.get("underlying_20d_rv", 0.0), iv_rank=iv_rank)
 
 
 def render_market_structure():
@@ -232,9 +231,7 @@ def render_positioning():
         "Select", ["Open Interest", "Volume"], horizontal=True, label_visibility="collapsed",
         key="pos_oi_vol_radio"
     )
-    selected_expirations = s.get("selected_expiration", [])
-    if isinstance(selected_expirations, str):
-        selected_expirations = []
+    selected_expirations = _normalize_sel_exp(s.get("selected_expiration"))
     
     raw_data = [e for e in s.data if e["expiration"] in selected_expirations] if selected_expirations else list(s.data)
     if not s.get("show_itm", True):
@@ -262,26 +259,41 @@ def render_positioning():
             st.caption("Volume is 0: Schwab's chain API reports 0 for every contract after the close "
                        "(thinkorswim keeps its own streaming counter). This view fills while the market session is live.")
 
-    if selected_view_type == "Open Interest":
+    if selected_view_type in ("Open Interest", "Volume"):
         from scripts.charts import create_oi_by_strike
         with st.container():
             fig = create_oi_by_strike(
-                positioning_data, s.spot, mode="oi",
+                positioning_data, s.spot,
+                mode="oi" if selected_view_type == "Open Interest" else "volume",
             )
             fig.update_layout(dragmode="zoom")
             st.plotly_chart(
-                fig, config={"scrollZoom": True}, width="stretch", key="oi_chart"
+                fig, config={"scrollZoom": True}, width="stretch",
+                key="oi_chart" if selected_view_type == "Open Interest" else "volume_chart",
             )
-    elif selected_view_type == "Volume":
-        from scripts.charts import create_oi_by_strike
-        with st.container():
-            fig = create_oi_by_strike(
-                positioning_data, s.spot, mode="volume",
-            )
-            fig.update_layout(dragmode="zoom")
-            st.plotly_chart(
-                fig, config={"scrollZoom": True}, width="stretch", key="volume_chart"
-            )
+
+
+def _render_premium_legend(items: list[tuple[str, str]]):
+    """Buy/Sell Premium color-chip legend row shared by the VRP and
+    IV-Richness charts (previously copy-pasted in both branches)."""
+    cols = st.columns(len(items) + 2)
+    cols[0].markdown(
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+        '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Buy Premium</span></div>',
+        unsafe_allow_html=True,
+    )
+    for ci, (color, label) in zip(cols[1:-1], items):
+        ci.markdown(
+            f'<div style="display:flex;align-items:center;gap:4px;justify-content:center;">'
+            f'<span style="display:inline-block;width:14px;height:14px;border-radius:2px;background:{color};border:1px solid #555;"></span>'
+            f'<span style="font-size:0.75rem;white-space:nowrap;">{label}</span></div>',
+            unsafe_allow_html=True,
+        )
+    cols[-1].markdown(
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
+        '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_volatility():
@@ -310,39 +322,21 @@ def render_volatility():
         ivd = s.by_exp_all[:mx]
         if mo == "ATM IV": st.plotly_chart(create_atm_iv_histogram(ivd, rv=_rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="atm_iv_chart")
         elif _rv > 0:
-            legend_items = [
+            _render_premium_legend([
                 ("#27AE60", "≤ -10"),
                 ("#2ECC71", "-10 to -5"),
                 ("#BDC3C7", "-5 to 0"),
                 ("#F4D03F", "0 to +5 Fair"),
                 ("#F39C12", "+5 to +10"),
                 ("#E74C3C", "≥ +10"),
-            ]
-            cols = st.columns(len(legend_items) + 2)
-            cols[0].markdown(
-                '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Buy Premium</span></div>',
-                unsafe_allow_html=True,
-            )
-            for ci, (color, label) in zip(cols[1:-1], legend_items):
-                ci.markdown(
-                    f'<div style="display:flex;align-items:center;gap:4px;justify-content:center;">'
-                    f'<span style="display:inline-block;width:14px;height:14px;border-radius:2px;background:{color};border:1px solid #555;"></span>'
-                    f'<span style="font-size:0.75rem;white-space:nowrap;">{label}</span></div>',
-                    unsafe_allow_html=True,
-                )
-            cols[-1].markdown(
-                '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
-                unsafe_allow_html=True,
-            )
+            ])
             # VRP chart: ATM IV - RV per expiration
             st.plotly_chart(create_vrp_chart(ivd, _rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_exp_chart")
         else: st.info("No RV data")
     else:
         tm = st.radio("View", ["IV", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
 
-        se = s.get("selected_expiration", []); se = [] if isinstance(se, str) else se
+        se = _normalize_sel_exp(s.get("selected_expiration"))
         raw = [e for e in s.data if e["expiration"] in se] if se else list(s.data)
         if not s.get("show_itm", True): raw = [e for e in raw if is_otm_or_atm(e, s.spot)]
         if not s.get("show_otm", True): raw = [e for e in raw if is_itm_or_atm(e, s.spot)]
@@ -356,31 +350,13 @@ def render_volatility():
                 st.info("No strike data")
         elif tm == "IV Richness (pp)":
             if vk and _ssvi_surf is not None and _ssvi_tte is not None:
-                legend_items = [
+                _render_premium_legend([
                     ("#27AE60", "≤ -3"),
                     ("#2ECC71", "-3 to -1"),
                     ("#BDC3C7", "-1 to +1"),
                     ("#F39C12", "+1 to +3"),
                     ("#E74C3C", "≥ +3"),
-                ]
-                cols = st.columns(len(legend_items) + 2)
-                cols[0].markdown(
-                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                    '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Buy Premium</span></div>',
-                    unsafe_allow_html=True,
-                )
-                for ci, (color, label) in zip(cols[1:-1], legend_items):
-                    ci.markdown(
-                        f'<div style="display:flex;align-items:center;gap:4px;justify-content:center;">'
-                        f'<span style="display:inline-block;width:14px;height:14px;border-radius:2px;background:{color};border:1px solid #555;"></span>'
-                        f'<span style="font-size:0.75rem;white-space:nowrap;">{label}</span></div>',
-                        unsafe_allow_html=True,
-                    )
-                cols[-1].markdown(
-                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;">'
-                    '<span style="font-size:0.75rem;white-space:nowrap;font-weight:600;">Sell Premium</span></div>',
-                    unsafe_allow_html=True,
-                )
+                ])
                 st.plotly_chart(create_iv_richness_by_strike(vk, s.spot, _ssvi_surf, _ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_by_strike")
             elif not vk:
                 st.info("No strike data")
@@ -399,41 +375,34 @@ def render_heatmaps():
 
     om = st.radio("Select", ["Open Interest", "Volume", "IV Richness (pp)", "VRP"], horizontal=True, label_visibility="collapsed", key="hm_oi_vol_radio")
 
+    def _heatmap_slice(slider_key: str) -> list[dict]:
+        """Shared Expirations-slider + chain filtering for all four heatmap
+        branches (previously the same 4-line block was copy-pasted ×4)."""
+        mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key=slider_key)
+        ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
+        fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
+        return _filter_strikes_near_atm(fl, s.spot, n=20)
+
     if om == "Open Interest":
         oi_container = st.container()
         with oi_container:
-            mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_oi_slider")
-            ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
-            fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
-            fl = _filter_strikes_near_atm(fl, s.spot, n=20)
-            otm = [e for e in fl if is_otm_or_atm(e, s.spot)]
+            otm = [e for e in _heatmap_slice("hm_oi_slider") if is_otm_or_atm(e, s.spot)]
             fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_oi_chart")
 
     elif om == "Volume":
         volume_container = st.container()
         with volume_container:
-            mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_v_slider")
-            ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
-            fl = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
-            fl = _filter_strikes_near_atm(fl, s.spot, n=20)
-            otm = [e for e in fl if is_otm_or_atm(e, s.spot)]
+            otm = [e for e in _heatmap_slice("hm_v_slider") if is_otm_or_atm(e, s.spot)]
             fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
             if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_v_chart")
 
     elif om == "IV Richness (pp)":
         ir_container = st.container()
         with ir_container:
-            mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_ir_slider")
-            ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
-            vd = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
-            vd = _filter_strikes_near_atm(vd, s.spot, n=20)
+            vd = _heatmap_slice("hm_ir_slider")
             smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
-            _ssvi = None
-            try:
-                _ssvi = s.analytics.get("ssvi_surface")
-            except Exception:
-                pass
+            _ssvi = s.analytics.get("ssvi_surface")
             _ssvi_tte = _tte_from_dtes([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi is not None and s.get("by_exp_all") else None
             if _ssvi is not None and _ssvi_tte is not None:
                 fig = create_vol_surface_2d(vd, 0, smi, sma, s.spot, mode="iv_richness", ssvi_surface=_ssvi, ssvi_tte=_ssvi_tte)
@@ -444,10 +413,7 @@ def render_heatmaps():
     elif om == "VRP":
         vrp_container = st.container()
         with vrp_container:
-            mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="hm_vrp_slider")
-            ae = set(e["expiration"] for e in s.by_exp_all[:mx]) if mx else set()
-            vd = [e for e in s.data if e.get("expiration") in ae] if ae else s.filtered_data
-            vd = _filter_strikes_near_atm(vd, s.spot, n=20)
+            vd = _heatmap_slice("hm_vrp_slider")
             smi = min(e["strike"] for e in vd) if vd else 0; sma = max(e["strike"] for e in vd) if vd else 0
             _rvv = s.get("underlying_20d_rv", 0.0)
             if not vd:
@@ -527,10 +493,7 @@ def render_sidebar():
         ))
         exps = [e for e in all_exps if e in active_exps] or all_exps
         if exps:
-            cur = st.session_state.get("selected_expiration", [])
-            if isinstance(cur, str):
-                cur = []
-            cur = [e for e in cur if e in exps]
+            cur = [e for e in _normalize_sel_exp(st.session_state.get("selected_expiration")) if e in exps]
             if not cur:
                 cur = [exps[0]]
             sel = st.multiselect(

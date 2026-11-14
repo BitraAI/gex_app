@@ -109,6 +109,10 @@ def notify_alerts(
     wall_mark: Optional[float] = None,
     trend_alert: Optional[str] = None,
     absorbed_at_wall: Optional[float] = None,
+    oi_support: Optional[float] = None,
+    oi_resistance: Optional[float] = None,
+    volume_support: Optional[float] = None,
+    volume_resistance: Optional[float] = None,
     disable_notification: bool = True,
 ) -> bool:
     """Push a batch of alert strings to Telegram as one message.
@@ -134,7 +138,9 @@ def notify_alerts(
         logger.warning("is_market_open check failed: %s", exc)
     text = _format(alerts, symbol=symbol, spot=spot, gex=gex,
                     wall_zone=wall_zone, pw=pw, cw=cw, wall_mark=wall_mark, trend_alert=trend_alert,
-                    absorbed_at_wall=absorbed_at_wall)
+                    absorbed_at_wall=absorbed_at_wall,
+                    oi_support=oi_support, oi_resistance=oi_resistance,
+                    volume_support=volume_support, volume_resistance=volume_resistance)
     return send_telegram(text, disable_notification=disable_notification)
 
 

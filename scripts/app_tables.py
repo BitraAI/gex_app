@@ -9,6 +9,7 @@ import streamlit as st
 from scripts.calculations import aggregate_by_strike
 from scripts.analytics import _filter_strikes_near_atm
 from scripts.signals import _tte_from_dtes
+from scripts._utils import _normalize_sel_exp
 
 
 _STYLED_DF_CSS = """
@@ -77,9 +78,7 @@ def _get_filtered_data_for_walls(data: list[dict], selected_expirations: list[st
 
 def render_table():
     st.markdown("#### Options Data")
-    sel_exp = st.session_state.get("selected_expiration", [])
-    if isinstance(sel_exp, str):
-        sel_exp = []
+    sel_exp = _normalize_sel_exp(st.session_state.get("selected_expiration"))
     raw_data = st.session_state.get("data", [])
     if sel_exp:
         raw_data = [e for e in raw_data if e["expiration"] in sel_exp]
@@ -163,7 +162,6 @@ def render_table():
 
     styled = df.style.apply(highlight_atm, axis=1).format({
         "Strike": "${:.2f}",
-        "VRP": "{:.2%}",
         "Call GEX": "${:,.0f}",
         "Put GEX": "${:,.0f}",
         "Net GEX": "${:,.0f}",
