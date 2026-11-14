@@ -105,11 +105,11 @@ def render_candlesticks_frag():
         row1, row2 = st.columns([1, 3])
         
         with row1:
-            timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()), index=0, label_visibility="collapsed", width=100)
+            timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()), index=2, label_visibility="collapsed", width=100)
         
         with row2:
-            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "VWAP", "Half Trend", "Volume", "Andean Squeeze"]
-            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "EMA 50", "EMA 200", "Half Trend", "VWAP"], label_visibility="collapsed")
+            indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "VWAP", "Half Trend", "Volume", "Andean Squeeze", "Exponential Envelopes"]
+            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "Exponential Envelopes"], label_visibility="collapsed")
         
         # Refresh the cache from the API when the existing on-disk bars are
         # stale relative to the user's chosen timeframe. The chart fragment

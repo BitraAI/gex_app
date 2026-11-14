@@ -1207,10 +1207,11 @@ INDICATORS = {
     "EMA 200": {"period": 200, "color": "#FF4D6D", "lineWidth": 2},
     "Half Trend": {"amplitude": 2},
     "Volume": {},
-  "Andean Squeeze": {"length": 50, "sigLength": 9},
+    "Andean Squeeze": {"length": 50, "sigLength": 9},
     "EMA 50": {"period": 50, "color": "#FFD700", "lineWidth": 2},
     "Volume Profile": {},
     "VWAP": {"color": "#9400D3", "lineWidth": 2},
+    "Exponential Envelopes": {"length": 50, "sigLength": 9},
 }
 
 
@@ -1509,6 +1510,73 @@ def _andean_oscillator(
             sig = signal[-1] + sigAlpha * (osc[i] - signal[-1])
         signal.append(sig)
     return bull, bear, osc, signal
+
+
+def _exponential_envelopes(
+    opens: list[float],
+    closes: list[float],
+    length: int = 50,
+    sigLength: int = 9,
+) -> tuple[list[float], list[float], list[float]]:
+    """
+    Exponential Envelopes indicator based on ThinkScript logic.
+    
+    Returns (up_line, dn_line, bull_bear_diff) where:
+    - up_line: Upper envelope
+    - dn_line: Lower envelope
+    - bull_bear_diff: Difference between bull and bear powers
+    """
+    alpha = 2.0 / (length + 1)
+    n = len(closes)
+    
+    if n == 0:
+        return [], [], []
+    
+    # Initialize arrays
+    up1 = [0.0] * n
+    up2 = [0.0] * n
+    dn1 = [0.0] * n
+    dn2 = [0.0] * n
+    
+    # Seed first values
+    up1[0] = closes[0]
+    up2[0] = closes[0] * closes[0]
+    dn1[0] = closes[0]
+    dn2[0] = closes[0] * closes[0]
+    
+    # Recursive exponential envelopes
+    for i in range(1, n):
+        c = closes[i]
+        o = opens[i]
+        c2 = c * c
+        o2 = o * o
+        
+        up1[i] = max(max(c, o), up1[i-1] - (up1[i-1] - c) * alpha)
+        up2[i] = max(max(c2, o2), up2[i-1] - (up2[i-1] - c2) * alpha)
+        dn1[i] = min(min(c, o), dn1[i-1] + (c - dn1[i-1]) * alpha)
+        dn2[i] = min(min(c2, o2), dn2[i-1] + (c2 - dn2[i-1]) * alpha)
+    
+    # Calculate bull and bear powers
+    bull = []
+    bear = []
+    for i in range(n):
+        br = dn2[i] - dn1[i] * dn1[i]
+        ber = up2[i] - up1[i] * up1[i]
+        b = br ** 0.5 if br > 0 else 0.0
+        be = ber ** 0.5 if ber > 0 else 0.0
+        bull.append(b)
+        bear.append(be)
+    
+    # Calculate envelopes
+    up = []  # Upper envelope
+    dn = []  # Lower envelope
+    for i in range(n):
+        up_line = dn1[i] + bull[i]
+        dn_line = up1[i] - bear[i]
+        up.append(up_line)
+        dn.append(dn_line)
+    
+    return up, dn, [bull[i] - bear[i] for i in range(n)]
 
 
 def _squeeze_detector(closes, highs, lows, sqzLength=20, highDev=2.0, midDev=1.5, lowDev=1.0):

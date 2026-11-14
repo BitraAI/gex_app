@@ -1076,7 +1076,7 @@ def build_init_data(
     put_wall: float | None = None,
     last_close: float | None = None,
 ) -> dict:
-    from scripts.charts import _get_est_offset, _sma, _ema, _half_trend, _andean_oscillator, _anchored_vwap, _squeeze_detector, INDICATORS
+    from scripts.charts import _get_est_offset, _sma, _ema, _half_trend, _andean_oscillator, _anchored_vwap, _squeeze_detector, _exponential_envelopes, INDICATORS
 
     try:
         et_offset = _get_est_offset()
@@ -1199,7 +1199,7 @@ def build_init_data(
                                 "position": "inBar",
                                 "shape": "circle",
                                 "color": _sqzStateColor.get(_st, "#ff9800"),
-                                "size": 0.5,
+                                "size": 0.3,
                             })
                             break
                 andean_series = [
@@ -1234,6 +1234,28 @@ def build_init_data(
                 ema50_data = [{"time": cd[i]["time"], "value": ema50_vals[i - offset]} for i in range(offset, len(cd))]
                 if ema50_data:
                     series_list.append({"type": "Line", "key": "ema50", "data": ema50_data, "options": {"color": cfg.get("color", "#ab63fa"), "lineWidth": cfg.get("lineWidth", 2), "lastValueVisible": False, "priceLineVisible": False}})
+                continue
+            if name == "Exponential Envelopes":
+                # Exponential Envelopes indicator
+                up, dn, bull_bear = _exponential_envelopes(opens, closes, cfg.get("length", 50), cfg.get("sigLength", 9))
+                # Upper envelope - green if rising, default color otherwise
+                up_data = []
+                for i in range(len(cd)):
+                    color = "#00cc96" if (i > 0 and up[i] > up[i - 1]) else "#FF8C42"
+                    up_data.append({"time": cd[i]["time"], "value": up[i], "color": color})
+                series_list.append({
+                    "type": "Line", "key": "env_up", "data": up_data,
+                    "options": {"color": "#FF8C42", "lineWidth": 2, "lastValueVisible": False, "priceLineVisible": False},
+                })
+                # Lower envelope - red if falling, green otherwise
+                dn_data = []
+                for i in range(len(cd)):
+                    color = "#ef553b" if (i > 0 and dn[i] < dn[i - 1]) else "#00cc96"
+                    dn_data.append({"time": cd[i]["time"], "value": dn[i], "color": color})
+                series_list.append({
+                    "type": "Line", "key": "env_dn", "data": dn_data,
+                    "options": {"color": "#ef553b", "lineWidth": 2, "lastValueVisible": False, "priceLineVisible": False},
+                })
                 continue
             if name == "Volume Profile":
                 vp_vols = []
