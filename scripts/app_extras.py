@@ -90,14 +90,14 @@ def _infer_uw_side(bid: float, ask: float, price: float,
     """Infer the aggressor side for the Unusual Trades scanner (Lee-Ready).
 
     Rules:
-      - ``price > mid`` -> "buy"  (buyer lifted the offer)
-      - ``price < mid`` -> "sell" (seller hit the bid)
+      - ``price > mid`` -> "BUY"  (buyer lifted the offer)
+      - ``price < mid`` -> "SELL" (seller hit the bid)
       - ``price == mid`` -> tick test against the contract's previous
-        traded price: higher -> "buy", lower -> "sell".
+        traded price: higher -> "BUY", lower -> "SELL".
       - ``price == prev_price`` -> repeat ``last_direction`` (the side
         resolved the last time this contract was seen).
 
-    Returns "buy", "sell", or "" when nothing is informative (missing
+    Returns "BUY", "SELL", or "" when nothing is informative (missing
     bid/ask, no previous price, or first-seen contract).  The caller
     passes the chain's ``last`` price when the session has one (what
     actually traded) and falls back to ``mark`` otherwise — the mark is
@@ -112,17 +112,17 @@ def _infer_uw_side(bid: float, ask: float, price: float,
     # (e.g. 5.050000000000001), so exact == would never trigger the
     # tick-test branch.  Treat |price - mid| within _MID_EPS as equal.
     if price > mid + _MID_EPS:
-        return "buy"
+        return "BUY"
     if price < mid - _MID_EPS:
-        return "sell"
+        return "SELL"
     # price == mid: Lee-Ready tick test
     if prev_price is not None:
         if price > prev_price + _MID_EPS:
-            return "buy"
+            return "BUY"
         if price < prev_price - _MID_EPS:
-            return "sell"
+            return "SELL"
         # price == prev_price: use last direction
-        return last_direction if last_direction in ("buy", "sell") else ""
+        return last_direction if last_direction in ("BUY", "SELL") else ""
     return ""
 
 
@@ -392,8 +392,8 @@ def _uw_digest_text(new_rows: list[dict], digest_min: float) -> str | None:
         ptxt = f"${premium / 1e6:.2f}M" if premium >= 1e6 else f"${premium / 1e3:.0f}k"
         vold = r.get("Vol Δ")
         vold_txt = f" · +{vold:,} since first seen" if isinstance(vold, int) and vold > 0 else ""
-        _side_lbl = ("BUY" if r["Side"] == "buy"
-                     else "SELL" if r["Side"] == "sell" else "MID")
+        _side_lbl = ("BUY" if r["Side"] == "BUY"
+                     else "SELL" if r["Side"] == "SELL" else "MID")
         lines.append(
             f"{emoji} <b>{r['Ticker']}</b> {r['Expiration'][5:]} {r['Strike']:g}{cp}"
             f" · {r['Volume']:,} vol · {oi_part} · {ptxt} @ {_side_lbl}"
@@ -564,9 +564,9 @@ def render_unusual_trades():
             is_call = row["Type"] == "CALL"
             bg = "#e6f7f1" if is_call else "#fdecec"
             side = row["Side"]
-            if side == "buy":
+            if side == "BUY":
                 side_style = "color: #00cc96; font-weight: 600;"
-            elif side == "sell":
+            elif side == "SELL":
                 side_style = "color: #ef5350; font-weight: 600;"
             else:
                 side_style = "color: #ff9800;"
@@ -645,8 +645,8 @@ def render_unusual_trades():
             "Time": datetime.fromtimestamp(w["ts"]).strftime("%H:%M:%S"),
             "Ticker": w["ticker"],
             "Type": w["opt_type"],
-            "Side": ("BUY" if w["direction"] == "buy"
-                     else "SELL" if w["direction"] == "sell" else "MID"),
+            "Side": ("BUY" if w["direction"] == "BUY"
+                     else "SELL" if w["direction"] == "SELL" else "MID"),
             "Prints": w["prints"],
             "Strikes": w["strikes"],
             "Strike list": ", ".join(f"${k:g}" for k in w["strike_list"]),
@@ -673,8 +673,8 @@ def render_unusual_trades():
             "Exp": str(p["exp"]),
             "Size": p["size"],
             "Price": p["price"],
-            "Side": ("BUY" if p["direction"] == "buy"
-                     else "SELL" if p["direction"] == "sell" else "MID"),
+            "Side": ("BUY" if p["direction"] == "BUY"
+                     else "SELL" if p["direction"] == "SELL" else "MID"),
             "Premium": p["premium"],
         } for p in print_rows])
         _render_styled_dataframe(
