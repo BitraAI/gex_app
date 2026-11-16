@@ -250,6 +250,18 @@ def ensure_atm_streaming(stream_symbol: str):
                 _t_upper = _normalize_display_symbol(_t)
                 for _label, _occ in atm_svc.get_ticker_quote_symbols(_t_upper).items():
                     _quote_map.setdefault(_occ, (_t_upper, _label))
+            if not _quote_map:
+                # Silent-skip guard: no quote symbols means the Call/Put
+                # Price columns can never update — surface it (throttled)
+                # instead of failing quietly.
+                if _time_mod.time() - s.get("_opt_nosyms_log_ts", 0.0) >= 60:
+                    s["_opt_nosyms_log_ts"] = _time_mod.time()
+                    logger.info(
+                        "[ensure_atm_streaming] no option quote symbols for %s "
+                        "(missing walls/ATM strike or expiration?) — "
+                        "Call/Put Price columns will not update",
+                        _all_tickers,
+                    )
             if _quote_map:
                 try:
                     _resp = run_async(fetch_quotes(s.client, list(_quote_map.keys())))
@@ -269,6 +281,18 @@ def ensure_atm_streaming(stream_symbol: str):
                         if mark is None or float(mark) <= 0:
                             continue
                         _per_ticker.setdefault(_tk, {})[_label] = float(mark)
+                    if not _per_ticker and _quote_map:
+                        # Requested symbols but got nothing usable — log a
+                        # sample of the response keys (throttled) so the
+                        # key-mismatch is visible in the journal.
+                        if _time_mod.time() - s.get("_opt_nomatch_log_ts", 0.0) >= 60:
+                            s["_opt_nomatch_log_ts"] = _time_mod.time()
+                            _sample = list(_resp.keys())[:3] if isinstance(_resp, dict) else type(_resp).__name__
+                            logger.info(
+                                "[ensure_atm_streaming] option quote refresh matched "
+                                "0/%d symbols (resp keys sample: %r)",
+                                len(_quote_map), _sample,
+                            )
                     for _tk, _marks in _per_ticker.items():
                         _pwc = _marks.get("put_wall_call")
                         _cwp = _marks.get("call_wall_put")
@@ -973,12 +997,13 @@ def render_atm_order_flow_grid():
                                f"{call_wall_val:,.2f}</span>"
                                ) if call_wall_val is not None else ""
 
-            # Grid pricing: Call Price column shows the support price (PUT
-            # mark at the put-wall). Put Price column shows the resistance
-            # price (CALL mark at the call-wall). Falls back to ATM marks
-            # when a wall-level mark is unavailable.
-            _call_p = wall_prices.get("put_wall_put_price") or opt_prices.get("put_price")
-            _put_p = wall_prices.get("call_wall_call_price") or opt_prices.get("call_price")
+            # Grid pricing: Call Price column shows the CALL mark at the
+            # put-wall (support) strike; Put Price column shows the PUT
+            # mark at the call-wall (resistance) strike — the option you
+            # would buy at the key levels. Falls back to the matching ATM
+            # mark when a wall-level mark is unavailable.
+            _call_p = wall_prices.get("put_wall_call_price") or opt_prices.get("call")
+            _put_p = wall_prices.get("call_wall_put_price") or opt_prices.get("put")
 
             rows.append({
                 "Ticker": t_upper,
