@@ -187,9 +187,10 @@ def generate_telegram_alerts() -> list[str]:
                 _is_alert_needed(t_upper, "call")):
                 
                 # CALL mark at the put-wall (support) strike
-                call_price = wall_prices.get("put_wall_call_price") or opt_prices.get("call") or "N/A"
+                call_price = wall_prices.get("put_wall_call_price") or opt_prices.get("call")
+                call_str = f"{float(call_price):.2f}" if call_price is not None else "N/A"
                 
-                alert = f"{t_upper} | {spot:.2f} | BUY CALL {put_wall:.2f} @ {call_price} | Exp: {exp_date}"
+                alert = f"{t_upper} | {spot:.2f} | BUY CALL {put_wall:.2f} @ {call_str} | Exp: {exp_date}"
                 alerts.append(alert)
                 _update_alert_timestamp(t_upper, "call")
                 continue
@@ -203,9 +204,10 @@ def generate_telegram_alerts() -> list[str]:
                 _is_alert_needed(t_upper, "put")):
                 
                 # PUT mark at the call-wall (resistance) strike
-                put_price = wall_prices.get("call_wall_put_price") or opt_prices.get("put") or "N/A"
+                put_price = wall_prices.get("call_wall_put_price") or opt_prices.get("put")
+                put_str = f"{float(put_price):.2f}" if put_price is not None else "N/A"
                 
-                alert = f"{t_upper} | {spot:.2f} | BUY PUT {call_wall:.2f} @ {put_price} | Exp: {exp_date}"
+                alert = f"{t_upper} | {spot:.2f} | BUY PUT {call_wall:.2f} @ {put_str} | Exp: {exp_date}"
                 alerts.append(alert)
                 _update_alert_timestamp(t_upper, "put")
                 continue
