@@ -1,7 +1,7 @@
 """Unusual-trades scanner + Live News tab extracted verbatim from app.py, then
 upgraded: last-price side inference, parallel cached scanning, auto-refresh
-with since-last-scan tracking, earnings/roll flags, live ATM print/sweep feed
-from the option stream, and an optional Telegram digest for new flags."""
+with since-last-scan tracking, earnings/roll flags, and a live ATM
+print/sweep feed from the option stream."""
 import asyncio
 import time
 from collections import Counter
@@ -11,7 +11,6 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
-from scripts import telegram_notifier
 from scripts.calculations import parse_option_chain, build_greeks_lookup
 from scripts.client import fetch_option_chain
 from scripts.flow import _ensure_async_loop, run_async, ensure_atm_streaming
@@ -205,7 +204,7 @@ def _run_uw_scan(
     otm_only: bool,
 ) -> tuple[pd.DataFrame, list[dict], bool]:
     """Scan every *tickers* chain for unusual blocks and return
-    ``(results_df, digest_rows, first_scan)``.
+    ``(results_df, new_rows, first_scan)``.
 
     - Chains are fetched concurrently (capped) and cached per symbol for
       ``_UW_CHAIN_CACHE_TTL`` seconds, so tweaking filters inside the TTL
@@ -219,7 +218,7 @@ def _run_uw_scan(
     - ``Earnings`` marks rows whose expiration window includes the
       symbol's next earnings date.
     - ``first_scan`` is True when this scan established the session
-      baseline (no NEW flags, no digest).
+      baseline (no NEW flags yet).
     """
     s = st.session_state
     if not init_client():
@@ -376,34 +375,6 @@ def _run_uw_scan(
     return df, new_rows, first_scan
 
 
-def _uw_digest_text(new_rows: list[dict], digest_min: float) -> str | None:
-    """Build the Telegram digest for genuinely NEW flagged contracts whose
-    premium clears *digest_min*.  Returns None when nothing qualifies."""
-    rows = [r for r in new_rows if r["Premium"] >= digest_min]
-    if not rows:
-        return None
-    rows.sort(key=lambda r: -r["Premium"])
-    lines = [f"<b>Unusual trade flags — {len(rows)} new</b>"]
-    for r in rows[:10]:
-        cp = "C" if r["Type"] == "CALL" else "P"
-        emoji = "🟢" if cp == "C" else "🔴"
-        oi_part = f"{r['Vol/OI']:.1f}x OI" if r["Vol/OI"] is not None else "no OI"
-        premium = r["Premium"]
-        ptxt = f"${premium / 1e6:.2f}M" if premium >= 1e6 else f"${premium / 1e3:.0f}k"
-        vold = r.get("Vol Δ")
-        vold_txt = f" · +{vold:,} since first seen" if isinstance(vold, int) and vold > 0 else ""
-        _side_lbl = ("BUY" if r["Side"] == "BUY"
-                     else "SELL" if r["Side"] == "SELL" else "MID")
-        lines.append(
-            f"{emoji} <b>{r['Ticker']}</b> {r['Expiration'][5:]} {r['Strike']:g}{cp}"
-            f" · {r['Volume']:,} vol · {oi_part} · {ptxt} @ {_side_lbl}"
-            f" · Δ{r['Delta']:.2f}{vold_txt}"
-        )
-    if len(rows) > 10:
-        lines.append(f"…and {len(rows) - 10} more")
-    return "\n".join(lines)
-
-
 def render_unusual_trades():
     """Unusual Trades scanner tab.
 
@@ -411,8 +382,8 @@ def render_unusual_trades():
     options blocks: outsized volume relative to open interest (fresh
     positioning rather than churn) or extreme traded premium.  Chains are
     fetched in parallel and cached for ~90 s; the fragment auto-refreshes
-    during market hours so NEW flags, a live ATM print/sweep feed and an
-    optional Telegram digest stay current hands-free.
+    during market hours so NEW flags and a live ATM print/sweep feed
+    stay current hands-free.
     """
     s = st.session_state
 
@@ -473,27 +444,6 @@ def render_unusual_trades():
         key="uw_otm_only",
     )
 
-    # Telegram digest for genuinely NEW bars.  Every available call to the
-    # notifier suppresses itself outside market hours, like the other
-    # alert paths documented in TELEGRAM.md.
-    with st.expander("Telegram digest", expanded=False):
-        tg_on = st.toggle(
-            "Push NEW flags to Telegram",
-            value=True,
-            key="uw_tg_on",
-            help="Only genuinely NEW flags whose premium clears the "
-                 "digest threshold are pushed, once per scan. Suppressed "
-                 "outside market hours.",
-        )
-        digest_min = st.number_input(
-            "Min digest premium ($)", min_value=0, value=250000, step=50000,
-            key="uw_digest_min",
-        )
-        st.caption(
-            "Digests piggyback on an open dashboard (auto-scan below), like "
-            "the other Telegram alert paths."
-        )
-
     auto = st.toggle(
         f"Auto-scan every {_UW_REFRESH_SECONDS:.0f} s (market hours only)",
         value=True,
@@ -520,15 +470,6 @@ def render_unusual_trades():
             )
             s["uw_results"] = df
             s["_uw_last_scan_error"] = None
-        if tg_on and not first_scan and is_market_open():
-            text = _uw_digest_text(new_rows, float(digest_min))
-            if text:
-                ok = telegram_notifier.send_telegram(text)
-                s["_uw_last_digest"] = (
-                    "sent" if ok else "send failed (check config.toml [telegram])"
-                )
-            else:
-                s["_uw_last_digest"] = None
 
     results_df = s.get("uw_results")
     if results_df is None or results_df.empty:
@@ -551,8 +492,6 @@ def render_unusual_trades():
         _scan_time = s.get("_uw_last_scan_time", 0)
         status_bits = [f"Last scan {datetime.fromtimestamp(_scan_time).strftime('%H:%M:%S')}"
                        if _scan_time else "No scan yet"]
-        if s.get("_uw_last_digest"):
-            status_bits.append(f"Telegram: {s['_uw_last_digest']}")
         if not is_market_open():
             status_bits.append("Market closed — auto-scan paused")
         st.caption(" · ".join(status_bits))

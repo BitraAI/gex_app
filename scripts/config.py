@@ -11,9 +11,9 @@ CALLBACK_URL = "https://127.0.0.1:8182/"
 TOKEN_PATH = os.path.expanduser("~/.local/share/gex_app/schwab_token.json")
 MAX_TOKEN_AGE = 7 * 24 * 3600
 
-BOT_TOKEN = ""
-CHAT_ID = ""
-TELEGRAM_ENABLED = True
+# Telegram alerts — see [telegram] in config.toml.
+TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
 
 # Email (magic-link login + approval delivery) — see [email] in config.toml.
 SMTP_HOST = ""
@@ -37,10 +37,11 @@ if _CONFIG_PATH.exists():
     if "max_token_age_days" in _schwab:
         MAX_TOKEN_AGE = _schwab["max_token_age_days"] * 24 * 3600
 
-    _tg = _raw.get("telegram", {})
-    BOT_TOKEN = _tg.get("BOT_TOKEN", BOT_TOKEN)
-    CHAT_ID = str(_tg.get("CHAT_ID", CHAT_ID))
-    TELEGRAM_ENABLED = bool(_tg.get("enabled", TELEGRAM_ENABLED))
+    # Telegram alerts. Everything optional: without bot_token and chat_id
+    # alerts are silently disabled.
+    _telegram = _raw.get("telegram", {})
+    TELEGRAM_BOT_TOKEN = str(_telegram.get("bot_token", ""))
+    TELEGRAM_CHAT_ID = str(_telegram.get("chat_id", ""))
 
     # Email (magic-link login + approval delivery). Everything optional:
     # without an smtp_host the app falls back to logging links in the app
@@ -59,10 +60,11 @@ if _CONFIG_PATH.exists():
 SMTP_USER = os.environ.get("GEX_SMTP_USER", SMTP_USER)
 SMTP_PASSWORD = os.environ.get("GEX_SMTP_PASSWORD", SMTP_PASSWORD)
 
+TELEGRAM_BOT_TOKEN = os.environ.get("GEX_TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
+TELEGRAM_CHAT_ID = os.environ.get("GEX_TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
+
 CLIENT_ID = os.environ.get("SCHWAB_CLIENT_ID", CLIENT_ID)
 CLIENT_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", CLIENT_SECRET)
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", BOT_TOKEN)
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", CHAT_ID)
 
 
 def validate_config() -> list[str]:
@@ -84,16 +86,5 @@ def validate_config() -> list[str]:
             "[schwab] client_secret missing — set it in config.toml or via the "
             "SCHWAB_CLIENT_SECRET environment variable."
         )
-    if TELEGRAM_ENABLED:
-        if not BOT_TOKEN:
-            errors.append(
-                "[telegram] BOT_TOKEN missing — set it in config.toml or via the "
-                "TELEGRAM_BOT_TOKEN environment variable."
-            )
-        if not CHAT_ID:
-            errors.append(
-                "[telegram] CHAT_ID missing — set it in config.toml or via the "
-                "TELEGRAM_CHAT_ID environment variable."
-            )
     return errors
 

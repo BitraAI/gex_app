@@ -1,8 +1,7 @@
 """Live news feed for tracked tickers using Yahoo Finance RSS.
 
 Polls headlines every 5 minutes in the background and caches them
-per-ticker.  Also exposes a ``get_new_alerts`` method for pushing
-breaking stories through the existing Telegram alert pipeline.
+per-ticker.
 """
 
 import asyncio

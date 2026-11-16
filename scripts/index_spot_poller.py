@@ -62,8 +62,8 @@ class IndexSpotPoller:
         # Only include index symbols that appear in the user's ticker history.
         # Polling symbols the user never added (e.g. NDX when only SPX is
         # tracked) would auto-create phantom _ticker_flows entries via
-        # set_ticker_spot, which then surface as spurious wall-break /
-        # trend alerts in maybe_fire_wall_zone_alerts.
+        # set_ticker_spot, which then surface as spurious rows in the
+        # Order Flow grid.
         self._tickers = {
             t.upper().lstrip("$")
             for t in tickers
@@ -170,7 +170,7 @@ class IndexSpotPoller:
                             # allow_auto_create=False so the poller never
                             # creates phantom _ticker_flows entries for
                             # index symbols the user hasn't added to their
-                            # ticker_history (prevents spurious alerts).
+                            # ticker_history (prevents phantom grid rows).
                             logger.debug("Updating index %s spot: $%.2f", ticker_upper, spot_price)
                             self._atm_service.set_ticker_spot(ticker_upper, spot_price, allow_auto_create=False)
                         else:

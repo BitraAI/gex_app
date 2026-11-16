@@ -74,8 +74,6 @@ _SESSION_DEFAULTS = {
     "by_exp_all": [],
     "by_exp_all_version": 0,
     "underlying_20d_rv": 0.0,
-    "alerts": [],
-    "prev_alerts_state": {},
     "ticker_history": [],
     "streaming_service": None,
     "atm_option_service": None,

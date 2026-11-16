@@ -25,7 +25,7 @@ _LANDING_DIR = os.path.join(_STATIC_DIR, "landing")
 _HERO_IMAGE = "Candlesticks.png"
 _FEATURES = [
     ("Candlesticks.png", "Candlesticks", "Institutional charts: live streaming bars, Andean oscillator, Half Trend, VPVR — pan both axes, zoom anything."),
-    ("OrderFlow.png", "Order Flow", "Real-time ATM flow grid: book imbalance, absorption, conviction scoring, and wall-zone alerts, second by second."),
+    ("OrderFlow.png", "Order Flow", "Real-time ATM flow grid: book imbalance, absorption, and delta-weighted net flow, second by second."),
     ("TradeSignals.png", "Signals", "A strategy engine that scores every expiration and hands you ranked trade cards with reasoning attached."),
     ("Metrics.png", "Metrics", "GEX by strike, by expiration, flip points, and delta-weighted net flow — refreshed while the market breathes."),
     ("Volatility.png", "Volatility", "ATM implied vol by expiration and by strike, benchmarked against realized vol, with a variance-risk-premium view and an expiration-range slider."),
@@ -114,7 +114,7 @@ def _shell_html() -> str:
     <div class="dark-inner">
       <h2>Real-time flow.<br>Zero lag. No noise.</h2>
       <p>Level 2 option books stream straight into the grid — net flow,
-      buy/sell splits, absorption, and conviction — at a 1-second cadence.</p>
+      buy/sell splits, absorption, and book-imbalance trend — at a 1-second cadence.</p>
       <a class="btn-pill btn-green" href="#open-account">Open your account</a>
     </div>
   </section>

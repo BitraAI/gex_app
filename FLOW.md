@@ -21,8 +21,8 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | **Flow Speed** | **Level 2** (OPTIONS_BOOK, derived) | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
 | **Flow Acceleration** | **Level 2** (OPTIONS_BOOK, derived) | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, and `mid` is the first sample at/after the window's **time** midpoint `mid_ts`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
 | **Absorption** | **Level 1** (ATM option volume + spot path) | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot **path length** (sum of \|Δ\| per sample) over the same window — chop-adjusted, so a whipsawing tape is not mistaken for a pinned price. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
-| **Net Flow** | **Level 1** (ATM option trades, delta-weighted by each trade's own contract delta) | Net executed **delta-weighted** flow over the trailing 60 s: `net_60 = exec_history[-1][1] − exec_history[0][1]`, i.e. the change in `delta_buy − delta_sell` over the trailing 60 s window, from the ATM call/put only (`get_ticker_executed_net60`; same source as the Telegram header and the conviction gate). Each ATM trade is weighted by **its own contract's delta** (call Δ > 0, put Δ < 0): the contract's live streamed `DELTA` (LEVELONE_OPTIONS carries it per contract), falling back to the REST chain ATM delta of the trade's own expiration (`set_ticker_atm_deltas` / `set_ticker_atm_deltas2`), then the static ±0.5 — so the column reports `net_delta = delta_buy − delta_sell` rather than raw contracts (with fallback ±0.5 weighting values ≈ half the raw contract counts). Bullish side = buying calls + selling puts; bearish = selling calls + buying puts. Each trade print is routed to **every** tracked flow whose stream symbol matches the option's root, so tracking both `$SPX` and `SPY` (or `$RUT`+`IWM`) updates both rows from the same proxy ticks. Green > 0, red < 0, orange otherwise. Institutional trades (single prints with premium ≥ $100k) are marked with an asterisk (*). See **Net Flow & Flow Ratio math (rolling 60 s)** and **Order absorption (Telegram + grid)**. |
-| **Flow Ratio** | **Level 1** (ATM option trades, delta-weighted by each trade's own contract delta) | Rolling 60 s **bullish share of delta exposure**: `flow_ratio = bull_Δ / (bull_Δ + bear_Δ)` where `bull_Δ` / `bear_Δ` are the trailing-60 s changes in the cumulative `delta_buy` / `delta_sell` counters from `get_ticker_flow_metrics_60s` (each print weighted by its own contract's live streamed `DELTA`; REST chain ATM delta of the trade's expiration and static ±0.5 as fallbacks). A proportion in **[0, 1]** — never negative (1.0 = all bullish flow, 0.5 = balanced, 0.0 = all bearish); net flow > 0 ↔ ratio > 0.5. `None` when the window has no flow (< 2 samples / zero volume), displayed as 0.00. Grid coloring: green background > 0.8, red background < 0.2; Telegram header: 🟢 above `FLOW_RATIO_GREEN_THRESHOLD` (0.8), 🔴 below `FLOW_RATIO_RED_THRESHOLD` (0.2), 🟡 otherwise. See **Net Flow & Flow Ratio math (rolling 60 s)**. |
+| **Net Flow** | **Level 1** (ATM option trades, delta-weighted by each trade's own contract delta) | Net executed **delta-weighted** flow over the trailing 60 s: `net_60 = exec_history[-1][1] − exec_history[0][1]`, i.e. the change in `delta_buy − delta_sell` over the trailing 60 s window, from the ATM call/put only (`get_ticker_executed_net60`; same source as the grid Net Flow cell). Each ATM trade is weighted by **its own contract's delta** (call Δ > 0, put Δ < 0): the contract's live streamed `DELTA` (LEVELONE_OPTIONS carries it per contract), falling back to the REST chain ATM delta of the trade's own expiration (`set_ticker_atm_deltas` / `set_ticker_atm_deltas2`), then the static ±0.5 — so the column reports `net_delta = delta_buy − delta_sell` rather than raw contracts (with fallback ±0.5 weighting values ≈ half the raw contract counts). Bullish side = buying calls + selling puts; bearish = selling calls + buying puts. Each trade print is routed to **every** tracked flow whose stream symbol matches the option's root, so tracking both `$SPX` and `SPY` (or `$RUT`+`IWM`) updates both rows from the same proxy ticks. Green > 0, red < 0, orange otherwise. Institutional trades (single prints with premium ≥ $100k) are marked with an asterisk (*). See **Net Flow & Flow Ratio math (rolling 60 s)** and **Order absorption (grid)**. |
+| **Flow Ratio** | **Level 1** (ATM option trades, delta-weighted by each trade's own contract delta) | Rolling 60 s **bullish share of delta exposure**: `flow_ratio = bull_Δ / (bull_Δ + bear_Δ)` where `bull_Δ` / `bear_Δ` are the trailing-60 s changes in the cumulative `delta_buy` / `delta_sell` counters from `get_ticker_flow_metrics_60s` (each print weighted by its own contract's live streamed `DELTA`; REST chain ATM delta of the trade's expiration and static ±0.5 as fallbacks). A proportion in **[0, 1]** — never negative (1.0 = all bullish flow, 0.5 = balanced, 0.0 = all bearish); net flow > 0 ↔ ratio > 0.5. `None` when the window has no flow (< 2 samples / zero volume), displayed as 0.00. Grid coloring: green background > 0.8, red background < 0.2. See **Net Flow & Flow Ratio math (rolling 60 s)**. |
 | **Liquidity Flow** | **Level 2** (OPTIONS_BOOK) | Net change in L2 OPTIONS-book resting depth at the best levels over the trailing 60 s, computed from robust **band medians** of the window edges (`_liquidity_flow_sides` in `StreamingService`): depth is median-averaged over the newest/oldest 5 s bands and the medians differenced, so a single large book refresh at a window edge cannot dominate the reading. Positive = liquidity being posted (book refilling); negative = liquidity being drained (break risk). Side-aware splits (`bid_liquidity_flow` / `ask_liquidity_flow` in `trend_data`) separate a genuine one-sided drain from a rotation. Green > 0, red < 0, orange otherwise. |
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
@@ -50,7 +50,7 @@ Market-hours detection lives in `flow.is_market_open()`.
 Trend reflects the **rate of change of L2 book-imbalance pressure** over the
 last 60 seconds, not the absolute level. It is computed on demand by
 `StreamingService.trend_data()` from the OPTIONS LEVEL2 books and read
-by the grid and the Telegram trend alerts via
+by the grid via
 `StreamingService.get_ticker_trend_data(display_symbol)`.
 
 How it works:
@@ -92,7 +92,7 @@ How it works:
 
 The final `trend` (and `book_imbalance`, `flow_speed`, `flow_acceleration`) is
     returned by `StreamingService.trend_data` and consumed unchanged by the grid
-(via `flow.render_atm_order_flow_grid`) and the Telegram alerts.
+(via `flow.render_atm_order_flow_grid`).
 
 The trend label is classified inside `trend_data` (one source of truth — there is
 no separate `classify_trend_signal` helper), using the L2 book-imbalance ratio
@@ -212,11 +212,10 @@ automatically via `ensure_atm_streaming`.
 
 | File | Role |
 | --- | --- |
-| `flow.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. Wall refresh: `maybe_fire_wall_zone_alerts`, `_refresh_walls_for_symbol`, `_recompute_symbol`, `_compute_walls_for_symbol`. Near-wall buffer: `_wall_buffer`, `_WALL_ZONE_BUFFER`. Trend coloring: `_trend_color` (in `render_atm_order_flow_grid`); the trend *classification* itself lives in `StreamingService.trend_data` (not `flow.py`). |
+| `flow.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. Wall refresh: `maybe_refresh_walls`, `_maybe_schedule_wall_refresh`, `_refresh_walls_for_symbol`, `_recompute_symbol`, `_compute_walls_for_symbol`. Trend coloring: `_trend_color` (in `render_atm_order_flow_grid`); the trend *classification* itself lives in `StreamingService.trend_data` (not `flow.py`). |
 | `option_streaming_service.py` | `AtmOptionVolumeService` — WebSocket handling, classification, per-ticker flow. |
-| `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. `check_alerts()` sends single-ticker Telegram alerts. |
+| `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. |
 | `client.py` | `fetch_quotes` — REST spot pre-fetch for all tickers + ~2 s option-mark refresh (Call/Put Price columns). |
-| `telegram_notifier.py` | `notify_alerts()`, `diff_alerts()`, `_format()`, `send_telegram()` — builds and posts HTML Telegram messages; detects wall-change / gamma-flip / dealer-flip / price-crossing diffs. |
 | `chart_component.py` | `render_chart` — Lightweight Charts HTML/JS component with indicators (SMA, EMA, VWAP, Volume Profile, Half Trend, Andean Squeeze, **Exponential Envelopes** with dynamic coloring based on trend direction). |
 
 ## Architecture: streaming & spot feeding
@@ -302,13 +301,13 @@ OI): `_find_put_wall` picks the strike below spot with the highest `put_gex`,
 and `_find_call_wall` picks the strike above spot with the highest `call_gex`
 (dealer gamma exposure = OI × gamma). Walls use weighted average of top 3 by
 GEX magnitude and are displayed in $XM format. Walls are refreshed with a
-**hybrid trigger** in `flow.maybe_fire_wall_zone_alerts` (checked every 2 s
+**hybrid trigger** in `flow.maybe_refresh_walls` (checked every 2 s
 fragment tick), with two tiers:
 
 | Tier | Trigger | Cost |
 | --- | --- | --- |
 | **Fast wall refresh** | spot moved ≥ half a strike **or** ≥ 180 s elapsed (`_WALL_RECOMPUTE_MAX_INTERVAL`) | Lightweight — `fetch_option_chain` + `parse_option_chain` + `compute_analytics` only (`_refresh_walls_for_symbol`), then pushes walls / expiration / ATM marks to the ATM service. Skips rate, yield, RV, and IV-rank. |
-| **Full recompute** | ≥ 300 s elapsed (`_WALL_FULL_RECOMPUTE_INTERVAL`) | Full pipeline (`_recompute_symbol`) — adds IV rank, RV, diff/strategy alerts, and the `_ticker_analytics_cache` used for Telegram alert headers. |
+| **Full recompute** | ≥ 300 s elapsed (`_WALL_FULL_RECOMPUTE_INTERVAL`) | Full pipeline (`_recompute_symbol`) — adds IV rank, RV, and the `_ticker_analytics_cache` used for grid header data. |
 
 Both are throttled so a single ticker never triggers a wall refresh more
 often than every 30 s (`_WALL_RECOMPUTE_MIN_INTERVAL`), which caps Schwab
@@ -316,136 +315,12 @@ API load in fast markets while the 180 s freshness floor keeps walls current
 in quiet ones. Walls are also recomputed on a manual Refresh on the main
 page (`fetch_data`) and by the Trade Signals tab scan.
 
-### Trend alerts (Telegram)
-
-The `maybe_fire_wall_zone_alerts` function sends **wall-reversal trend alerts**
-and **diff alerts** (Wall moved, price crossings) to Telegram. Gamma Flip /
-Dealer-flip diffs fire only from the other two paths (periodic recompute and
-the in-app single-ticker `app.check_alerts`) — the streaming path pins
-`gamma_flip` / `dealer_position` to `None` in the analytics it hands to
-`diff_alerts`. Front expiration VRP is not passed to `notify_alerts`; it
-remains only in strategy recommendation text.
-
-**Wall-change diff alerts.** `telegram_notifier.diff_alerts()` detects when
-the Call Wall or Put Wall strike value changes between refreshes (GEX+VEX+CEX combined or VEX/CEX-specific) and emits:
-
-  - `Call Wall moved: $<prev> → $<curr>` (GEX+VEX+CEX combined, or VEX/CEX-specific)
-  - `Put Wall moved: $<prev> → $<curr>` (GEX+VEX+CEX combined, or VEX/CEX-specific)
-
-These pass through unchanged (same treatment as Gamma Flip / Dealer flip changed)
-and fire regardless of wall stability, subject to the per-ticker cooldown.
-
-When a trend reversal fires **inside** a wall zone, `maybe_fire_wall_zone_alerts`
-sends it via `notify_alerts(..., trend_alert=...)`, which renders the compact
-signal line below — there is no dedicated `💥` wall-reversal message format.
-`Wall absorbed: <n> contracts` (contracts traded since spot entered the zone)
-appears as a separate header line, context only. The body uses the literal
-`trend_reversal` (`bullish` / `bearish`); Telegram maps the direction to a trade suggestion:
-
-| Trend alert body | Direction | Suggestion |
-| --- | --- | --- |
-| `🟢 BULLISH` | buy  | `BUY CALL $<wall_mark>` |
-| `🔴 BEARISH` | sell | `BUY PUT $<wall_mark>` |
-
-Sourced straight from `StreamingService.trend_data()` (no separate
-`classify_trend_signal` helper), so the grid and the alerts share the same
-label set.
-
-**Conviction gate.** A trend label alone is not enough — before it fires,
-`maybe_fire_wall_zone_alerts` computes a 0–5 conviction score
-(`_conviction_score` in `flow.py`) from how many independent metrics agree
-with the signal direction:
-
-| +1 point when | Meaning |
-| --- | --- |
-| \|book_imbalance\| > 0.3 | price pressure is strong |
-| flow_speed & flow_acceleration share a sign | momentum is accelerating |
-| liquidity_flow > 0 (up) / < 0 (down) **and** \|liquidity_flow\| ≥ max(25 contracts, 2 % of book depth) | book refills in an up move, drains in a down move — by a magnitude that beats churn |
-| net_flow(60 s) > 0 (up) / < 0 (down) | delta-weighted executed flow matches direction |
-| absorption ≥ 1000 vol/$1 (`ABSORPTION_HIGH`) | HEAVY flow is being absorbed (price pinned) — thin-flow drift does not score |
-
-Reversals (`bullish` / `bearish`) clear with score ≥ 2. Weak / flat-ish
-trends that don't corroborate stay quiet. Thresholds are the tunable
-`_ALERT_MIN_CONVICTION_REVERSAL` constant in `flow.py`.
-
-**Wall-reversal alerts.** A trend reversal fires only **inside** a wall zone
-(`wall_zone is not None` — spot trading within a wall buffer of a
-resistance/support level): the send gate requires `_fire_trend`(conviction
-≥ 2), `wall_zone is not None`, and `_wall_stable >= 2`, plus the per-ticker
-cooldown. There is no dedicated `💥` wall-reversal message format — the
-reversal is delivered through the compact signal line (see below).
-
-This replaces the previous behavior where trend alerts were *filtered*
-(suppressed) when spot was **away** from a wall. Now:
-
-- High-conviction reversals **at walls** fire a wall-reversal alert (spot
-  inside the wall buffer).
-- Low-value reversals **in open space** (spot away from walls) are suppressed
-  — the conviction gate and the wall-zone check ensure only meaningful L2
-  signals at key levels surface.
-
-Diff-based alerts (wall change, gamma flip / dealer flip, price crossings) are
-sent to Telegram wherever they are generated. The periodic poller filters
-legacy "wall BROKE" / "wall REVERSAL" alert text out of its sends (legacy
-strings the pipeline no longer produces). "Wall moved" alerts are passed
-through unchanged. Front expiration VRP is not passed to `notify_alerts`;
-it remains only in strategy recommendation text.
-
-**Compact signal line.** When a wall-reversal alert fires, `notify_alerts(..., trend_alert=...)`
-renders a single dense signal line instead of repeating the flow-metric
-header rows, folding in the corroborating metrics:
-
-    🟢 BULLISH - BUY CALL $8.25 · Net +1,200 · Abs 9,500
-
-(`Net` = 60 s net flow, `Abs` = absorption.) IV rank / RV / GEX / wall zone and
-`Wall absorbed` remain separate header lines for context. VRP, Book Imbalance,
-Flow Speed, Flow Acceleration, and Liquidity Flow are no longer included in
-Telegram alert headers; VRP values remain within strategy recommendation text
-but are not surfaced as header lines. Wall-reversal trend alerts, wall-broke
-alerts, and strategy recommendations are sent to Telegram.
-
-**Standard Telegram header.** Every alert message header (when data is
-available) renders the following lines in order:
-
-| Header line | Format | Field |
-| --- | --- | --- |
-| Symbol | `<b>SYMBOL</b>` | ticker symbol |
-| Price | `Price: <code>$XXX.XX</code>` | spot |
-| GEX | `🟢/🔴 GEX: <code>X</code>` | net GEX |
-| Wall zone | `🟢 Near Support $XX` / `🔴 Near Resistance $XX` | `wall_zone`, `pw`/`cw` |
-| Absorption | `🟢/🔴/🟡 Absorption: <code>X</code> vol/$1` | absorption |
-| Wall absorbed | `🟡 Wall absorbed: <code>X</code> contracts` | absorbed_at_wall |
-| Net Flow | `🟢/🔴/🟡 Net Flow (60s): <code>+X</code>` | net_flow |
-| Flow Ratio | `🟢/🔴/🟡 Flow Ratio: <code>XX</code>` | flow_ratio |
-
-Flow Ratio is the rolling 60 s **bullish share of delta exposure** —
-`flow_ratio = bull_Δ / (bull_Δ + bear_Δ)` from
-`get_ticker_flow_metrics_60s`, where `bull_Δ` / `bear_Δ` are the changes
-in the cumulative **delta-weighted** counters `delta_buy` / `delta_sell`
-over the trailing 60 s window (each print weighted by **its own
-contract's delta** — live streamed `DELTA`, with the REST chain ATM
-deltas of the trade's expiration and the static ±0.5 as fallbacks). It
-is a proportion in **[0, 1]**
-(never negative — a negative net flow simply means ratio < 0.5) and is
-`None` when the window has no flow, in which case Telegram omits the
-line. Emoji: 🟢 **above** `FLOW_RATIO_GREEN_THRESHOLD` (0.8), 🔴 **below**
-`FLOW_RATIO_RED_THRESHOLD` (0.2), 🟡 otherwise. Flow Ratio is suppressed
-for compact trend-alert messages (the signal line already folds in the
-corroborating metrics). See **Net Flow & Flow Ratio math (rolling 60 s)**
-for the formulas and a worked example.
-
-`flat` and strong `UP` / `DOWN` are **not** surfaced as Telegram alerts —
-only wall-reversal trend alerts (`bullish` / `bearish` REVERSAL) can fire a
-send. Wall-broke alerts and strategy recommendations are also sent to
-Telegram. Wall-reversal alerts require the walls to be stable for 2
-consecutive refreshes and respect the 600 s per-ticker cooldown.
-
 ### Net Flow & Flow Ratio math (rolling 60 s)
 
 Every displayed Net Flow / Flow Ratio reading is a **rolling 60-second**
 window over the ATM option trade stream, not a session total — the
 session-cumulative counters are differenced across the window (details
-in **Order absorption (Telegram + grid)** below). This section records
+in **Order absorption (grid)** below). This section records
 the shared math and a worked example.
 
 **Trade classification (`_infer_dir`).** Each executed ATM print is
@@ -493,7 +368,7 @@ lives entirely in `net_flow`, and the ratio encodes it as distance from
 | = 0 | = 0.5 | balanced |
 | < 0 | < 0.5 | bearish-tilted tape |
 
-`flow_ratio` is `None` (grid shows 0.00; Telegram omits the header line)
+`flow_ratio` is `None` (grid shows 0.00)
 when the window holds no flow. Thresholds: 🟢 / green above
 `FLOW_RATIO_GREEN_THRESHOLD` (0.8), 🔴 / red below
 `FLOW_RATIO_RED_THRESHOLD` (0.2), 🟡 / amber in between.
@@ -534,20 +409,18 @@ newest-minus-oldest sample inside the window:
 
 | Deque | Sample | Displayed value | Consumer |
 | --- | --- | --- | --- |
-| `exec_history` | `(t, delta_buy − delta_sell)` | `net_60` (delta-weighted) | grid Net Flow cell, title-row chip, Telegram `Net Flow (60s)` header (`get_ticker_executed_net60`), conviction gate |
-| `atm_delta_flow_history` | `(t, cumulative delta_buy, cumulative delta_sell)` | `bull_Δ / (bull_Δ + bear_Δ)` (ratio) | grid Flow Ratio cell, title-row chip, Telegram Flow Ratio header (`get_ticker_flow_metrics_60s`) |
+| `exec_history` | `(t, delta_buy − delta_sell)` | `net_60` (delta-weighted) | grid Net Flow cell, title-row chip (`get_ticker_executed_net60`) |
+| `atm_delta_flow_history` | `(t, cumulative delta_buy, cumulative delta_sell)` | `bull_Δ / (bull_Δ + bear_Δ)` (ratio) | grid Flow Ratio cell, title-row chip (`get_ticker_flow_metrics_60s`) |
 | `atm_flow_history` | `(t, cumulative bullish, cumulative bearish)` | (still recorded; currently unused by the displayed ratio) | reference / future use |
 
 Values redraw on every read and need no reset: flow measured
 against an old level simply ages out after a minute. Fewer than two
 samples in the window → `None`.
 
-### Order absorption (Telegram + grid)
+### Order absorption (grid)
 
 **Price-impact absorption** (`AtmOptionVolumeService.get_ticker_absorption`,
-surfaced as the grid **Absorption** column and the Telegram
-`Absorption: <n> vol/$1` header line — folded into the compact trend signal
-line as `Abs`) measures how much aggressive ATM option flow the book consumed
+surfaced as the grid **Absorption** column) measures how much aggressive ATM option flow the book consumed
 without moving the price. **Level 1** data: ATM option trade volume (from
 `LEVEL1_OPTIONS`) over the spot **path length** (from the `LEVEL1_EQUITIES`
 stream):
@@ -563,11 +436,8 @@ High absorption (≥ 1000 vol/$1) means heavy flow is being soaked up at a level
 (price pinned — support/resistance holding); low absorption (< 300) means the
 price is drifting on thin flow.
 
-**Executed flow** (`AtmOptionVolumeService.get_ticker_executed_net60` — the
-Telegram `Net Flow (60s): <n>` header line and the reversal **conviction
-gate** in `flow.maybe_fire_wall_zone_alerts`, folded into the compact
-trend signal line as `Net`) is the **delta-weighted** aggressor split,
-sourced from
+**Executed flow** (`AtmOptionVolumeService.get_ticker_executed_net60`) is
+the **delta-weighted** aggressor split, sourced from
 **Level 1** ATM option trade prints (`LEVEL1_OPTIONS`) weighted by each
 print's **own contract delta** (live streamed `DELTA` from the option
 feed; REST chain ATM deltas per expiration and the static ±0.5 as
@@ -583,12 +453,12 @@ puts (bearish pressure) — equivalently:
 `buy_vol` / `sell_vol` are session-cumulative **raw contract** buckets (pure
 aggressor-direction counts incremented directly by size in
 `_process_trade_ticker`, not prices × contracts); `get_ticker_executed_net60`
-returns them as its first two elements (the alerts consume only its
+returns them as its first two elements (the grid consumes only its
 `net_60` element). The grid itself exposes no Buy/Sell columns — its
 **Net Flow** cell is the delta-weighted `net_60` from
 `get_ticker_executed_net60`, and its **Flow Ratio** cell is the
 delta-weighted share from `get_ticker_flow_metrics_60s` (see below); the
-same pair feeds the title-row chip and the Telegram alerts. The
+same pair feeds the title-row chip. The
 right-hand sides simply mirror the same identity in the per-1-second bar
 counters (`call_buy_vol` / `call_sell_vol` / `put_buy_vol` / `put_sell_vol`)
 rather than being a literal assignment into the ticker totals. Separately,
@@ -611,8 +481,8 @@ for the second pair, both pushed on every wall refresh), 3) a static
 **call +0.5 / put −0.5** fallback so the header is live even at cold
 start. On every trade a `(timestamp,
 delta_buy − delta_sell)` sample is appended to a per-symbol `exec_history`
-pruned to the trailing 60 s. The Telegram `Net Flow (60s)` header (and the
-conviction-gate net in `maybe_fire_wall_zone_alerts`) is the change over
+pruned to the trailing 60 s. The grid's `Net Flow (60s)` cell (and the
+title-row chip) is the change over
 that window:
 
     net_60 = exec_history[-1][1] − exec_history[0][1]   (Δ net_delta over trailing 60 s)
@@ -622,9 +492,8 @@ The **flow-ratio cell** binds to the delta-weighted roll —
 `atm_delta_flow_history` deque (a `(timestamp, cumulative delta_buy,
 cumulative delta_sell)` history pruned to the same 60 s window) into
 `flow_ratio = bull_Δ / (bull_Δ + bear_Δ)` — the same value the
-title-row chip and the Telegram Flow Ratio header show. The **Net Flow
-cell** is the delta-weighted `net_60` above (`get_ticker_executed_net60`),
-the same value the Telegram header and the conviction gate show. Because
+title-row chip shows. The **Net Flow
+cell** is the delta-weighted `net_60` above (`get_ticker_executed_net60`). Because
 these values are differenced over a sliding window they redraw on every
 read and need no reset: flow measured against an old level ages out
 after a minute. `None` results (untracked ticker, < 2 samples, or zero
@@ -657,22 +526,6 @@ tickers stream their ETF proxy's options, one SPY tick updates both the `$SPX`
 flow and the `SPY` flow when both are tracked (same for `$RUT`+`IWM` and
 `$NDX`+`QQQ`); the `_is_idx` guard keeps index entries' spots at their index
 level while the ETF entry's spot follows `UNDERLYING_PRICE`.
-
-**Wall absorption** in `flow.maybe_fire_wall_zone_alerts` snapshots the
-cumulative ATM volume when spot enters a wall zone and reports how many
-contracts were traded while spot stayed inside (Telegram
-`Wall absorbed: <n> contracts`). This is reported as *context* only — it does
-**not** drive any trigger.
-
-**Wall crossings** are detected by `telegram_notifier.diff_alerts` from the
-previous vs current spot-and-wall snapshot: `Price crossed above/below
-Resistance/Support` fires when spot moves past a strike, but only between
-samples where that wall strike itself is unchanged (`cw == prev_cw` /
-`pw == prev_pw`), so wall refreshes cannot be mistaken for price breaks.
-Crossings are subject to the per-ticker `_WALL_ZONE_ALERT_COOLDOWN`
-(600 s) and market-hours suppression. There is no pierce/settle confirmation
-logic; the only extra gates apply to reversals (conviction ≥ 2,
-`_wall_stable >= 2`, spot inside a wall zone).
 
 ### Book pressure (L2 OPTIONS book)
 

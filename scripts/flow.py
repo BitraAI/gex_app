@@ -7,15 +7,12 @@ safely from either entry point without re-running app.py's top-level code.
 
 import asyncio
 import html
-import json
 import logging
-import os
 import random
 import threading
 import time as _time_mod
 import streamlit as st
 from collections import deque
-from functools import partial
 from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT,
                         FLOW_WATCHDOG_STALE_SECONDS,
                         ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE)
@@ -23,8 +20,10 @@ from scripts._utils import compute_strike_increment, format_expiration, is_marke
 from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol
 from scripts.client import fetch_quotes
 from scripts.calculations import calculate_atm_strike, get_strike_spacing
-from scripts.signals import build_strategy_alerts
-from scripts.telegram_notifier import diff_alerts, notify_alerts
+
+# Telegram alerts - module-level check for configuration
+# (imports are done inside functions to avoid circular dependencies)
+
 
 
 # Per-ticker analytics cache + event-driven trigger tracking
@@ -33,6 +32,45 @@ _last_ref_price: dict[str, float] = {}   # last reference price for trigger
 _last_recompute_ts: dict[str, float] = {}  # last wall recompute time (monotonic)
 _last_full_recompute_ts: dict[str, float] = {}  # last full recompute time (monotonic)
 _strike_inc: dict[str, float] = {}       # known strike increment per ticker
+
+# GEX wall stability: consecutive wall refreshes where the wall strike held
+# the same value.  A wall counts as STABLE only after it survived
+# _WALL_STABLE_REFRESHES consecutive unchanged refreshes — a wall that
+# jumped on the last recompute is treated as unconfirmed.  Used to gate the
+# Spot cell coloring in the Order Flow grid.
+_WALL_STABLE_REFRESHES = 2
+_wall_stability: dict[str, dict] = {}
+
+
+def _record_wall_stability(display_key: str, put_wall, call_wall) -> None:
+    """Track wall stability for one ticker after a wall refresh.
+
+    Called by both wall-refresh paths (_refresh_walls_for_symbol and
+    _recompute_symbol) every time fresh walls are computed: an unchanged
+    wall strike bumps its stable counter, a changed (or first-seen) wall
+    resets it.
+    """
+    st_ = _wall_stability.setdefault(display_key, {})
+    for side, val in (("put", put_wall), ("call", call_wall)):
+        _key = f"_{side}_wall"
+        if val is not None and st_.get(_key) is not None and val == st_.get(_key):
+            st_[f"{_key}_count"] = st_.get(f"{_key}_count", 0) + 1
+        else:
+            st_[_key] = val
+            st_[f"{_key}_count"] = 0
+
+
+def _wall_is_stable(display_key: str, side: str) -> bool:
+    """True when the ticker's GEX wall (side: 'put' / 'call') is confirmed
+    STABLE — the same strike held for _WALL_STABLE_REFRESHES consecutive
+    wall refreshes."""
+    st_ = _wall_stability.get(display_key) or {}
+    _key = f"_{side}_wall"
+    return (
+        st_.get(_key) is not None
+        and st_.get(f"{_key}_count", 0) >= _WALL_STABLE_REFRESHES
+    )
+
 logger = logging.getLogger(__name__)
 
 _FETCH_RETRIES = TICKER_RETRY_COUNT
@@ -42,7 +80,7 @@ _FETCH_RETRIES = TICKER_RETRY_COUNT
 #   - but never more often than MIN interval per ticker (API throttle)
 _WALL_RECOMPUTE_MIN_INTERVAL = 30.0    # sec — hard floor between wall refreshes
 _WALL_RECOMPUTE_MAX_INTERVAL = 180.0   # sec — freshness floor in quiet markets
-_WALL_FULL_RECOMPUTE_INTERVAL = 300.0  # sec — full analytics + alerts refresh
+_WALL_FULL_RECOMPUTE_INTERVAL = 300.0  # sec — full analytics refresh
 
 
 async def _fetch_quotes_with_retry(client, symbols, max_retries=None):
@@ -507,42 +545,8 @@ def update_flow_cache():
 
 
 # ---------------------------------------------------------------------------
-# Streaming-driven wall-zone alerts — uses diff_alerts from telegram_notifier
+# Streaming-driven wall refreshes (movement- and time-triggered)
 # ---------------------------------------------------------------------------
-
-_WALL_ZONE_BUFFER = 0.0002  # 0.02 % — must match grid coloring in flow.py
-_WALL_ZONE_MIN_BUFFER = 0.05  # absolute buffer floor ($) for low-priced tickers
-_WALL_ZONE_ALERT_COOLDOWN = 600.0  # min seconds between consecutive alerts per ticker
-
-
-def _wall_buffer(wall: float | None) -> float:
-    """Near-wall zone width: 0.02 % of the wall price, floored at 5 cents so
-    low-priced tickers still get a meaningful zone."""
-    if wall is None:
-        return 0.0
-    return max(abs(wall) * _WALL_ZONE_BUFFER, _WALL_ZONE_MIN_BUFFER)
-
-
-def _wall_price_marks(
-    opt_prices: dict,
-    wall_prices: dict,
-    call_wall: float | None,
-    put_wall: float | None,
-    spot: float | None,
-) -> tuple[float | None, float | None]:
-    """Return (CALL, PUT) marks at whichever wall (resistance/support) is
-    nearest to spot, falling back to the ATM prices when a wall-level mark is
-    unavailable.  Used by both the alert path and the grid columns so the
-    wall-pricing logic exists in one place."""
-    _dist_cw = abs(spot - call_wall) if call_wall is not None and spot is not None else float("inf")
-    _dist_pw = abs(spot - put_wall) if put_wall is not None and spot is not None else float("inf")
-    if _dist_cw <= _dist_pw:
-        _call_p = wall_prices.get("call_wall_call_price") or opt_prices.get("call_price")
-        _put_p = wall_prices.get("call_wall_put_price") or opt_prices.get("put_price")
-    else:
-        _call_p = wall_prices.get("put_wall_call_price") or opt_prices.get("call_price")
-        _put_p = wall_prices.get("put_wall_put_price") or opt_prices.get("put_price")
-    return _call_p, _put_p
 
 
 def _maybe_schedule_wall_refresh(t_upper: str, spot: float, now: float,
@@ -553,12 +557,11 @@ def _maybe_schedule_wall_refresh(t_upper: str, spot: float, now: float,
         strike OR the freshness floor (MAX interval) elapses — throttled
         to at most once per MIN interval per ticker.
       - slow path (include_full=True): full recompute (analytics + IV rank
-        + alerts context) at a fixed slower cadence so alert headers stay
-        fresh too.
+        + RV) at a fixed slower cadence so grid header data stays fresh.
 
     Writes the module-level throttle dicts (_last_ref_price,
     _last_recompute_ts, _last_full_recompute_ts, _strike_inc), so callers
-    on different tabs (the Order Flow alerts loop AND the Candlesticks
+    on different tabs (the Order Flow loop AND the Candlesticks
     fragment) share one cadence and never double-schedule a REST refresh
     for the same ticker.
     """
@@ -589,8 +592,8 @@ def maybe_refresh_ticker_walls(display_symbol: str) -> None:
 
     Called every Candlesticks-tab tick so the Resistance/Support lines on
     the candlestick chart track moving walls even while the Order Flow
-    tab (whose alerts loop normally drives wall refreshes) is not open.
-    The throttle state is SHARED with maybe_fire_wall_zone_alerts, so the
+    tab (whose refresh loop normally drives wall refreshes) is not open.
+    The throttle state is SHARED with maybe_refresh_walls, so the
     total REST cadence stays capped at the MIN/MAX intervals per ticker.
 
     No-op when the ATM service, client, or a streaming spot is missing
@@ -609,117 +612,28 @@ def maybe_refresh_ticker_walls(display_symbol: str) -> None:
                                  include_full=False, atm_svc=atm_svc)
 
 
-def maybe_fire_wall_zone_alerts() -> None:
-    """Inspect every tracked ticker's streaming spot vs its walls and push
-    diff_alerts (wall zone, gamma flip, wall changes) to Telegram.
+def maybe_refresh_walls() -> None:
+    """Inspect every tracked ticker's streaming spot and schedule hybrid
+    wall refreshes (movement- and time-triggered; see
+    _maybe_schedule_wall_refresh for the cadence rules).
     """
     s = st.session_state
     atm_svc = s.get("atm_option_service")
     if atm_svc is None:
         return
     now = _time_mod.monotonic()
-    state = s.setdefault("atm_alert_state", {})
 
     for t in atm_svc.tracked_tickers():
         t_upper = _normalize_display_symbol(t)
         spot = atm_svc.get_ticker_spot(t_upper)
-        call_wall = atm_svc.get_ticker_call_wall(t_upper)
-        put_wall = atm_svc.get_ticker_put_wall(t_upper)
         if spot is None:
             continue
 
-        # Hybrid trigger for wall refreshes (fast + slow path; see
-        # _maybe_schedule_wall_refresh for the cadence rules).
         _maybe_schedule_wall_refresh(t_upper, spot, now, include_full=True, atm_svc=atm_svc)
-
-        prev = state.get(t_upper)
-
-        # Wall stability check: only alert when walls are stable for
-        # 2 consecutive refreshes to avoid false signals from moving walls.
-        _prev_cw = (prev or {}).get("_prev_call_wall")
-        _prev_pw = (prev or {}).get("_prev_put_wall")
-        _wall_stable = (prev or {}).get("_wall_stable_count", 0)
-        if _prev_cw == call_wall and _prev_pw == put_wall:
-            _wall_stable += 1
-        else:
-            _wall_stable = 0
-
-        _ticker_ana = _ticker_analytics_cache.get(t_upper.split(":")[0]) or {}
-        analytics = {
-            "gamma_flip": None,
-            "call_wall": call_wall,
-            "put_wall": put_wall,
-            "dealer_position": None,
-            "atm_strike": atm_svc.get_ticker_atm_strike(t_upper),
-            "call_wall_mark": call_wall,
-            "put_wall_mark": put_wall,
-            "oi_support": _ticker_ana.get("oi_support"),
-            "oi_resistance": _ticker_ana.get("oi_resistance"),
-            "volume_support": _ticker_ana.get("volume_support"),
-            "volume_resistance": _ticker_ana.get("volume_resistance"),
-        }
-        _opt_prices = atm_svc.get_ticker_option_prices(t_upper) or {}
-        _wall_prices = atm_svc.get_ticker_wall_prices(t_upper) or {}
-        _call_p, _put_p = _wall_price_marks(_opt_prices, _wall_prices, call_wall, put_wall, spot)
-        analytics["call_wall_mark"] = call_wall
-        analytics["put_wall_mark"] = put_wall
-        if _call_p is not None:
-            analytics["call_wall_mark"] = _call_p
-        if _put_p is not None:
-            analytics["put_wall_mark"] = _put_p
-        new_alerts, next_state = diff_alerts(prev, analytics, spot)
-        wall_zone = None
-        if call_wall is not None and call_wall - _wall_buffer(call_wall) <= spot <= call_wall + _wall_buffer(call_wall):
-            wall_zone = "Resistance"
-        elif put_wall is not None and put_wall + _wall_buffer(put_wall) >= spot >= put_wall - _wall_buffer(put_wall):
-            wall_zone = "Support"
-
-        # ---- Wall zone entry bookkeeping (for break absorption) --------- #
-        # Snapshot cumulative ATM volume when spot enters a wall zone; while
-        # inside, ``_absorbed_at_wall`` is the flow consumed since entry.
-        # This is reported on break headers as context only — it no longer
-        # *drives* the break trigger, because raw cumulative volume
-        # inflates with quiet time spent in the zone and produced wrong signals.
-        _flow_b, _flow_br = atm_svc.get_ticker_flow(t_upper)
-        _flow_vol = None if _flow_b is None and _flow_br is None else (_flow_b or 0) + (_flow_br or 0)
-        _prev_zone = (prev or {}).get("_wall_zone")
-        if _prev_zone != wall_zone:
-            next_state["_zone_entry_vol"] = _flow_vol if wall_zone is not None else None
-        else:
-            next_state["_zone_entry_vol"] = (prev or {}).get("_zone_entry_vol")
-        next_state["_wall_zone"] = wall_zone
-        _absorbed_at_wall = None
-        if wall_zone is not None and _flow_vol is not None and next_state.get("_zone_entry_vol") is not None:
-            _absorbed_at_wall = max(0.0, _flow_vol - next_state["_zone_entry_vol"])
-
-        last_ts = (prev or {}).get("last_alert_ts", 0.0)
-        next_state["last_alert_ts"] = last_ts
-        next_state["_prev_call_wall"] = call_wall
-        next_state["_prev_put_wall"] = put_wall
-        next_state["_wall_stable_count"] = _wall_stable
-        # Wall-broke alerts are high-confidence (directional pierce confirmed),
-        # so they fire regardless of wall stability.
-        # (_cache mirrors analytics' oi/volume support keys — same lookup.)
-        if new_alerts and now - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
-            next_state["last_alert_ts"] = now
-            next_state["_last_alert_texts"] = new_alerts
-            state[t_upper] = next_state
-            notify_alerts(new_alerts or [""], symbol=t_upper, spot=spot,
-                          gex=_ticker_ana.get("net_gex"),
-                          wall_zone=wall_zone, pw=put_wall, cw=call_wall,
-                          wall_mark=analytics.get("call_wall_mark") if wall_zone == "Resistance" else analytics.get("put_wall_mark"),
-                          absorbed_at_wall=_absorbed_at_wall,
-                          oi_support=analytics.get("oi_support"),
-                          oi_resistance=analytics.get("oi_resistance"),
-                          volume_support=analytics.get("volume_support"),
-                          volume_resistance=analytics.get("volume_resistance"),
-                           disable_notification=False)
-        else:
-            state[t_upper] = next_state
 
 
 # ---------------------------------------------------------------------------
-# Periodic ticker poller (replaces standalone telegram_alerts.py cron job)
+# Periodic ticker poller
 # ---------------------------------------------------------------------------
 
 async def _compute_walls_for_symbol(client, symbol: str) -> dict | None:
@@ -761,7 +675,7 @@ async def _compute_walls_for_symbol(client, symbol: str) -> dict | None:
 
 
 async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> None:
-    """Event-driven: fetch chain, recompute analytics, check zones, send alerts."""
+    """Event-driven: fetch chain and recompute full analytics for a ticker."""
     try:
         from scripts.chain_parser import compute_analytics_for_symbol
         
@@ -794,6 +708,7 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
         if atm_svc:
             _pw = analytics.get("put_wall")
             _cw = analytics.get("call_wall")
+            _record_wall_stability(display_key, _pw, _cw)
             atm_svc.set_ticker_walls(display_key, _pw, _cw)
             _exps = sorted(set(e["expiration"] for e in data))
             if _exps:
@@ -834,117 +749,14 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
                 analytics.get("call_wall_mark"),
                 analytics.get("put_wall_mark"),
             )
+        else:
+            _record_wall_stability(display_key,
+                                   analytics.get("put_wall"),
+                                   analytics.get("call_wall"))
 
         _si = compute_strike_increment(data)
         if _si is not None:
             _strike_inc[display_key] = _si
-
-        _BASE_DIR = os.path.expanduser("~/.local/share/gex_app")
-        _ALERT_STATE_FILE = os.path.join(_BASE_DIR, "alert_state.json")
-        state = {}
-        try:
-            with open(_ALERT_STATE_FILE) as f:
-                state = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-
-        prev = state.get(api_symbol)
-        new_alerts, next_sym_state = diff_alerts(prev, analytics, spot)
-        last_ts = (prev or {}).get("last_alert_ts", 0.0)
-        next_sym_state["last_alert_ts"] = last_ts
-        now_ts = _time_mod.monotonic()
-
-        # Resolve the wall zone up-front so the Support-zone strategy scan
-        # below can re-use it (matches the zone classifier used at notify time).
-        _cw = analytics.get("call_wall")
-        _pw = analytics.get("put_wall")
-        _wall_zone = None
-        if _cw is not None and _cw - _wall_buffer(_cw) <= spot <= _cw + _wall_buffer(_cw):
-            _wall_zone = "Resistance"
-        elif _pw is not None and _pw - _wall_buffer(_pw) <= spot <= _pw + _wall_buffer(_pw):
-            _wall_zone = "Support"
-
-        # Wall-zone-biased strategy alerts.  When spot is sitting at a wall,
-        # the directional bias is set by the wall's role and we only surface
-        # the matching-direction premium recommendations instead of the full
-        # strategy set — this avoids signalling against the dealer bias (e.g.
-        # Long Puts / Short Calls at a put-wall support that's likely to
-        # bounce).  This is the same ``generate_recommendations`` pipeline
-        # used by the Trade Signals tab (signals.py), gated with the default
-        # DTE 1-45 (generate_recommendations' default args) and the per-
-        # strategy enable flags on ``build_strategy_alerts``.
-        if _wall_zone == "Support":
-            # Bullish bias (bounce off support) -> Long Calls / Short Puts.
-            strat_alerts = build_strategy_alerts(
-                data, analytics, spot, rv,
-                enable_long_calls=True,
-                enable_long_puts=False,
-                enable_short_calls=False,
-                enable_short_puts=True,
-            )
-        elif _wall_zone == "Resistance":
-            # Bearish bias (rejection at resistance) -> Long Puts / Short Calls.
-            strat_alerts = build_strategy_alerts(
-                data, analytics, spot, rv,
-                enable_long_calls=False,
-                enable_long_puts=True,
-                enable_short_calls=True,
-                enable_short_puts=False,
-            )
-        else:
-            strat_alerts = build_strategy_alerts(data, analytics, spot, rv)
-        all_alerts = new_alerts + strat_alerts
-        # Diagnostic: trace why strategy recommendation blocks may be empty for
-        # a given symbol (equities often lack SSVI/iv_skew enrichment from the
-        # ETF fallback path that index symbols get).
-        if not strat_alerts:
-            logger.info(
-                "[%s] empty strat_alerts — iv_skew=%s ssvi_surface=%s atm_iv=%s "
-                "near_atm_pool=%d spot=%s wall_zone=%s",
-                display_key,
-                analytics.get("iv_skew"),
-                "yes" if analytics.get("ssvi_surface") is not None else "no",
-                analytics.get("atm_iv"),
-                len(data),
-                spot,
-                _wall_zone,
-            )
-            # Additional debug for strategy build failures
-            if analytics.get("ssvi_surface") is None and analytics.get("iv_skew") is None:
-                logger.info(
-                    "[%s] SSVI surface and iv_skew both missing - strategy signals may be unavailable",
-                    display_key
-                )
-        # Filter out wall-broke and wall-reversal alerts from the periodic
-        # poller path — those are surfaced by the streaming
-        # ``maybe_fire_wall_zone_alerts`` path with full L2 context instead.
-        # "Wall changed" alerts are intentionally passed through.
-        tg_alerts = [a for a in all_alerts if not (
-            "wall BROKE" in a or
-            "wall REVERSAL" in a
-        )]
-
-        if tg_alerts and now_ts - last_ts >= _WALL_ZONE_ALERT_COOLDOWN:
-            next_sym_state["last_alert_ts"] = now_ts
-            await loop.run_in_executor(
-                None, partial(
-                notify_alerts, tg_alerts,
-                symbol=api_symbol, spot=spot,
-                gex=analytics.get("net_gex"),
-                wall_zone=_wall_zone, pw=_pw, cw=_cw,
-                    disable_notification=False,
-                ),
-            )
-
-        state[api_symbol] = next_sym_state
-        try:
-            os.makedirs(_BASE_DIR, exist_ok=True)
-            tmp = _ALERT_STATE_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(state, f)
-            os.replace(tmp, _ALERT_STATE_FILE)
-        except Exception as exc:
-            logger.error("failed to persist alert state: %s", exc)
 
     except Exception as exc:
         logger.warning("[%s] recompute failed: %s", display_key, exc)
@@ -972,6 +784,7 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
         if atm_svc:
             _pw = analytics.get("put_wall")
             _cw = analytics.get("call_wall")
+            _record_wall_stability(display_key, _pw, _cw)
             atm_svc.set_ticker_walls(display_key, _pw, _cw)
             _exps = sorted(set(e["expiration"] for e in data))
             if _exps:
@@ -1009,6 +822,10 @@ async def _refresh_walls_for_symbol(display_key: str, client, atm_svc=None) -> N
                 analytics.get("call_wall_mark"),
                 analytics.get("put_wall_mark"),
             )
+        else:
+            _record_wall_stability(display_key,
+                                   analytics.get("put_wall"),
+                                   analytics.get("call_wall"))
 
         _si = compute_strike_increment(data)
         if _si is not None:
@@ -1171,6 +988,10 @@ def render_atm_order_flow_grid():
                 "Resistance": resistance_cell,
                 "Call Price": _call_p,
                 "Put Price": _put_p,
+                # Hidden keys (not rendered): raw GEX wall strikes for the
+                # Spot-cell zone coloring (_spot_cell_colorer).
+                "_put_wall": put_wall_val,
+                "_call_wall": call_wall_val,
             })
             
             # Add Net Flow and Flow Ratio (from 4 most active expirations)
@@ -1198,6 +1019,8 @@ def render_atm_order_flow_grid():
     # Hash the row data to detect whether anything actually changed.
     # Only meaningful data changes trigger re-render — this prevents flicker
     # caused by the table being re-drawn on every 2-second fragment tick.
+    # Spot, the raw wall strikes and the wall-stability counters are hashed
+    # too: they drive the Spot cell zone coloring.
     data_key = tuple(
         (r["Ticker"],
          r["Expiration"],
@@ -1206,7 +1029,9 @@ def render_atm_order_flow_grid():
          r.get("Net Flow"), r.get("Flow Ratio"),
          r.get("OI Support"), r.get("OI Resistance"),
          r.get("Volume Support"), r.get("Volume Resistance"),
-         r.get("Has Institutional"))
+         r.get("Has Institutional"),
+         r.get("Spot"), r.get("_put_wall"), r.get("_call_wall"),
+         tuple(sorted((_wall_stability.get(r["Ticker"]) or {}).items())))
         for r in rows
     )
     data_hash = hash(data_key)
@@ -1227,20 +1052,21 @@ def render_atm_order_flow_grid():
         return f"${v:,.2f}" if v is not None else ""
 
     def _spot_cell_colorer(r):
+        """SPOT column zone coloring — fires only inside a *stable* GEX
+        wall range (zone width = strike spacing / 4):
+
+        - GREEN: put wall (support) is stable and Put_Wall < spot
+          < Put_Wall + spacing/4 (spot just above the put wall).
+        - RED: call wall (resistance) is stable and Call_Wall - spacing/4
+          < spot < Call_Wall (spot just below the call wall).
+        """
         spot = r.get("Spot", 0.0)
-        support = r.get("Support", None)
-        resistance = r.get("Resistance", None)
-        
-        if spot is None or spot == 0:
+        put_wall = r.get("_put_wall")
+        call_wall = r.get("_call_wall")
+
+        if not spot or (put_wall is None and call_wall is None):
             return ""
-        
-        # Convert support/resistance to float if they are strings
-        try:
-            support = float(support) if support is not None else None
-            resistance = float(resistance) if resistance is not None else None
-        except (TypeError, ValueError):
-            return ""
-        
+
         # Zone width is a quarter of the strike spacing (chain-derived when
         # known, price-bucket heuristic as fallback).
         t_upper = _normalize_display_symbol(r.get("Ticker", "")) if r.get("Ticker") else None
@@ -1249,12 +1075,16 @@ def render_atm_order_flow_grid():
             spacing = get_strike_spacing(spot)
         zone = spacing * 0.25
 
-        # Green when spot is within the support zone band
-        if support is not None and support <= spot <= support + zone:
+        # GREEN — spot inside the stable GEX Put Wall range:
+        # Put_Wall < Spot_Price < Put_Wall + (Strike_Spacing / 4)
+        if (put_wall is not None and put_wall < spot < put_wall + zone
+                and t_upper and _wall_is_stable(t_upper, "put")):
             return "background-color:#90EE90;"
 
-        # Red when spot is within the resistance zone band
-        if resistance is not None and resistance - zone <= spot <= resistance:
+        # RED — spot inside the stable GEX Call Wall range:
+        # Call_Wall > Spot_Price > Call_Wall - (Strike_Spacing / 4)
+        if (call_wall is not None and call_wall > spot > call_wall - zone
+                and t_upper and _wall_is_stable(t_upper, "call")):
             return "background-color:#FFB6C1;"
 
         return ""
@@ -1360,6 +1190,34 @@ def render_flow_frag():
         render_flow_legend_and_style()
         s["_flow_css_injected"] = True
     render_atm_order_flow_grid()
-    # Drive wall-zone Telegram alerts from the *streaming* spot the grid
-    # displays, so alerts fire in real time when the grid colors a cell.
-    maybe_fire_wall_zone_alerts()
+    # Drive wall refreshes from the *streaming* spot the grid displays,
+    # so the Support/Resistance lines track the live price in real time.
+    maybe_refresh_walls()
+    
+    # Generate and send Telegram alerts for qualifying BUY signals
+    _maybe_send_telegram_alerts()
+
+
+def _maybe_send_telegram_alerts() -> None:
+    """Generate and send Telegram alerts if any qualify.
+    
+    Called by render_flow_frag() to check for BUY CALL/PUT conditions
+    and send alerts via Telegram if configured.
+    """
+    # Check if Telegram is configured (import locally to avoid circular deps)
+    try:
+        from scripts import config
+        telegram_configured = bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID)
+        if not telegram_configured:
+            return
+        
+        # Import telegram_alerts module
+        from scripts import telegram_alerts
+        alerts = telegram_alerts.generate_telegram_alerts()
+        if alerts:
+            telegram_alerts.send_telegram_alerts(alerts)
+    except ImportError:
+        # telegram_alerts not available, silently skip
+        pass
+    except Exception as e:
+        logger.warning(f"Telegram alert generation failed: {e}")

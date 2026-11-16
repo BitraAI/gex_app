@@ -67,18 +67,7 @@ Built with Streamlit, Plotly, NumPy, and the Schwab API.
 - **Unusual Trades** — Two-layer unusual-options-activity tab:
   - **Snapshot scan** — scans every tracked ticker (or one) for contracts with outsized volume vs open interest, extreme traded premium, and short DTE; chains are fetched concurrently (staggered, 4-way) and cached 90 s so filter tweaks cost no REST calls; auto-rescans every 90 s during market hours. **Side** infers the aggressor from the *last trade price* vs bid/ask (not the theoretical mark). Rows carry **NEW** (flagged now, not in the previous scan), **Vol Δ** (session volume added per contract since first seen), **ROLL?** (same strike/type flagged on 2+ expirations — likely a roll), and **EARN** (expiration window covers the next earnings date) flags.
   - **Live prints & sweep proxy** — large prints and multi-flight sweep clustering straight from the shared option tick stream (ATM front/second expiration per tracked ticker). A sweep = 3+ consecutive same-type same-side prints with ≤10 s gaps across 2+ strikes within the last 5 minutes.
-  - Optional **Telegram digest** for genuinely NEW flags whose premium clears a configurable threshold (suppressed outside market hours, piggybacks on the open dashboard like the other alert paths).
 - **Light Theme** — Clean light-themed UI
-  - **Telegram Alerts** — Pushes an alert to a Telegram chat when key events fire:
-   - GEX events: gamma flip, call wall / put wall changes, dealer gamma flips (Long↔Short), and spot crossings of the walls
-   - **Trend alerts:** Wall-reversal alerts with a **conviction gate** (0–5 score from `book_imbalance`, `flow_speed`, `flow_acceleration`, `liquidity_flow`, `net_flow`, and `absorption`). Liquidity flow only scores when the refill/drain magnitude clears max(25 contracts, 2 % of book depth), and absorption only scores when it is heavy (≥ 1000 vol/$1). Reversals (`bullish`/`bearish`) at walls fire with score ≥ 2. Directional signals sent with a trade suggestion (`BUY CALL` / `BUY PUT`)
-   - **Wall-crossing alerts:** 💥 "Price crossed above/below Resistance/Support" when spot moves past a wall (fires only between refreshes where the wall strike itself is unchanged, so a wall refresh isn't misread as a break); `Wall absorbed: N contracts` in the alert header counts contracts traded since spot entered the wall zone
-   - **Strategy signals:** Buy Premium and Sell Premium recommendations (same filters as the Trade Signals tab; "No strong signals" and "No OTM ..." informational messages are suppressed; wall change alerts are also suppressed from Telegram sends but still shown in the UI)
-   - **Unusual trades digest:** the Unusual Trades tab's 90 s auto-scan pushes one message per scan listing genuinely NEW flagged contracts whose premium clears the digest threshold (default $250k, configurable in the tab's Telegram expander). Suppressed outside market hours; it piggybacks on the dashboard being open, like the other alert paths.
-   Two delivery paths:
-   - **In-app (single-ticker):** fires inline when the Streamlit dashboard refreshes its visible symbol (uses session state as the per-symbol baseline).
-   - **In-app (multi-ticker):** `flow.maybe_fire_wall_zone_alerts()` runs on every Order Flow grid refresh and diffs every tracked ticker in `ticker_history.json` against the persisted per-symbol baseline — no cron / standalone runner required.
-   All alerts are Markdown-formatted with the symbol header and current spot. Reads `BOT_TOKEN` / `CHAT_ID` from the `[telegram]` section of `config.toml` (overridable via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars). Set `enabled = false` to mute alerts without removing secrets. Alerts are delivered silently by default so they don't buzz the recipient's device on every refresh.
 
 ## Setup
 
@@ -137,21 +126,6 @@ max_token_age_days = 7
 ```
 
 Environment variables `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` override `config.toml`.
-
-#### Telegram Alerts (optional)
-
-See **TELEGRAM.md** for full setup, alert types, message format, and suppression rules.
-
-Quick start: add a `[telegram]` section to `config.toml`:
-
-```toml
-[telegram]
-enabled = true                     # set false to mute alerts without removing secrets
-BOT_TOKEN = "YOUR_BOT_TOKEN"       # from @BotFather
-CHAT_ID = "YOUR_CHAT_ID"           # from @userinfobot (or a negative group id, or @channelname)
-```
-
-Environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` override `config.toml`.
 
 ### Schwab Authentication
 
@@ -279,7 +253,7 @@ journalctl --user -u gex-app.service -f
 gex_app/
 ├── app.py                              # Main Streamlit application
 ├── scripts/                            # Application modules (imported by app.py as scripts.*)
-│   ├── flow.py                         # Shared ATM Order Flow rendering (grid, market status indicator, wall-zone alerts, conviction scoring, session defaults, market-hours check)
+│   ├── flow.py                         # Shared ATM Order Flow rendering (grid, market status indicator, wall refresh scheduling, session defaults, market-hours check)
 │   ├── analytics.py                    # Analytical calculations (walls, flip, skew, etc.)
 │   ├── calculations.py                 # GEX/VEX/CEX calculation engine, data aggregation, delta-based ETF fallback for index symbols
 │   ├── charts.py                       # Plotly chart generators (GEX, VEX, CEX, volatility, heatmaps)
@@ -299,15 +273,14 @@ gex_app/
 │   ├── option_streaming_service.py    # Schwab WebSocket options streaming (LEVELONE_OPTIONS for ATM call/put, per-ticker expiration, 1s aggregation with buy/sell split and delta-weighted Net Flow, Pin Score, raw flow metrics — shares the equity StreamClient)
 │   ├── streaming_service.py           # Schwab WebSocket streaming (Level 1 + Level 2 options books, O(1) list-based bar accumulator converted to DataFrame on demand)
 │   ├── signals.py                      # Strategy signals engine (scoring, recommendations, bias)
-│   ├── svi.py                          # SSVI volatility surface (Raw SVI + SSVI surface calibration)
-│   └── telegram_notifier.py            # Telegram Bot API alert sender + diff_alerts rule (config-driven, fail-safe)
+│   └── svi.py                          # SSVI volatility surface (Raw SVI + SSVI surface calibration)
 ├── config.toml                         # Schwab credentials and settings (NOT committed — see .gitignore)
 ├── requirements.txt                   # Python dependencies
 ├── pyproject.toml                       # Exposes scripts/email_service.py as top-level `email_service` on `pip install -e .` + pytest config (pythonpath=., testpaths=tests)
 ├── assets/                            # Screenshots of charts and dashboard panels
 ├── tests/                             # Unit tests (pytest config placeholders — no test files yet)
 ├── CANDLESTICS.md                     # Candlestick chart internals (indicators, dual-axis pan/zoom, Y-range persistence)
-├── FLOW.md                            # ATM order-flow architecture (streaming, absorption, liquidity, net flow, conviction-gated alerts)
+├── FLOW.md                            # ATM order-flow architecture (streaming, absorption, liquidity, net flow)
 ├── SIGNALS.md                         # Strategy-signal logic (scoring, filters, market bias)
 ├── LICENSE                            # License file
 └── README.md                          # This file

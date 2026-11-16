@@ -1,13 +1,12 @@
 """Data pipeline extracted verbatim from app.py.
 
 Client/session bootstrap, option-chain fetch + parse, filter and state
-computation, alerting, candle-cache helpers and IV-rank lookup.
+computation, candle-cache helpers and IV-rank lookup.
 Nothing here renders UI except error paths (``st.error``); view modules
 import from this module.
 """
 import asyncio
 import logging
-import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,9 +27,7 @@ from scripts.calculations import parse_option_chain, build_greeks_lookup, aggreg
 
 logger = logging.getLogger(__name__)
 from scripts.analytics import compute_analytics
-from scripts.telegram_notifier import notify_alerts, diff_alerts
 from scripts.flow import (_ensure_async_loop, _ticker_analytics_cache,
-                           _wall_buffer, _WALL_ZONE_ALERT_COOLDOWN,
                            _strike_inc, run_async)
 from scripts.news_service import NewsService
 from scripts.index_spot_poller import IndexSpotPoller
@@ -40,8 +37,8 @@ def sync_index_poller() -> None:
     """Re-sync the IndexSpotPoller's ticker set with the current ticker_history.
 
     Called whenever a ticker is added or removed so the poller stops polling
-    symbols the user no longer tracks (prevents phantom _ticker_flows entries
-    that produce spurious alerts) and starts polling newly-added index symbols.
+    symbols the user no longer tracks (prevents phantom _ticker_flows
+    entries) and starts polling newly-added index symbols.
     """
     poller = st.session_state.get("index_spot_poller")
     if poller:
@@ -239,8 +236,6 @@ def fetch_data(symbol: str) -> bool:
         return False
 
     if symbol != st.session_state.get("symbol"):
-        st.session_state.prev_alerts_state = {}
-        st.session_state.alerts = []
         st.session_state.iv_skew_history = []
     st.session_state.data = data
     st.session_state.spot = spot
@@ -261,7 +256,7 @@ def fetch_data(symbol: str) -> bool:
     # then store Put Wall (support) / Call Wall (resistance) for the grid.
     _update_atm_service(_sym, data, spot, st.session_state.get("analytics") or {})
     # Populate the per-ticker strike increment (used by
-    # maybe_fire_wall_zone_alerts to size the wall-refresh / big-move
+    # _maybe_schedule_wall_refresh to size the wall-refresh / big-move
     # thresholds).  Without this, the default 1.0 is used until the first
     # REST wall recompute for a non-primary ticker, which can make the
     # half-strike threshold too large (lazy walls for SPY, NDX etc.) or
@@ -284,7 +279,6 @@ def fetch_data(symbol: str) -> bool:
         "volume_support": st.session_state.analytics.get("volume_support"),
         "volume_resistance": st.session_state.analytics.get("volume_resistance"),
     }
-    check_alerts(st.session_state.analytics, spot)
     return True
 
 
@@ -354,39 +348,6 @@ def compute_state():
     st.session_state.expirations = sorted(set(
         e["expiration"] for e in st.session_state.data
     ))
-
-
-def check_alerts(analytics: dict, spot: float):
-    s = st.session_state
-    prev = s.prev_alerts_state
-    
-    new_alerts, next_state = diff_alerts(prev, analytics, spot)
-    s.prev_alerts_state = next_state
-
-    all_alerts = new_alerts
-
-    _last_alert_ts = st.session_state.get("_last_check_alert_ts", 0.0)
-    _now = time.time()
-    if all_alerts and _now - _last_alert_ts >= _WALL_ZONE_ALERT_COOLDOWN:
-        st.session_state._last_check_alert_ts = _now
-        st.session_state.alerts = all_alerts + st.session_state.alerts[:20]
-        tg_alerts = all_alerts
-        if tg_alerts:
-            _cw = analytics.get("call_wall")
-            _pw = analytics.get("put_wall")
-            _wall_zone = None
-            if _cw is not None and _cw - _wall_buffer(_cw) <= spot <= _cw + _wall_buffer(_cw):
-                _wall_zone = "Resistance"
-            elif _pw is not None and _pw - _wall_buffer(_pw) <= spot <= _pw + _wall_buffer(_pw):
-                _wall_zone = "Support"
-            notify_alerts(
-                tg_alerts,
-                symbol=st.session_state.get("symbol"),
-                spot=spot,
-                gex=analytics.get("net_gex"),
-                wall_zone=_wall_zone, pw=_pw, cw=_cw,
-                wall_mark=analytics.get("call_wall_mark") if _wall_zone == "Resistance" else analytics.get("put_wall_mark"),
-            )
 
 
 CANDLE_TTL_SECS = 600  # 10 minutes

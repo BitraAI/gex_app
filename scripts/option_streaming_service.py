@@ -1115,8 +1115,8 @@ class AtmOptionVolumeService:
                 # hasn't added to their ticker_history.  The IndexSpotPoller
                 # calls set_ticker_spot for all index symbols (when it was
                 # always including the base set), and auto-creating here
-                # would surface phantom tickers in tracked_tickers() and
-                # trigger spurious alerts.  If the symbol is genuinely in the
+                # would surface phantom tickers in tracked_tickers().  If
+                # the symbol is genuinely in the
                 # user's history it will already have an entry (via
                 # _init_all_tickers / ensure_atm_streaming).  Fall back to a
                 # fresh file read so the guard is correct even when register()
@@ -1704,7 +1704,7 @@ class AtmOptionVolumeService:
         (front vs second-nearest pair); the static ±0.5 is the last
         resort.  That delta-weighted cumulative net
         (delta_buy - delta_sell) feeds the 60 s executed-flow window
-        behind the Net Flow / Flow Ratio displays and alerts."""
+        behind the Net Flow / Flow Ratio displays."""
         if ticker is None:
             return
         

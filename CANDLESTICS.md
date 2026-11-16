@@ -49,8 +49,7 @@ mounted position), so it holds its place identically on refresh and on
 tab clicks. Values come from
 `AtmOptionVolumeService.get_ticker_executed_net60` (Net Flow Δ — the
 **delta-weighted** executed net, trailing-60 s change in
-`delta_buy − delta_sell`, same source as the Telegram header and the
-conviction gate; the per-print weight is each traded contract's own
+`delta_buy − delta_sell`; the per-print weight is each traded contract's own
 streamed `DELTA` — ±0.5 static fallback) and `get_ticker_flow_metrics_60s` (Flow Ratio — the
 delta-weighted bullish share of delta exposure), the same values the
 **Order Flow** grid's Net Flow / Flow Ratio columns show. Coloring matches the shared thresholds in

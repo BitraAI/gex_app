@@ -1,5 +1,5 @@
 .streamlit/config.toml
-# Holds secrets (SMTP, Schwab, Telegram) — tracked .streamlit/config.toml
+# Holds secrets (SMTP, Schwab) — tracked .streamlit/config.toml
 # was removed from the repo (240c2e2 on GitHub). Keep the local copy on
 # disk only; sanitized template lives in .streamlit/config.toml.example.
 

@@ -29,7 +29,7 @@ The **IV Skew (25Δ)** metric itself is computed for the **selected expiration**
 
 ### VRP computation
 
-**Expiration ATM VRP** is the only VRP used throughout trade signals — there is no per-strike VRP. For each expiration, the option closest to spot (ATM) is identified and its VRP computed as `(ATM IV − RV) × 100` in percentage points. The `exp_vrp` dict is built from the **full option chain** (`all_data` if available, otherwise `scored`) so all expirations are represented, even when the directional strategy DTE filter narrows the candidate set. **VRP is shown in strategy recommendation text in the Trade Signals tab UI, but VRP-containing alerts are filtered out of Telegram alerts** (see **Telegram alerts** in the Code reference section).
+**Expiration ATM VRP** is the only VRP used throughout trade signals — there is no per-strike VRP. For each expiration, the option closest to spot (ATM) is identified and its VRP computed as `(ATM IV − RV) × 100` in percentage points. The `exp_vrp` dict is built from the **full option chain** (`all_data` if available, otherwise `scored`) so all expirations are represented, even when the directional strategy DTE filter narrows the candidate set. VRP is shown in strategy recommendation text in the Trade Signals tab UI.
 
 ### Candidate filtering
 
@@ -108,4 +108,4 @@ Each directional strategy follows a multi-step pipeline. All criteria are checke
 **Wall Strength Metrics:**
 - `call_wall_strength` / `put_wall_strength` — GEX-based (sum of top 3, displayed in $XM format)
 - `app.py` — `render_trade_signals_frag()` renders the UI, applies the selected-expiration restriction, and calls `generate_recommendations`; `_build_strategy_alerts()` builds the in-app Trade Signals alerts.
-- `flow.py` — `_recompute_symbol()` calls `signals.build_strategy_alerts` to generate strategy recommendation blocks, then sends them to Telegram alongside wall-broke alerts, wall-change diff alerts, and wall-reversal trend alerts. Strategy recommendation text with VRP values **is** included in Telegram, but front expiration VRP is removed from the Telegram header (not passed to `notify_alerts`). The Trade Signals tab UI also shows strategy recommendations.
+- `flow.py` — the full recompute path (`_recompute_symbol()`) no longer builds strategy alert blocks; the Trade Signals tab UI (`app.py`) is the sole consumer of `generate_recommendations` / `build_strategy_alerts` output.

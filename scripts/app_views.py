@@ -507,17 +507,6 @@ def render_sidebar():
         # Blank rows so sections don't crowd each other
         st.markdown("&nbsp;")
 
-        st.markdown("### Alerts")
-        if st.session_state.alerts:
-            for alert in st.session_state.alerts[:10]:
-                st.info(alert, icon="ℹ")
-            if st.button("Clear Alerts", width='stretch'):
-                st.session_state.alerts = []
-        else:
-            st.caption("No alerts yet")
-
-        st.markdown("&nbsp;")
-
         st.markdown("### Display")
         st.session_state.show_calls = st.checkbox("Show Calls", value=True)
         st.session_state.show_puts = st.checkbox("Show Puts", value=True)
