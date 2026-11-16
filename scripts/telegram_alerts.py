@@ -186,8 +186,8 @@ def generate_telegram_alerts() -> list[str]:
                 _wall_is_stable(t_upper, "put") and
                 _is_alert_needed(t_upper, "call")):
                 
-                # Get call price at put wall
-                call_price = wall_prices.get("put_wall_put_price") or opt_prices.get("put") or "N/A"
+                # CALL mark at the put-wall (support) strike
+                call_price = wall_prices.get("put_wall_call_price") or opt_prices.get("call") or "N/A"
                 
                 alert = f"{t_upper} | {spot:.2f} | BUY CALL {put_wall:.2f} @ {call_price} | Exp: {exp_date}"
                 alerts.append(alert)
@@ -202,8 +202,8 @@ def generate_telegram_alerts() -> list[str]:
                 _wall_is_stable(t_upper, "call") and
                 _is_alert_needed(t_upper, "put")):
                 
-                # Get put price at call wall
-                put_price = wall_prices.get("call_wall_call_price") or opt_prices.get("call") or "N/A"
+                # PUT mark at the call-wall (resistance) strike
+                put_price = wall_prices.get("call_wall_put_price") or opt_prices.get("put") or "N/A"
                 
                 alert = f"{t_upper} | {spot:.2f} | BUY PUT {call_wall:.2f} @ {put_price} | Exp: {exp_date}"
                 alerts.append(alert)
