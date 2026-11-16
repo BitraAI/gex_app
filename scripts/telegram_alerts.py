@@ -189,7 +189,7 @@ def generate_telegram_alerts() -> list[str]:
                 # Get call price at put wall
                 call_price = wall_prices.get("put_wall_put_price") or opt_prices.get("put") or "N/A"
                 
-                alert = f"{t_upper} | Spot: {spot:.2f} | BUY CALL @ {call_price} | Put Wall: {put_wall:.2f} | Exp: {exp_date}"
+                alert = f"{t_upper} | {spot:.2f} | BUY CALL {put_wall:.2f} @ {call_price} | Exp: {exp_date}"
                 alerts.append(alert)
                 _update_alert_timestamp(t_upper, "call")
                 continue
@@ -205,7 +205,7 @@ def generate_telegram_alerts() -> list[str]:
                 # Get put price at call wall
                 put_price = wall_prices.get("call_wall_call_price") or opt_prices.get("call") or "N/A"
                 
-                alert = f"{t_upper} | Spot: {spot:.2f} | BUY PUT @ {put_price} | Call Wall: {call_wall:.2f} | Exp: {exp_date}"
+                alert = f"{t_upper} | {spot:.2f} | BUY PUT {call_wall:.2f} @ {put_price} | Exp: {exp_date}"
                 alerts.append(alert)
                 _update_alert_timestamp(t_upper, "put")
                 continue

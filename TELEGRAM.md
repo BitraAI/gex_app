@@ -10,7 +10,7 @@ The app pushes push-notification-style alerts to a Telegram chat for two strictl
 
 ### 1. Create a bot and get the chat ID
 
-- **Bot token**: message [@BotFather](https://t.me/BotsFather) on Telegram → `/newbot` → copy the token (format `123456789:ABC-...`).
+- **Bot token**: message [@BotFather](https://t.me/BotsFather) on Telegram → `/newbot` → Choose a username (must end in `bot`) → copy the token (format `123456789:ABC-...`).
 - **Chat ID**: send any message to the bot (or add it to a group and post once), then read the ID:
 
   ```
