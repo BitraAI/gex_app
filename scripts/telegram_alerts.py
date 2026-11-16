@@ -46,25 +46,16 @@ logger = logging.getLogger("gex.telegram_alerts")
 # Telegram configuration check
 TELEGRAM_CONFIGURED = bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID)
 
-# Wall stability check - defined locally since we can't import from flow
-_WALL_STABLE_REFRESHES = 2
-
-
 def _wall_is_stable(display_key: str, side: str) -> bool:
     """Check if a GEX wall is confirmed STABLE.
-    
-    A wall counts as STABLE only after it survived
-    _WALL_STABLE_REFRESHES consecutive unchanged refreshes.
+
+    Delegates to the single source of truth in flow.py, which tracks
+    stability per ticker in its module-level _wall_stability dict
+    (an unchanged wall surviving _WALL_STABLE_REFRESHES refreshes).
     """
-    s = st.session_state
-    _wall_stability: dict = s.get("_wall_stability", {})
-    
-    st_ = _wall_stability.get(display_key) or {}
-    _key = f"_{side}_wall"
-    return (
-        st_.get(_key) is not None
-        and st_.get(f"{_key}_count", 0) >= _WALL_STABLE_REFRESHES
-    )
+    from scripts import flow
+
+    return flow._wall_is_stable(display_key, side)
 
 # Per-ticker alert state tracking - use session state to persist
 # Format: {symbol: {"call": last_alert_ts, "put": last_alert_ts}}
@@ -171,7 +162,8 @@ def generate_telegram_alerts() -> list[str]:
         call_wall = snap.get("call_wall")
         opt_prices = snap.get("opt_prices", {})
         wall_prices = snap.get("wall_prices", {})
-        expiration = snap.get("expiration")
+        # The snapshot has no expiration field; ask the service directly.
+        expiration = atm_svc.get_ticker_expiration(t_upper)
         
         # Skip if missing critical data
         if spot <= 0:
@@ -195,7 +187,7 @@ def generate_telegram_alerts() -> list[str]:
                 _is_alert_needed(t_upper, "call")):
                 
                 # Get call price at put wall
-                call_price = wall_prices.get("put_wall_put_price") or opt_prices.get("put_price") or "N/A"
+                call_price = wall_prices.get("put_wall_put_price") or opt_prices.get("put") or "N/A"
                 
                 alert = f"{t_upper} | Spot: {spot:.2f} | BUY CALL @ {call_price} | Put Wall: {put_wall:.2f} | Exp: {exp_date}"
                 alerts.append(alert)
@@ -211,7 +203,7 @@ def generate_telegram_alerts() -> list[str]:
                 _is_alert_needed(t_upper, "put")):
                 
                 # Get put price at call wall
-                put_price = wall_prices.get("call_wall_call_price") or opt_prices.get("call_price") or "N/A"
+                put_price = wall_prices.get("call_wall_call_price") or opt_prices.get("call") or "N/A"
                 
                 alert = f"{t_upper} | Spot: {spot:.2f} | BUY PUT @ {put_price} | Call Wall: {call_wall:.2f} | Exp: {exp_date}"
                 alerts.append(alert)
