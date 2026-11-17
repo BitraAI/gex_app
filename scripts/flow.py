@@ -724,6 +724,8 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
             "oi_resistance": analytics.get("oi_resistance"),
             "volume_support": analytics.get("volume_support"),
             "volume_resistance": analytics.get("volume_resistance"),
+            "oi_vol_support": analytics.get("oi_vol_support"),
+            "oi_vol_resistance": analytics.get("oi_vol_resistance"),
         }
 
         # Push walls and ATM option prices to the ATM service.
@@ -1036,6 +1038,8 @@ def render_atm_order_flow_grid():
             rows[-1]["OI Resistance"] = _ticker_ana.get("oi_resistance")
             rows[-1]["Volume Support"] = _ticker_ana.get("volume_support")
             rows[-1]["Volume Resistance"] = _ticker_ana.get("volume_resistance")
+            rows[-1]["OI + Vol Support"] = _ticker_ana.get("oi_vol_support")
+            rows[-1]["OI + Vol Resistance"] = _ticker_ana.get("oi_vol_resistance")
 
     if not rows:
         st.info("No tickers tracked yet. Add tickers on the main GammaEx page first.")
@@ -1054,6 +1058,7 @@ def render_atm_order_flow_grid():
          r.get("Net Flow"), r.get("Flow Ratio"),
          r.get("OI Support"), r.get("OI Resistance"),
          r.get("Volume Support"), r.get("Volume Resistance"),
+         r.get("OI + Vol Support"), r.get("OI + Vol Resistance"),
          r.get("Has Institutional"),
          r.get("Spot"), r.get("_put_wall"), r.get("_call_wall"),
          tuple(sorted((_wall_stability.get(r["Ticker"]) or {}).items())))
@@ -1128,6 +1133,8 @@ def render_atm_order_flow_grid():
         ("OI Resistance", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
         ("Volume Support", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
         ("Volume Resistance", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
+        ("OI + Vol Support", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
+        ("OI + Vol Resistance", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
     ]
 
     thead = ""
@@ -1163,16 +1170,16 @@ def render_atm_order_flow_grid():
     table_html = (
         '<div class="flow-grid-wrap">'
         '<table class="flow-grid">'
-        # Explicit column widths: wall columns (Support/Resistance) carry
-        # money, so they need a few extra percentage points over an even
-        # split across the 12 columns.
+        # Explicit column widths: proportional split across the 15 columns,
+        # with the wall/price money columns a touch wider than the flow ones.
         '<colgroup>'
-        '<col style="width:7%"><col style="width:6%"><col style="width:7%">'
-        '<col style="width:8%"><col style="width:8%">'
+        '<col style="width:6%"><col style="width:6%"><col style="width:7%">'
         '<col style="width:7%"><col style="width:7%">'
         '<col style="width:7%"><col style="width:7%">'
-        '<col style="width:7%"><col style="width:8%">'
-        '<col style="width:8%">'
+        '<col style="width:6%"><col style="width:6%">'
+        '<col style="width:7%"><col style="width:7%">'
+        '<col style="width:7%"><col style="width:7%">'
+        '<col style="width:7%"><col style="width:7%">'
         '</colgroup>'
         f"<thead><tr>{thead}</tr></thead>"
         f"<tbody>{''.join(tbody)}</tbody>"

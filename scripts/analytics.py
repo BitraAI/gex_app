@@ -194,6 +194,37 @@ def compute_analytics(
     analytics["volume_support"] = volume_support
     analytics["volume_resistance"] = volume_resistance
 
+    # OI + Volume composite levels.  Same OTM window (20 strikes around
+    # ATM) and side rules as the OI / Volume Support & Resistance above,
+    # but the strike is picked by the weighted composite score:
+    #   Score = (OI x 0.30) + (Volume x 0.70)
+    # OI and Volume per strike are the SUMS across the nearest 4 active
+    # expirations (``strikes`` is aggregated from the output of
+    # _filter_active_expirations(max_exp=4), see aggregate_by_strike).
+    # Support = PUT side (below spot), Resistance = CALL side (above spot).
+    # The grid columns show the highest-scoring strike.
+    oi_vol_support = None
+    oi_vol_resistance = None
+    if atm_strike:
+        above_atm = [s for s in strikes if atm_strike <= s["strike"] <= atm_strike + 20]
+        top_call_oi_vol = max(
+            (s for s in above_atm if s["strike"] > spot),
+            key=lambda s: (s["call_oi"] * 0.30 + s["call_volume"] * 0.70),
+            default=None,
+        )
+        if top_call_oi_vol:
+            oi_vol_resistance = top_call_oi_vol["strike"]
+        below_atm = [s for s in strikes if atm_strike - 20 <= s["strike"] <= atm_strike]
+        top_put_oi_vol = max(
+            (s for s in below_atm if s["strike"] < spot),
+            key=lambda s: (s["put_oi"] * 0.30 + s["put_volume"] * 0.70),
+            default=None,
+        )
+        if top_put_oi_vol:
+            oi_vol_support = top_put_oi_vol["strike"]
+    analytics["oi_vol_support"] = oi_vol_support
+    analytics["oi_vol_resistance"] = oi_vol_resistance
+
     expected_pin = _find_expected_pin(strikes, spot, data_full)
     analytics["expected_pin"] = expected_pin
 

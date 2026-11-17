@@ -105,8 +105,8 @@ A wall counts as STABLE only after surviving `_WALL_STABLE_REFRESHES = 2` consec
 ```
 <b>GEX Alerts</b>
 
-SYMBOL | Spot: 250.25 | BUY CALL @ 45.25 | Put Wall: 250.00 | Exp: 2024-12-20
-SYMBOL | Spot: 345.50 | BUY PUT @ 345.50 | Call Wall: 346.00 | Exp: 2024-12-20
+SYMBOL | 250.25 | BUY CALL 250.00 @ 45.25 | Exp: 2024-12-20
+SYMBOL | 345.50 | BUY PUT 346.00 @ 345.50 | Exp: 2024-12-20
 ```
 
 - One line per alert, joined with `\n`, maximum 5 lines.
