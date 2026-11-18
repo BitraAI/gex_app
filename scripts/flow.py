@@ -16,7 +16,7 @@ from collections import deque
 from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, TICKER_RETRY_COUNT,
                         FLOW_WATCHDOG_STALE_SECONDS,
                         ATM_SUBSCRIBE_BACKOFF_BASE, ATM_SUBSCRIBE_BACKOFF_RANGE)
-from scripts._utils import compute_strike_increment, format_expiration, is_market_open
+from scripts._utils import compute_strike_increment, extract_quote_last, format_expiration, is_market_open
 from scripts.option_streaming_service import _find_flow_for_display, _normalize_display_symbol, _get_stream_symbol
 from scripts.client import fetch_quotes
 from scripts.calculations import calculate_atm_strike, get_strike_spacing
@@ -116,6 +116,35 @@ def run_async(coro):
     return fut.result()
 
 
+def _new_ticker_flow_record(stream_symbol: str, expiration,
+                            spot: float = 0.0, atm_strike: float = 0.0) -> dict:
+    """Uniform ``_ticker_flows`` record initializer.
+
+    Previously duplicated inline at two ``ensure_atm_streaming`` sites
+    (one copy was missing the trailing keys — ``call_sym`` / ``put_sym`` /
+    ``expiration2`` / ``print_history`` — which the trade handler's
+    ``setdefault`` tolerates but the full record makes consistent)."""
+    return {
+        "stream_symbol": stream_symbol,
+        "spot": spot,
+        "atm_strike": atm_strike,
+        "last_atm_reference": spot,
+        "expiration": expiration,
+        "call_wall": None,
+        "put_wall": None,
+        "call_sym": None,
+        "put_sym": None,
+        "call_bid": None,
+        "call_ask": None,
+        "put_bid": None,
+        "put_ask": None,
+        "bullish": 0,
+        "bearish": 0,
+        "expiration2": None,
+        "print_history": deque(),
+    }
+
+
 def ensure_atm_streaming(stream_symbol: str):
     """Start the equity + ATM option streaming services for ``stream_symbol``
     and register the ATM option volume service (subscribing to the front
@@ -172,7 +201,8 @@ def ensure_atm_streaming(stream_symbol: str):
 
     _all_tickers = s.get("ticker_history", [])
     _current_sym = _normalize_display_symbol(s.get("symbol", ""))
-    if _current_sym and _current_sym not in [_normalize_display_symbol(t) for t in _all_tickers]:
+    _normalized = {_normalize_display_symbol(t) for t in _all_tickers}
+    if _current_sym and _current_sym not in _normalized:
         _all_tickers = list(_all_tickers) + [_current_sym]
 
     # Index quotes (SPX, RUT, NDX) refreshed every ~10 s via direct REST
@@ -196,10 +226,10 @@ def ensure_atm_streaming(stream_symbol: str):
                     for _iq, _disp_upper in _idx_disp.items():
                         qd = idx_resp.get(_iq, {}) or {}
                         qd2 = qd.get("quote", {}) or qd.get(_iq, {})
-                        last = qd2.get("lastPrice") or qd2.get("mark") or qd2.get("closePrice")
-                        if last is not None and float(last) > 0:
-                            s.spot_cache[_disp_upper] = float(last)
-                            atm_svc.set_ticker_spot(_disp_upper, float(last))
+                        last = extract_quote_last(qd2)
+                        if last is not None:
+                            s.spot_cache[_disp_upper] = last
+                            atm_svc.set_ticker_spot(_disp_upper, last)
                 except Exception as e:
                     logger.warning("[ensure_atm_streaming] index quote fetch failed: %s", e)
 
@@ -227,13 +257,13 @@ def ensure_atm_streaming(stream_symbol: str):
                     _sym = STREAM_SYMBOL_MAP.get(_disp_upper, _disp_upper)
                     qd = quote_resp.get(_sym, {}) or {}
                     quote = qd.get("quote", {}) or qd.get(_sym, {})
-                    last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                    if last is None or float(last) <= 0:
+                    last = extract_quote_last(quote)
+                    if last is None:
                         continue
                     if _disp_upper in INDEX_QUOTE_MAP:
-                        atm_svc.set_ticker_proxy_spot(_disp_upper, float(last))
+                        atm_svc.set_ticker_proxy_spot(_disp_upper, last)
                     else:
-                        s.spot_cache[_disp_upper] = float(last)
+                        s.spot_cache[_disp_upper] = last
             except Exception as e:
                 logger.warning("[ensure_atm_streaming] spot pre-fetch failed: %s", e)
 
@@ -277,10 +307,10 @@ def ensure_atm_streaming(stream_symbol: str):
                         )
                         if not isinstance(qq, dict):
                             continue
-                        mark = qq.get("mark") or qq.get("lastPrice") or qq.get("closePrice")
-                        if mark is None or float(mark) <= 0:
+                        mark = extract_quote_last(qq, prefer_mark=True)
+                        if mark is None:
                             continue
-                        _per_ticker.setdefault(_tk, {})[_label] = float(mark)
+                        _per_ticker.setdefault(_tk, {})[_label] = mark
                     if not _per_ticker and _quote_map:
                         # Requested symbols but got nothing usable — log a
                         # sample of the response keys (throttled) so the
@@ -364,25 +394,8 @@ def ensure_atm_streaming(stream_symbol: str):
                     if _t_upper in INDEX_QUOTE_MAP:
                         continue
                     _stream = STREAM_SYMBOL_MAP.get(_t_upper, _t_upper)
-                    atm_svc._ticker_flows[_t_upper] = {
-                        "stream_symbol": _stream,
-                        "spot": 0.0,
-                        "atm_strike": 0.0,
-                        "last_atm_reference": 0.0,
-                        "expiration": atm_svc._expiration,
-                        "call_wall": None,
-                        "put_wall": None,
-                        "call_sym": None,
-                        "put_sym": None,
-                        "call_bid": None,
-                        "call_ask": None,
-                        "put_bid": None,
-                        "put_ask": None,
-                        "bullish": 0,
-                        "bearish": 0,
-                        "expiration2": None,
-                        "print_history": deque(),
-                    }
+                    atm_svc._ticker_flows[_t_upper] = _new_ticker_flow_record(
+                        _stream, atm_svc._expiration)
 
         _spot_map = {}
         for _t in _all_tickers:
@@ -409,23 +422,10 @@ def ensure_atm_streaming(stream_symbol: str):
                         if spot > 0:
                             with atm_svc._lock:
                                 if current_sym not in atm_svc._ticker_flows:
-                                    atm_svc._ticker_flows[current_sym] = {
-                                        "stream_symbol": stream_sym,
-                                        "spot": spot,
-                                        "atm_strike": calculate_atm_strike(spot) if spot > 0 else 0.0,
-                                        "last_atm_reference": spot,
-                                        "expiration": atm_svc._expiration,
-                                        "call_wall": None,
-                                        "put_wall": None,
-                                        "call_sym": None,
-                                        "put_sym": None,
-                                        "call_bid": None,
-                                        "call_ask": None,
-                                        "put_bid": None,
-                                        "put_ask": None,
-                                        "bullish": 0,
-                                        "bearish": 0,
-                                    }
+                                    atm_svc._ticker_flows[current_sym] = _new_ticker_flow_record(
+                                        stream_sym, atm_svc._expiration,
+                                        spot=spot,
+                                        atm_strike=calculate_atm_strike(spot) if spot > 0 else 0.0)
                     # Now set the walls
                     atm_svc.set_ticker_walls(current_sym, put_wall, call_wall)
         
@@ -515,14 +515,16 @@ def update_flow_cache():
     # hasn't created an entry yet, and that missing spots for any
     # tracked symbol (index or equity) are fetched on grid render.
     _all_syms = list(s.get("ticker_history", []))
-    if current_sym and current_sym not in [_normalize_display_symbol(x) for x in _all_syms]:
+    if current_sym and current_sym not in {_normalize_display_symbol(x) for x in _all_syms}:
         _all_syms.append(current_sym)
+    _need_fetch_set = set(_need_fetch)
     for _t in _all_syms:
         _t_upper = _normalize_display_symbol(_t)
         svc_spot = atm_svc.get_ticker_spot(_t_upper)
         if svc_spot is None or svc_spot <= 0:
-            if _t_upper not in _need_fetch:
+            if _t_upper not in _need_fetch_set:
                 _need_fetch.append(_t_upper)
+                _need_fetch_set.add(_t_upper)
     # Fetch missing spots via REST
     if _need_fetch and s.get("client"):
         try:
@@ -537,10 +539,10 @@ def update_flow_cache():
                 for disp_sym in _eq_need:
                     qd = quote_resp.get(disp_sym, {}) or {}
                     quote = qd.get("quote", {}) or qd.get(disp_sym, {})
-                    last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                    if last is not None and float(last) > 0:
-                        _spot_map[disp_sym] = float(last)
-                        s.spot_cache[disp_sym] = float(last)
+                    last = extract_quote_last(quote)
+                    if last is not None:
+                        _spot_map[disp_sym] = last
+                        s.spot_cache[disp_sym] = last
             if _idx_need:
                 _idx_fetch_syms = [INDEX_QUOTE_MAP[sym] for sym in _idx_need]
                 fut = asyncio.run_coroutine_threadsafe(
@@ -550,12 +552,12 @@ def update_flow_cache():
                 for disp_sym, iq in zip(_idx_need, _idx_fetch_syms):
                     qd = idx_resp.get(iq, {}) or {}
                     qd2 = qd.get("quote", {}) or qd.get(iq, {})
-                    last = qd2.get("lastPrice") or qd2.get("mark") or qd2.get("closePrice")
-                    if last is not None and float(last) > 0:
-                        s.spot_cache[disp_sym] = float(last)
+                    last = extract_quote_last(qd2)
+                    if last is not None:
+                        s.spot_cache[disp_sym] = last
                         # Use set_ticker_spot which auto-creates the _ticker_flows
                         # entry if it doesn't exist yet (unlike bulk_update_spots).
-                        atm_svc.set_ticker_spot(disp_sym, float(last))
+                        atm_svc.set_ticker_spot(disp_sym, last)
         except Exception:
             pass
     if _spot_map:
@@ -720,10 +722,6 @@ async def _recompute_symbol(display_key: str, client, loop, atm_svc=None) -> Non
             "atm_iv": analytics.get("atm_iv"),
             "rv": rv,
             "iv_rank": iv_rank,
-            "oi_support": analytics.get("oi_support"),
-            "oi_resistance": analytics.get("oi_resistance"),
-            "volume_support": analytics.get("volume_support"),
-            "volume_resistance": analytics.get("volume_resistance"),
             "oi_vol_support": analytics.get("oi_vol_support"),
             "oi_vol_resistance": analytics.get("oi_vol_resistance"),
         }

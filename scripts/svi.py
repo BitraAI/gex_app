@@ -45,6 +45,7 @@ from typing import Any, Optional
 import numpy as np
 
 from scripts._utils import secs_since_market_open
+from scripts.calculations import _MARKET_CLOSE_SECONDS
 
 from scipy.optimize import least_squares
 
@@ -269,7 +270,7 @@ def _group_otm_quotes(
     feed the fit (the standard "use liquid OTM wings" choice).
     """
     grouped: dict[str, dict[str, Any]] = {}
-    _secs_left = 23400 - secs_since_market_open()
+    _secs_left = _MARKET_CLOSE_SECONDS - secs_since_market_open()
     for e in data:
         try:
             iv_raw = float(e.get("iv", 0.0) or 0.0)
@@ -308,7 +309,7 @@ def _group_otm_quotes(
         if iv <= 0.0:
             continue
 
-        tte = (dte + _secs_left / 23400) / 365.0
+        tte = (dte + _secs_left / _MARKET_CLOSE_SECONDS) / 365.0
         F = spot * math.exp((r - q) * tte)
         k = math.log(strike / F)
         w = (iv * iv) * tte

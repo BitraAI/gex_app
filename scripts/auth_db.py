@@ -223,14 +223,10 @@ def request_access(email: str) -> str:
         raise AuthError("Enter a valid email address")
     with closing(_connect()) as conn:
         _ensure_schema(conn)
-        # Keep at most one live request per address; freeing the row also
-        # releases the UNIQUE(email) slot so re-requests stay possible.
-        conn.execute("DELETE FROM signup_requests WHERE email = ? AND used_at IS NULL", (email,))
-        token = secrets.token_urlsafe(32)
-        conn.execute(
-            "INSERT INTO signup_requests (email, token_hash, expires_at) VALUES (?, ?, datetime('now', ?))",
-            (email, _token_hash(token), f"+{_APPROVAL_TTL_HOURS} hours"),
-        )
+        # Keep at most one live request per address; _new_token's DELETE
+        # also releases the UNIQUE(email) slot so re-requests stay possible.
+        token = _new_token(conn, "signup_requests", email,
+                           f"+{_APPROVAL_TTL_HOURS} hours")
         conn.commit()
     return token
 

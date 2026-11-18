@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 from typing import Any, Optional
 from datetime import datetime, timezone
@@ -170,13 +171,38 @@ async def _extract_from_quote(
         return 0.0
 
 
+# ---------------------------------------------------------------------- #
+# Risk-free rate / dividend-yield cache.  These macros are effectively
+# static intraday, yet every chain fetch used to re-fetch them via REST
+# (up to 3 quote calls for the rate + 1 for the yield).  Cache for an
+# hour so wall refreshes and signal scans stop burning REST quota.
+# ---------------------------------------------------------------------- #
+_RATE_YIELD_TTL = 3600.0  # seconds
+_rate_cache: dict[str, tuple[float, float]] = {}  # key -> (expires_at, value)
+_rate_yield_cache: dict[str, tuple[float, float]] = {}
+
+
 async def get_yield(client: AsyncClient, symbol: str) -> float:
-    """Get dividend yield for a symbol from Schwab API."""
-    return await _extract_from_quote(client, symbol, "dividendYield")
+    """Get dividend yield for a symbol from Schwab API (cached ~1 h)."""
+    now = time.time()
+    cached = _rate_yield_cache.get(symbol)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    val = await _extract_from_quote(client, symbol, "dividendYield")
+    _rate_yield_cache[symbol] = (now + _RATE_YIELD_TTL, val)
+    return val
 
 
 async def get_interest_rate(client: AsyncClient) -> float:
-    """Get risk-free interest rate proxy from Schwab."""
+    """Get risk-free interest rate proxy from Schwab (cached ~1 h).
+
+    Tries SGOV, then BIL, then SHV; the first fund with a usable yield
+    wins.  Falls back to 5%."""
+    now = time.time()
+    cached = _rate_cache.get("r")
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    val = 0.05
     for sym in ("SGOV", "BIL", "SHV"):
         try:
             resp = await client.get_quotes([sym])
@@ -187,10 +213,12 @@ async def get_interest_rate(client: AsyncClient) -> float:
             fund = qd.get("fundamental", {}) or {}
             y = fund.get("yield") or fund.get("netYield") or fund.get("dividendYield") or 0
             if y:
-                return float(y)
+                val = float(y)
+                break
         except Exception:
             continue
-    return 0.05
+    _rate_cache["r"] = (now + _RATE_YIELD_TTL, val)
+    return val
 
 
 async def get_next_earnings_date(client: AsyncClient, symbol: str) -> Optional[str]:
@@ -378,14 +406,31 @@ def load_candle_cache(symbol: str, timeframe: str) -> pd.DataFrame:
 def load_last_cached_timestamp(symbol: str, timeframe: str) -> pd.DataFrame:
     """Timestamp-only freshness probe: reads just the ``datetime`` column of
     the Parquet cache (columnar read) instead of the full frame.  The candle
-    fragment calls this every tick to decide whether the cache is stale."""
+    fragment calls this every tick to decide whether the cache is stale.
+
+    Probes are memoized on the cache file's ``mtime``: between writes the
+    probe costs one ``stat()`` instead of a Parquet decode + disk read."""
     p = _cache_path(symbol, timeframe)
-    if p.exists():
-        try:
-            return pd.read_parquet(p, columns=["datetime"])
-        except Exception:
-            pass
-    return pd.DataFrame()
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        mtime = p.stat().st_mtime_ns
+    except OSError:
+        return pd.DataFrame()
+    key = (str(p), symbol, timeframe)
+    cached = _last_ts_probe_cache.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        df = pd.read_parquet(p, columns=["datetime"])
+    except Exception:
+        df = pd.DataFrame()
+    _last_ts_probe_cache[key] = (mtime, df)
+    return df
+
+
+# (path, symbol, timeframe) -> (mtime_ns, probe frame) for the freshness probe
+_last_ts_probe_cache: dict[tuple, tuple[int, pd.DataFrame]] = {}
 
 
 def save_candle_cache(df: pd.DataFrame, symbol: str, timeframe: str):
@@ -417,7 +462,9 @@ async def compute_iv_rank(client: AsyncClient, symbol: str) -> float | None:
             return None
     if df.empty or len(df) < 2:
         return None
-    df = df.sort_values("datetime")
+    # Only the trailing ~252 returns are used — sort the tail, not the
+    # whole multi-year history.
+    df = df.sort_values("datetime").tail(254)
     closes = df["close"].tolist()
     returns = [(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
     if len(returns) < 2:

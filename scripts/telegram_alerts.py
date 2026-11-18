@@ -33,7 +33,6 @@ summaries, market commentary, or additional text.
 
 import logging
 import time
-from typing import Optional
 
 import streamlit as st
 
@@ -213,13 +212,6 @@ def generate_telegram_alerts() -> list[str]:
                 continue
     
     return alerts
-
-
-def format_alerts_for_output(alerts: list[str]) -> str:
-    """Format alerts for output - maximum 5 lines."""
-    if not alerts:
-        return ""
-    return "\n".join(alerts[:5])
 
 
 def send_telegram_alerts(alerts: list[str]) -> bool:

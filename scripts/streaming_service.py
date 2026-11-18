@@ -131,8 +131,7 @@ class StreamingService:
         try:
             await self._stream()
         except Exception:
-            import traceback
-            traceback.print_exc()
+            logger.exception("Stream task crashed for %s", self._symbol)
         finally:
             with self._lock:
                 self._running = False

@@ -57,26 +57,41 @@ def _make_option_symbol(root: str, yymmdd: str, call_put: str, strike: float) ->
     return f"{root}{yymmdd}{cp}{strike_int:08d}"
 
 
+_OCC_PARSE_CACHE: dict[str, tuple[str, float, int, int, int]] = {}
+
+
 def _parse_stream_option_symbol(sym: str | None) -> tuple[str, float, int, int, int]:
     """Parse a subscribed option symbol built by ``_make_option_symbol``
     (up-to-6-char root + yymmdd + C/P + strike*1000 digits; the 6-char root
     field is zero-padded with spaces to exactly 6 chars) into
     ``(option_type, strike, exp_year, exp_month, exp_day)``.  Tolerates the
     padded spaces being stripped or re-inserted and returns
-    ``("", 0.0, 0, 0, 0)`` when unparseable."""
+    ``("", 0.0, 0, 0, 0)`` when unparseable.
+
+    Results are memoized per symbol: OCC symbols parse to a fixed tuple,
+    and this runs on every print-history read (Unusual Trades tab) plus
+    every trade-routed message, so the regex is wasted work on repeats."""
+    cached = _OCC_PARSE_CACHE.get(sym or "")
+    if cached is not None:
+        return cached
     try:
         m = re.fullmatch(
             r"([A-Z.$]{1,6})\s*(\d{6})([CP])(\d{6,9})", (sym or "").strip()
         )
         if m is None:
-            return "", 0.0, 0, 0, 0
-        yymmdd, cp, strike_digits = m.group(2), m.group(3), m.group(4)
-        strike = int(strike_digits) / 1000.0
-        opt_type = "CALL" if cp == "C" else "PUT"
-        return (opt_type, strike, 2000 + int(yymmdd[:2]),
-                int(yymmdd[2:4]), int(yymmdd[4:6]))
+            result = ("", 0.0, 0, 0, 0)
+        else:
+            yymmdd, cp, strike_digits = m.group(2), m.group(3), m.group(4)
+            strike = int(strike_digits) / 1000.0
+            opt_type = "CALL" if cp == "C" else "PUT"
+            result = (opt_type, strike, 2000 + int(yymmdd[:2]),
+                      int(yymmdd[2:4]), int(yymmdd[4:6]))
     except (ValueError, TypeError, IndexError):
-        return "", 0.0, 0, 0, 0
+        result = ("", 0.0, 0, 0, 0)
+    if len(_OCC_PARSE_CACHE) >= 512:
+        _OCC_PARSE_CACHE.clear()
+    _OCC_PARSE_CACHE[sym or ""] = result
+    return result
 
 
 def _index_option_root(display_symbol: str, expiration: str) -> str | None:
@@ -280,11 +295,6 @@ class AtmOptionVolumeService:
         return self._symbol
 
     @property
-    def ticks_received(self) -> int:
-        with self._lock:
-            return self._ticks_received
-
-    @property
     def has_data(self) -> bool:
         with self._lock:
             return self._ticks_received > 0
@@ -476,64 +486,6 @@ class AtmOptionVolumeService:
                 return None, None
             return ticker["bullish"], ticker["bearish"]
 
-    def get_ticker_option_prices(self, display_symbol: str) -> dict:
-        """Return {call_price, put_price} mid-market for a tracked ticker,
-        or {} if not tracked.  Returns bid/ask mid if both sides are
-        available, else the single available side.
-        Falls back to the primary ticker's class-level bid/ask when the
-        per-ticker values are unavailable (for any ticker that shares the
-        primary's stream symbol).
-
-        Index symbols (SPX, RUT, NDX) stream the ETF proxy (SPY, IWM,
-        QQQ), so their streamed option bid/ask belong to the proxy, not
-        the index.  For those tickers the REST ATM marks pushed via
-        ``set_ticker_option_prices`` are the only valid display price;
-        the streamed proxy quotes (which still drive buy/sell direction
-        inference) are never served."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return {}
-            result = {}
-            _is_idx = _normalize_display_symbol(display_symbol) in STREAM_SYMBOL_MAP
-            if _is_idx:
-                _cm = ticker.get("call_mark")
-                if _cm is not None:
-                    result["call_price"] = round(_cm, 2)
-                _pm = ticker.get("put_mark")
-                if _pm is not None:
-                    result["put_price"] = round(_pm, 2)
-                return result
-            cb, ca = ticker.get("call_bid"), ticker.get("call_ask")
-            # Fallback to primary's class-level bid/ask if per-ticker is empty
-            # and this ticker uses the same stream symbol as the primary.
-            _stream_sym = _get_stream_symbol(display_symbol)
-            if cb is None and ca is None and _stream_sym == self._symbol:
-                cb, ca = self._call_bid, self._call_ask
-            if cb is None and ca is None:
-                _cm = ticker.get("call_mark")
-                if _cm is not None:
-                    result["call_price"] = round(_cm, 2)
-            elif cb is not None and ca is not None and ca > 0:
-                result["call_price"] = round((cb + ca) / 2, 2)
-            elif cb is not None:
-                result["call_price"] = round(cb, 2)
-            elif ca is not None:
-                result["call_price"] = round(ca, 2)
-            pb, pa = ticker.get("put_bid"), ticker.get("put_ask")
-            if pb is None and pa is None and _stream_sym == self._symbol:
-                pb, pa = self._put_bid, self._put_ask
-            if pb is None and pa is None:
-                _pm = ticker.get("put_mark")
-                if _pm is not None:
-                    result["put_price"] = round(_pm, 2)
-            elif pb is not None and pa is not None and pa > 0:
-                result["put_price"] = round((pb + pa) / 2, 2)
-            elif pb is not None:
-                result["put_price"] = round(pb, 2)
-            elif pa is not None:
-                result["put_price"] = round(pa, 2)
-            return result
 
     def get_unusual_prints(
         self,
@@ -797,21 +749,6 @@ class AtmOptionVolumeService:
                 "last_size": ticker.get("last_size", 0),
             }
 
-    def get_ticker_atm_strike(self, display_symbol: str) -> float | None:
-        """Return the front-expiration ATM strike for a tracked ticker,
-        or None if not tracked / no spot known yet.
-        Falls back to calculating from the current spot when the stored
-        atm_strike is not set, so the column stays in sync with live spot."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return None
-            if ticker["atm_strike"] > 0:
-                return ticker["atm_strike"]
-            if ticker["spot"] > 0:
-                return calculate_atm_strike(ticker["spot"])
-            return None
-
     def get_ticker_quote_symbols(self, display_symbol: str) -> dict:
         """Return {label: OCC symbol} for the option quotes that keep the
         Call/Put Price columns live:
@@ -989,9 +926,8 @@ class AtmOptionVolumeService:
         Marks are stored in dedicated ``call_mark`` / ``put_mark`` fields
         so they are never clobbered by the ETF-proxy streamed quotes that
         continue to drive buy/sell direction inference in
-        ``_process_trade_ticker``.  ``get_ticker_option_prices`` serves
-        the marks to index tickers and uses them as the pre-stream
-        fallback for equity tickers."""
+        ``_process_trade_ticker``.  The marks feed index tickers and act
+        as the pre-stream fallback for equity tickers."""
         if call_price is None and put_price is None:
             return
         with self._lock:
@@ -1033,30 +969,6 @@ class AtmOptionVolumeService:
             if put_wall_put_price is not None:
                 ticker["put_wall_put_price"] = float(put_wall_put_price)
 
-    def get_ticker_wall_prices(self, display_symbol: str) -> dict:
-        """Return option marks at the key wall strikes for a tracked ticker.
-        Keys returned: put_wall_call_price, call_wall_put_price,
-        call_wall_call_price, put_wall_put_price.
-        Returns {} if the ticker is untracked or the prices have not been
-        computed yet."""
-        with self._lock:
-            ticker = _find_flow_for_display(self._ticker_flows, display_symbol)
-            if ticker is None:
-                return {}
-            result = {}
-            _put_wall_call = ticker.get("put_wall_call_price")
-            if _put_wall_call is not None:
-                result["put_wall_call_price"] = round(_put_wall_call, 2)
-            _call_wall_put = ticker.get("call_wall_put_price")
-            if _call_wall_put is not None:
-                result["call_wall_put_price"] = round(_call_wall_put, 2)
-            _call_wall_call = ticker.get("call_wall_call_price")
-            if _call_wall_call is not None:
-                result["call_wall_call_price"] = round(_call_wall_call, 2)
-            _put_wall_put = ticker.get("put_wall_put_price")
-            if _put_wall_put is not None:
-                result["put_wall_put_price"] = round(_put_wall_put, 2)
-            return result
 
     def _recalc_atm_if_moved(self, display_symbol: str, ticker: dict,
                              prev_spot: float, spot: float) -> bool:

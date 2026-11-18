@@ -12,6 +12,27 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 
+def extract_quote_last(quote: dict | None, *, prefer_mark: bool = False) -> float | None:
+    """Pull the usable "last" price out of a Schwab quote payload.
+
+    Shared by every quote consumer (flow grid, candlestick header, index
+    spot poller).  Default precedence is ``lastPrice`` → ``mark`` →
+    ``closePrice``; ``prefer_mark=True`` flips to ``mark``-first for
+    option-mark payloads.  Returns None when no positive price is present."""
+    if not quote:
+        return None
+    if prefer_mark:
+        last = quote.get("mark") or quote.get("lastPrice") or quote.get("closePrice")
+    else:
+        last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
+    if last is None:
+        return None
+    try:
+        return float(last) if float(last) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_sel_exp(sel: Any) -> list[str]:
     """Normalize the sidebar's ``selected_expiration`` value to a list.
 

@@ -45,10 +45,13 @@ def _filter_active_expirations(data: list[dict[str, Any]], max_exp: int = 4) -> 
     keep = set(active[:max_exp])
     result = [e for e in data if e.get("expiration") in keep]
 
-    # Bound the cache: keep a strong ref only for a few recent chains.
-    if len(cache) > 8:
-        cache.clear()
+    # Bound the cache: keep a strong ref only for a few recent chains,
+    # evicting the *oldest* entry when full (clear() would wipe warm
+    # entries and can leave alternating chains at a 100% miss rate).
     out = result if result else data
+    if len(cache) >= 8:
+        for old_key in list(cache)[: len(cache) - 7]:
+            cache.pop(old_key, None)
     cache[id(data)] = (data, out, max_exp)
     return out
 
@@ -163,46 +166,15 @@ def compute_analytics(
     largest_gamma = max(strikes, key=lambda s: s["total_gamma"], default=None)
     analytics["largest_gamma_strike"] = largest_gamma["strike"] if largest_gamma else None
 
-    # OI Support and Resistance (top OTM OI within 20 strikes of ATM)
-    atm_strike = min(strikes, key=lambda s: abs(s["strike"] - spot))["strike"] if strikes else None
-    oi_support = None
-    oi_resistance = None
-    if atm_strike:
-        above_atm = [s for s in strikes if s["strike"] >= atm_strike and s["strike"] <= atm_strike + 20]
-        top_call_oi_otm = max((s for s in above_atm if s["strike"] > spot), key=lambda s: s["call_oi"], default=None)
-        if top_call_oi_otm:
-            oi_resistance = top_call_oi_otm["strike"]
-        below_atm = [s for s in strikes if s["strike"] <= atm_strike and s["strike"] >= atm_strike - 20]
-        top_put_oi_otm = max((s for s in below_atm if s["strike"] < spot), key=lambda s: s["put_oi"], default=None)
-        if top_put_oi_otm:
-            oi_support = top_put_oi_otm["strike"]
-    analytics["oi_support"] = oi_support
-    analytics["oi_resistance"] = oi_resistance
-
-    # Volume Support and Resistance (top OTM Volume within 20 strikes of ATM)
-    volume_support = None
-    volume_resistance = None
-    if atm_strike:
-        above_atm = [s for s in strikes if s["strike"] >= atm_strike and s["strike"] <= atm_strike + 20]
-        top_call_vol_otm = max((s for s in above_atm if s["strike"] > spot), key=lambda s: s["call_volume"], default=None)
-        if top_call_vol_otm:
-            volume_resistance = top_call_vol_otm["strike"]
-        below_atm = [s for s in strikes if s["strike"] <= atm_strike and s["strike"] >= atm_strike - 20]
-        top_put_vol_otm = max((s for s in below_atm if s["strike"] < spot), key=lambda s: s["put_volume"], default=None)
-        if top_put_vol_otm:
-            volume_support = top_put_vol_otm["strike"]
-    analytics["volume_support"] = volume_support
-    analytics["volume_resistance"] = volume_resistance
-
-    # OI + Volume composite levels.  Same OTM window (20 strikes around
-    # ATM) and side rules as the OI / Volume Support & Resistance above,
-    # but the strike is picked by the weighted composite score:
+    # OI + Volume composite levels.  OTM window (20 strikes around ATM);
+    # the strike is picked by the weighted composite score:
     #   Score = (OI x 0.30) + (Volume x 0.70)
     # OI and Volume per strike are the SUMS across the nearest 4 active
     # expirations (``strikes`` is aggregated from the output of
     # _filter_active_expirations(max_exp=4), see aggregate_by_strike).
     # Support = PUT side (below spot), Resistance = CALL side (above spot).
-    # The grid columns show the highest-scoring strike.
+    # The grid columns show the highest-scoring strike.  (The separate
+    # plain-OI and plain-Volume levels were removed with their columns.)
     oi_vol_support = None
     oi_vol_resistance = None
     if atm_strike:

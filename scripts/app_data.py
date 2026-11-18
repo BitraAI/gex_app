@@ -274,10 +274,8 @@ def fetch_data(symbol: str) -> bool:
         "atm_iv": st.session_state.analytics.get("atm_iv"),
         "rv": st.session_state.get("underlying_20d_rv", 0.0),
         "iv_rank": st.session_state.iv_rank,
-        "oi_support": st.session_state.analytics.get("oi_support"),
-        "oi_resistance": st.session_state.analytics.get("oi_resistance"),
-        "volume_support": st.session_state.analytics.get("volume_support"),
-        "volume_resistance": st.session_state.analytics.get("volume_resistance"),
+        "oi_vol_support": st.session_state.analytics.get("oi_vol_support"),
+        "oi_vol_resistance": st.session_state.analytics.get("oi_vol_resistance"),
     }
     return True
 

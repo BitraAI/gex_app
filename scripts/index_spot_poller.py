@@ -14,6 +14,7 @@ from typing import List
 
 from scripts.client import fetch_quotes
 from scripts._constants import INDEX_QUOTE_MAP, INDEX_SPOT_MAX_RETRIES, INDEX_SPOT_RETRY_BACKOFF, INDEX_SPOT_UNEXPECTED_BACKOFF_MULTIPLIER
+from scripts._utils import extract_quote_last
 
 logger = logging.getLogger(__name__)
 
@@ -157,11 +158,7 @@ class IndexSpotPoller:
                         quote = qd.get("quote", {}) or qd.get(oauth_symbol, {})
                         
                         # Extract last price with multiple fallback options
-                        last_price = (
-                            quote.get("lastPrice") or 
-                            quote.get("mark") or 
-                            quote.get("closePrice")
-                        )
+                        last_price = extract_quote_last(quote)
                         
                         if last_price is not None and float(last_price) > 0:
                             spot_price = float(last_price)

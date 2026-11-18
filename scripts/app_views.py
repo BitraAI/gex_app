@@ -203,21 +203,34 @@ def render_market_structure():
         if ms_view == "GEX by Strike":
             from scripts.charts import create_gex_histogram
             fig = create_gex_histogram(strikes, s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), gamma_flip=s.analytics.get("gamma_flip"), )
-            fig.update_layout(dragmode="zoom"); st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="gex_histogram")
+            _render_plotly(fig, "gex_histogram")
         elif ms_view == "GEX by Expiration":
             from scripts.charts import create_gex_by_expiration
             mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="gex_exp_slider")
-            fig = create_gex_by_expiration(s.by_exp_all, max_exps=mx, ); fig.update_layout(dragmode="zoom")
-            st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="gex_by_exp")
+            fig = create_gex_by_expiration(s.by_exp_all, max_exps=mx, )
+            _render_plotly(fig, "gex_by_exp")
         elif ms_view == "Gamma Surface":
             from scripts.charts import create_gamma_surface
-            fig = create_gamma_surface(s.filtered_data, ); st.plotly_chart(fig, width='stretch', key="gamma_surface")
+            fig = create_gamma_surface(s.filtered_data, )
+            _render_plotly(fig, "gamma_surface")
         else:
             from scripts.charts import create_dealer_gamma_curve
             dm = st.radio("Select", ["GEX", "VEX", "CEX"], horizontal=True, label_visibility="collapsed")
             _dc_strikes = _filter_strikes_near_atm(strikes, s.spot, n=20)
             fig = create_dealer_gamma_curve(_dc_strikes, s.spot, mode=dm.lower(), gamma_flip=s.analytics.get("gamma_flip"), call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"), vex_magnet=s.analytics.get("vex_magnet"), vex_repellent=s.analytics.get("vex_repellent"))
-            st.plotly_chart(fig, config={"scrollZoom": True}, width='stretch', key="dealer_curve_chart")
+            _render_plotly(fig, "dealer_curve_chart")
+
+
+def _render_plotly(fig, key: str):
+    """Shared plotly render: zoom drag mode + scroll-zoom + stretch width.
+
+    Previously copy-pasted at ~12 chart sites."""
+    if fig is None:
+        return
+    st.plotly_chart(
+        fig.update_layout(dragmode="zoom"),
+        config={"scrollZoom": True}, width='stretch', key=key,
+    )
 
 
 def render_positioning():
@@ -266,10 +279,9 @@ def render_positioning():
                 positioning_data, s.spot,
                 mode="oi" if selected_view_type == "Open Interest" else "volume",
             )
-            fig.update_layout(dragmode="zoom")
-            st.plotly_chart(
-                fig, config={"scrollZoom": True}, width="stretch",
-                key="oi_chart" if selected_view_type == "Open Interest" else "volume_chart",
+            _render_plotly(
+                fig,
+                "oi_chart" if selected_view_type == "Open Interest" else "volume_chart",
             )
 
 
@@ -320,7 +332,7 @@ def render_volatility():
         mo = st.radio("View", ["ATM IV", "VRP"], horizontal=True, label_visibility="collapsed", key="iv_exp_mode")
         mx = st.slider("Expirations", min_value=2, max_value=max(2, len(s.by_exp_all)), value=min(4, len(s.by_exp_all)), key="iv_exp_slider")
         ivd = s.by_exp_all[:mx]
-        if mo == "ATM IV": st.plotly_chart(create_atm_iv_histogram(ivd, rv=_rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="atm_iv_chart")
+        if mo == "ATM IV": _render_plotly(create_atm_iv_histogram(ivd, rv=_rv), "atm_iv_chart")
         elif _rv > 0:
             _render_premium_legend([
                 ("#27AE60", "≤ -10"),
@@ -331,7 +343,7 @@ def render_volatility():
                 ("#E74C3C", "≥ +10"),
             ])
             # VRP chart: ATM IV - RV per expiration
-            st.plotly_chart(create_vrp_chart(ivd, _rv).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="vrp_exp_chart")
+            _render_plotly(create_vrp_chart(ivd, _rv), "vrp_exp_chart")
         else: st.info("No RV data")
     else:
         tm = st.radio("View", ["IV", "IV Richness (pp)"], horizontal=True, label_visibility="collapsed", key="vrp_strike_mode")
@@ -345,7 +357,7 @@ def render_volatility():
         _ssvi_tte = _tte_from_dtes([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi_surf is not None and s.get("by_exp_all") else None
         if tm == "IV":
             if vk:
-                st.plotly_chart(create_iv_by_strike(vk, s.spot, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_by_strike")
+                _render_plotly(create_iv_by_strike(vk, s.spot, ssvi_surface=_ssvi_surf, ssvi_tte=_ssvi_tte), "iv_by_strike")
             else:
                 st.info("No strike data")
         elif tm == "IV Richness (pp)":
@@ -357,7 +369,7 @@ def render_volatility():
                     ("#F39C12", "+1 to +3"),
                     ("#E74C3C", "≥ +3"),
                 ])
-                st.plotly_chart(create_iv_richness_by_strike(vk, s.spot, _ssvi_surf, _ssvi_tte).update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="iv_richness_by_strike")
+                _render_plotly(create_iv_richness_by_strike(vk, s.spot, _ssvi_surf, _ssvi_tte), "iv_richness_by_strike")
             elif not vk:
                 st.info("No strike data")
             else:
@@ -388,14 +400,14 @@ def render_heatmaps():
         with oi_container:
             otm = [e for e in _heatmap_slice("hm_oi_slider") if is_otm_or_atm(e, s.spot)]
             fig = create_heatmap(otm, "open_interest", "Open Interest Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
-            if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_oi_chart")
+            _render_plotly(fig, "heatmap_oi_chart")
 
     elif om == "Volume":
         volume_container = st.container()
         with volume_container:
             otm = [e for e in _heatmap_slice("hm_v_slider") if is_otm_or_atm(e, s.spot)]
             fig = create_heatmap(otm, "volume", "Volume Heatmap", spot=s.spot, call_wall=s.analytics.get("call_wall"), put_wall=s.analytics.get("put_wall"))
-            if fig: st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_v_chart")
+            _render_plotly(fig, "heatmap_v_chart")
 
     elif om == "IV Richness (pp)":
         ir_container = st.container()
@@ -406,7 +418,7 @@ def render_heatmaps():
             _ssvi_tte = _tte_from_dtes([e.get("dte", 0) for e in s.by_exp_all]) if _ssvi is not None and s.get("by_exp_all") else None
             if _ssvi is not None and _ssvi_tte is not None:
                 fig = create_vol_surface_2d(vd, 0, smi, sma, s.spot, mode="iv_richness", ssvi_surface=_ssvi, ssvi_tte=_ssvi_tte)
-                st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_ir_chart")
+                _render_plotly(fig, "heatmap_ir_chart")
             else:
                 st.info("SSVI surface not calibrated yet")
 
@@ -422,7 +434,7 @@ def render_heatmaps():
                 st.info("No RV data")
             else:
                 fig = create_vol_surface_2d(vd, _rvv, smi, sma, s.spot, mode="vrp")
-                st.plotly_chart(fig.update_layout(dragmode="zoom"), config={"scrollZoom": True}, width='stretch', key="heatmap_vrp_chart")
+                _render_plotly(fig, "heatmap_vrp_chart")
 
 def render_sidebar():
     with st.sidebar:

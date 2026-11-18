@@ -6,6 +6,7 @@ load-bearing (title row -> controls -> constant chart host -> payload ->
 caption); do not reorder.
 """
 import logging
+import math
 import time
 
 import pandas as pd
@@ -13,7 +14,7 @@ import streamlit as st
 
 from scripts import client as client_mod
 from scripts._constants import (STREAM_SYMBOL_MAP, INDEX_QUOTE_MAP, INDEX_SYMBOLS)
-from scripts._utils import floor_dataframe_timestamps, compute_current_bucket
+from scripts._utils import floor_dataframe_timestamps, compute_current_bucket, extract_quote_last
 from scripts.client import load_candle_cache
 from scripts.chart_component import render_chart, render_chart_host
 from scripts.flow import _ticker_analytics_cache, ensure_atm_streaming, run_async, maybe_refresh_ticker_walls
@@ -189,15 +190,20 @@ def render_candlesticks_frag():
         stream_symbol = STREAM_SYMBOL_MAP.get(symbol.upper().lstrip("$"), symbol)
         ensure_atm_streaming(stream_symbol)
 
-        # Periodically refresh spots for all tickers (every 2s)
+        # Periodically refresh spots for all tickers (throttled ~10 s,
+        # sharing gates with ensure_atm_streaming above)
         atm_svc = st.session_state.get("atm_option_service")
         _first_exp = st.session_state.get("selected_expiration")
         _first_exp = _first_exp[0] if isinstance(_first_exp, list) and _first_exp else (_first_exp if isinstance(_first_exp, str) else None)
         if atm_svc and atm_svc.is_running and _first_exp:
             _now = time.time()
-            _last_spot_refresh = s.get("_last_spot_refresh", 0)
-            if _now - _last_spot_refresh >= 2:
-                s._last_spot_refresh = _now
+            # Shared throttle with ensure_atm_streaming (called just above):
+            # whichever block fires first wins the ~10 s window, so the two
+            # paths never double-fetch the same equity quotes (they used to
+            # stack a 2 s cadence on top of the 10 s one, doubling REST use).
+            _last_spot_refresh = s.get("_spot_fetch_ts", 0)
+            if _now - _last_spot_refresh >= 10:
+                s["_spot_fetch_ts"] = _now
                 _all_tickers = s.get("ticker_history", [])
                 _stream_symbols = [_get_stream_symbol(t) for t in _all_tickers]
                 try:
@@ -207,8 +213,8 @@ def render_candlesticks_frag():
                         _disp_upper = _normalize_display_symbol(disp_sym)
                         qd = quote_resp.get(stream_sym, {}) or {}
                         quote = qd.get("quote", {}) or qd.get(stream_sym, {})
-                        last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                        if last is not None and float(last) > 0:
+                        last = extract_quote_last(quote)
+                        if last is not None:
                             spot = float(last)
                             if _disp_upper in INDEX_QUOTE_MAP:
                                 # The ETF-proxy price (SPY) drives the index
@@ -220,7 +226,8 @@ def render_candlesticks_frag():
                             # Also update ATM service
                             atm_svc.set_ticker_spot(_disp_upper, spot)
 
-                    # Fetch actual index quotes for SPX, RUT, NDX
+                    # Fetch actual index quotes for SPX, RUT, NDX — shared
+                    # throttle with ensure_atm_streaming's index gate.
                     _idx_fetch = []
                     _idx_disp_map = {}
                     for _t in _all_tickers:
@@ -229,14 +236,15 @@ def render_candlesticks_frag():
                             _iq = INDEX_QUOTE_MAP[_t_upper]
                             _idx_fetch.append(_iq)
                             _idx_disp_map[_iq] = _t_upper
-                    if _idx_fetch:
+                    if _idx_fetch and _now - s.get("_idx_spot_fetch_ts", 0) >= 10:
+                        s["_idx_spot_fetch_ts"] = _now
                         try:
                             idx_resp = run_async(fetch_quotes(s.client, _idx_fetch))
                             for _iq, _disp_upper in _idx_disp_map.items():
                                 qd = idx_resp.get(_iq, {}) or {}
                                 quote = qd.get("quote", {}) or qd.get(_iq, {})
-                                last = quote.get("lastPrice") or quote.get("mark") or quote.get("closePrice")
-                                if last is not None and float(last) > 0:
+                                last = extract_quote_last(quote)
+                                if last is not None:
                                     spot = float(last)
                                     s.spot_cache[_disp_upper] = spot
                                     atm_svc.set_ticker_spot(_disp_upper, spot)
@@ -463,6 +471,8 @@ def render_candlesticks_frag():
 
         # Build the candle list for chart_component.render_chart. Keep datetime as
         # int64 ms so the streaming 1-second bars are uniquely keyed on time.
+        # Casts are vectorized (column-wise) instead of per-cell Python loops —
+        # this runs on every ~2 s chart tick over up to 1500 rows.
         _extra_cols = [c for c in ["buy_vol", "sell_vol",
                                    "call_buy_vol", "call_sell_vol",
                                    "put_buy_vol", "put_sell_vol",
@@ -471,25 +481,28 @@ def render_candlesticks_frag():
         base_cols = ["datetime", "open", "high", "low", "close"]
         if "volume" in df.columns:
             base_cols.append("volume")
-        candles_payload = df[base_cols + _extra_cols].to_dict("records")
-        for c in candles_payload:
-            c["datetime"] = int(c["datetime"])
-            c["open"] = float(c["open"])
-            c["high"] = float(c["high"])
-            c["low"] = float(c["low"])
-            c["close"] = float(c["close"])
-            if "volume" in c:
-                v = c["volume"]
-                c["volume"] = float(v) if pd.notna(v) and v == v else 0.0
-            for ac in _extra_cols:
-                if ac in c:
-                    v = c[ac]
-                    try:
-                        c[ac] = int(v)
-                    except (TypeError, ValueError, OverflowError):
-                        c.pop(ac, None)
-                else:
-                    c.pop(ac, None)
+        _payload = df[base_cols + _extra_cols]
+        _payload = _payload.assign(
+            datetime=_payload["datetime"].astype("int64"),
+            open=_payload["open"].astype(float),
+            high=_payload["high"].astype(float),
+            low=_payload["low"].astype(float),
+            close=_payload["close"].astype(float),
+        )
+        if "volume" in _payload.columns:
+            # NaN volume -> 0.0 (same rule as the old per-row cast)
+            _payload["volume"] = _payload["volume"].astype(float).fillna(0.0)
+        for ac in _extra_cols:
+            _num = pd.to_numeric(_payload[ac], errors="coerce")
+            # int(v) truncates (same as the old int() cast); NaN/inf -> None,
+            # which the JS consumer treats exactly like an absent key.
+            # dtype=object keeps ints as ints and None as None (a plain list
+            # assignment would coerce None -> NaN and int -> float).
+            _payload[ac] = pd.Series(
+                [int(v) if (v == v and math.isfinite(v)) else None for v in _num],
+                index=_payload.index, dtype=object,
+            )
+        candles_payload = _payload.to_dict("records")
 
         last_close = float(df["close"].iloc[-1]) if not df.empty else None
 
