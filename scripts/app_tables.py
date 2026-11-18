@@ -144,12 +144,7 @@ def render_table():
     def highlight_atm(row):
         is_atm = row["Strike"] == atm_strike
         styles = [f"background-color: {atm_bg}"] * len(row) if is_atm else [""] * len(row)
-        if row.name == max_pin_idx:
-            col_idx = list(row.index)
-            if "Call OI" in col_idx:
-                styles[col_idx.index("Call OI")] = f"background-color: {max_pain_bg}"
-            if "Put OI" in col_idx:
-                styles[col_idx.index("Put OI")] = f"background-color: {max_pain_bg}"
+
         if row.name in call_wall_idx:
             col_idx = list(row.index)
             if "Call GEX" in col_idx:

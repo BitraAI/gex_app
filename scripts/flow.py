@@ -1030,14 +1030,8 @@ def render_atm_order_flow_grid():
             rows[-1]["Flow Ratio"] = flow_ratio
             rows[-1]["Has Institutional"] = has_institutional
             
-            # Add OI Support, OI Resistance, Volume Support, Volume Resistance
-            # from the per-ticker analytics cache (each row shows its own
-            # ticker's values, not the primary symbol's).
+            # Get per-ticker analytics cache for OI + Vol Support/Resistance
             _ticker_ana = _ticker_analytics_cache.get(t_upper.split(":")[0]) or {}
-            rows[-1]["OI Support"] = _ticker_ana.get("oi_support")
-            rows[-1]["OI Resistance"] = _ticker_ana.get("oi_resistance")
-            rows[-1]["Volume Support"] = _ticker_ana.get("volume_support")
-            rows[-1]["Volume Resistance"] = _ticker_ana.get("volume_resistance")
             rows[-1]["OI + Vol Support"] = _ticker_ana.get("oi_vol_support")
             rows[-1]["OI + Vol Resistance"] = _ticker_ana.get("oi_vol_resistance")
 
@@ -1056,8 +1050,6 @@ def render_atm_order_flow_grid():
          r["Support"], r["Resistance"],
          r["Call Price"], r["Put Price"],
          r.get("Net Flow"), r.get("Flow Ratio"),
-         r.get("OI Support"), r.get("OI Resistance"),
-         r.get("Volume Support"), r.get("Volume Resistance"),
          r.get("OI + Vol Support"), r.get("OI + Vol Resistance"),
          r.get("Has Institutional"),
          r.get("Spot"), r.get("_put_wall"), r.get("_call_wall"),
@@ -1129,10 +1121,6 @@ def render_atm_order_flow_grid():
         ("Put Price", "right", _fmt_money, None),
         ("Net Flow", "right", None, None),
         ("Flow Ratio", "right", lambda v: f"<span style='color:{'green' if v > 0.70 else ('red' if v < 0.30 else 'inherit')}'>{v:.2f}</span>" if v != 0 else "", None),
-        ("OI Support", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
-        ("OI Resistance", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
-        ("Volume Support", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
-        ("Volume Resistance", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
         ("OI + Vol Support", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
         ("OI + Vol Resistance", "right", lambda v: f"${v:,.2f}" if v is not None else "", None),
     ]

@@ -12,18 +12,24 @@ A Streamlit dataframe (`flow.render_atm_order_flow_grid`) with one row per
 | --- | --- | --- |
 | **Ticker** | — | Display symbol (index symbols like `SPX` kept as-is; streamed via ETF proxy `SPY`/`IWM`/`QQQ`). |
 | **Spot** | **Level 1** (equity stream) or REST pre-fetch | Latest spot price. |
-| **Trend** | **Level 2** (OPTIONS_BOOK) | Direction of L2 book-imbalance pressure over the last 60 s, sourced from `StreamingService.trend_data()`. Labels: **up** / **down** (plain direction), **UP** / **DOWN** (strong: `|book_imbalance| > 0.3` **and** matching sign on `flow_speed` **and** `flow_acceleration`), **bullish** / **bearish** (reversal: previous tick was `down→up` or `up→down` — the reversal label takes precedence and is always bolded in the grid), or **flat** (cold-start or no strong signal). |
+| **Expiration** | REST option chain | Front (nearest) expiration for the row's ticker, from `atm_svc.get_ticker_expiration()`. |
 | **Call Price** | REST option marks (~2 s) | CALL mark at the **put-wall (support) strike** — what the call is worth at the support level. Falls back to the ATM call mark until the wall prices are computed. Refreshed every ~2 s by a batched `fetch_quotes` of the ATM / wall-strike OCC symbols (see **Call/Put Price refresh**), so the column stays live instead of only moving on the throttled analytics recompute (30–180 s). Index symbols (SPX/RUT/NDX) quote their **own index-option root** (`SPX`/`SPXW`, `RUT`/`RUTW`, `NDX`/`NDXP`), so the marks are index-level, not the ETF-proxy (SPY/IWM/QQQ) strikes. |
 | **Put Price** | REST option marks (~2 s) | PUT mark at the **call-wall (resistance) strike** — what the put is worth at the resistance level. Falls back to the ATM put mark until the wall prices are computed. Same ~2 s refresh and index-option-root rule as Call Price. |
 | **Support** | REST option chain (GEX) | Put wall value — the strike below spot with the highest `put_gex` (dealer gamma exposure, OI × gamma; not raw OI). See **Wall (support/resistance) refresh cadence**. |
 | **Resistance** | REST option chain (GEX) | Call wall value — the strike above spot with the highest `call_gex` (dealer gamma exposure, OI × gamma; not raw OI). See **Wall (support/resistance) refresh cadence**. |
-| **Book Imbalance** | **Level 2** (OPTIONS_BOOK) | Live Level-2 order-book pressure (OPTIONS): Positive → bullish, Negative → bearish. Weighted ratio `(W_bid − W_ask) / (W_bid + W_ask)`, range [-1, 1], refreshed on every book update. Weights combine **depth proximity** (best bid/ask levels get full weight, exponential decay by level index — 3rd level halved) and **price-distance** (volume closer to the mid-price gets higher weight). See **Book pressure (L2 OPTIONS book)** below. |
-| **Flow Speed** | **Level 2** (OPTIONS_BOOK, derived) | First difference of the L2 book-imbalance series over the trailing 60 s: `flow_speed = history[-1][1] − history[0][1]` (last ratio minus first ratio in the window). Displayed as a signed integer. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
-| **Flow Acceleration** | **Level 2** (OPTIONS_BOOK, derived) | Second difference of the L2 book-imbalance series: `flow_acceleration = recent_flow − previous_flow` (where `recent_flow = history[-1][1] − history[mid][1]`, `previous_flow = history[mid-1][1] − history[0][1]`, and `mid` is the first sample at/after the window's **time** midpoint `mid_ts`). Displayed with 2 decimals. Green > 0, red < 0, orange otherwise. See **Book pressure (L2 OPTIONS book)** below. |
-| **Absorption** | **Level 1** (ATM option volume + spot path) | Order absorption (contracts per $1): cumulative ATM option volume over the trailing 60 s divided by the spot **path length** (sum of \|Δ\| per sample) over the same window — chop-adjusted, so a whipsawing tape is not mistaken for a pinned price. High = heavy flow absorbed, price pinned (level holding); low = price drifting on thin flow. Computed by `AtmOptionVolumeService.get_ticker_absorption`. Green ≥ 1000, red < 300, orange otherwise. |
 | **Net Flow** | **Level 1** (ATM option trades, delta-weighted by each trade's own contract delta) | Net executed **delta-weighted** flow over the trailing 60 s: `net_60 = exec_history[-1][1] − exec_history[0][1]`, i.e. the change in `delta_buy − delta_sell` over the trailing 60 s window, from the ATM call/put only (`get_ticker_executed_net60`; same source as the grid Net Flow cell). Each ATM trade is weighted by **its own contract's delta** (call Δ > 0, put Δ < 0): the contract's live streamed `DELTA` (LEVELONE_OPTIONS carries it per contract), falling back to the REST chain ATM delta of the trade's own expiration (`set_ticker_atm_deltas` / `set_ticker_atm_deltas2`), then the static ±0.5 — so the column reports `net_delta = delta_buy − delta_sell` rather than raw contracts (with fallback ±0.5 weighting values ≈ half the raw contract counts). Bullish side = buying calls + selling puts; bearish = selling calls + buying puts. Each trade print is routed to **every** tracked flow whose stream symbol matches the option's root, so tracking both `$SPX` and `SPY` (or `$RUT`+`IWM`) updates both rows from the same proxy ticks. Green > 0, red < 0, orange otherwise. Institutional trades (single prints with premium ≥ $100k) are marked with an asterisk (*). See **Net Flow & Flow Ratio math (rolling 60 s)** and **Order absorption (grid)**. |
 | **Flow Ratio** | **Level 1** (ATM option trades, delta-weighted by each trade's own contract delta) | Rolling 60 s **bullish share of delta exposure**: `flow_ratio = bull_Δ / (bull_Δ + bear_Δ)` where `bull_Δ` / `bear_Δ` are the trailing-60 s changes in the cumulative `delta_buy` / `delta_sell` counters from `get_ticker_flow_metrics_60s` (each print weighted by its own contract's live streamed `DELTA`; REST chain ATM delta of the trade's expiration and static ±0.5 as fallbacks). A proportion in **[0, 1]** — never negative (1.0 = all bullish flow, 0.5 = balanced, 0.0 = all bearish); net flow > 0 ↔ ratio > 0.5. `None` when the window has no flow (< 2 samples / zero volume), displayed as 0.00. Grid coloring: green background > 0.8, red background < 0.2. See **Net Flow & Flow Ratio math (rolling 60 s)**. |
-| **Liquidity Flow** | **Level 2** (OPTIONS_BOOK) | Net change in L2 OPTIONS-book resting depth at the best levels over the trailing 60 s, computed from robust **band medians** of the window edges (`_liquidity_flow_sides` in `StreamingService`): depth is median-averaged over the newest/oldest 5 s bands and the medians differenced, so a single large book refresh at a window edge cannot dominate the reading. Positive = liquidity being posted (book refilling); negative = liquidity being drained (break risk). Side-aware splits (`bid_liquidity_flow` / `ask_liquidity_flow` in `trend_data`) separate a genuine one-sided drain from a rotation. Green > 0, red < 0, orange otherwise. |
+| **OI Support** | REST option chain (full recompute, ~300 s) | Strike below spot (OTM, within 20 strikes of ATM) with the highest summed PUT open interest. |
+| **OI Resistance** | REST option chain (full recompute, ~300 s) | Strike above spot (OTM, within 20 strikes of ATM) with the highest summed CALL open interest. |
+| **Volume Support** | REST option chain (full recompute, ~300 s) | Strike below spot (OTM, within 20 strikes of ATM) with the highest summed PUT volume. |
+| **Volume Resistance** | REST option chain (full recompute, ~300 s) | Strike above spot (OTM, within 20 strikes of ATM) with the highest summed CALL volume. |
+| **OI + Vol Support** | REST option chain (full recompute, ~300 s) | Highest-scoring **PUT-side** strike below spot (OTM, within 20 strikes of ATM) under the weighted composite `Score(K) = ΣOI_put(K) × 0.30 + ΣVol_put(K) × 0.70`, where ΣOI / ΣVol per strike are summed across the **nearest 4 active expirations** (the same aggregation the OI / Volume columns use). Computed by `compute_analytics` (`oi_vol_support`), cached per ticker in `_ticker_analytics_cache`. |
+| **OI + Vol Resistance** | REST option chain (full recompute, ~300 s) | Same composite score on the **CALL-side** strikes above spot: `Score(K) = ΣOI_call(K) × 0.30 + ΣVol_call(K) × 0.70`; the highest-scoring strike is displayed (`oi_vol_resistance`). |
+
+Note: the streaming service still computes **trend** (L2 book-imbalance cascade),
+**book pressure**, **absorption** and **liquidity flow** internals, but they are
+*not rendered as grid columns* anymore — the deep-dive sections below remain
+valid as documentation of those service internals.
 
 Refresh cadence: the grid is wrapped in `@st.fragment(run_every=2)` (the
 module-level `_flow_grid` in `app.py`), so it updates every 2 seconds. The
@@ -136,12 +142,18 @@ The grid's **Trend column** shows `trend_reversal` if present (`bullish` /
 `down`, amber for `flat`, and the label is always bolded.
 
 **Spot cell background coloring** is driven by wall-zone membership in
-`flow.py` `_spot_bg` (no wall-break / reversal event state is kept):
+`flow.py` `_spot_cell_colorer` (no wall-break / reversal event state is kept).
+Zones are only honored when the respective wall is confirmed **STABLE** — the
+same strike held for `_WALL_STABLE_REFRESHES = 2` consecutive wall refreshes
+(tracked per ticker in the module-level `_wall_stability` dict via
+`_record_wall_stability`; `telegram_alerts.py` reads the same check through
+`flow._wall_is_stable`). Zone width is a quarter of the strike spacing
+(chain-derived when known, price-bucket heuristic as fallback):
 
 | Spot cell color | Condition |
 | --- | --- |
-| 🟢 green `#ccffcc` | spot inside the **Support** zone (put wall ± its wall buffer) |
-| 🔴 red `#ffcccc` | spot inside the **Resistance** zone (call wall ± its wall buffer) |
+| 🟢 green `#90EE90` | Put wall **stable** and `Put_Wall < spot < Put_Wall + spacing/4` (spot just above the put wall) |
+| 🔴 red `#FFB6C1` | Call wall **stable** and `Call_Wall − spacing/4 < spot < Call_Wall` (spot just below the call wall) |
 
 When spot is not inside either zone, the Spot cell has no special background.
 The Support / Resistance / Call Price / Put Price cells are not color-coded by
@@ -212,7 +224,7 @@ automatically via `ensure_atm_streaming`.
 
 | File | Role |
 | --- | --- |
-| `flow.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. Wall refresh: `maybe_refresh_walls`, `_maybe_schedule_wall_refresh`, `_refresh_walls_for_symbol`, `_recompute_symbol`, `_compute_walls_for_symbol`. Trend coloring: `_trend_color` (in `render_atm_order_flow_grid`); the trend *classification* itself lives in `StreamingService.trend_data` (not `flow.py`). |
+| `flow.py` | Shared rendering: `render_atm_order_flow_grid`, `render_flow_legend_and_style`, `update_flow_cache`, `ensure_session_defaults`, `is_market_open`. Wall refresh: `maybe_refresh_walls`, `_maybe_schedule_wall_refresh`, `_refresh_walls_for_symbol`, `_recompute_symbol`, `_compute_walls_for_symbol`. Wall stability: `_record_wall_stability` / `_wall_is_stable` (module-level `_wall_stability` dict; also gates the Spot-cell zone coloring and the Telegram alerts). Telegram hook: `_maybe_send_telegram_alerts()` called at the end of `render_flow_frag`. Trend coloring: `_trend_color` (in `render_atm_order_flow_grid`); the trend *classification* itself lives in `StreamingService.trend_data` (not `flow.py`). |
 | `option_streaming_service.py` | `AtmOptionVolumeService` — WebSocket handling, classification, per-ticker flow. |
 | `app.py` | Main app; owns streaming (`ensure_atm_streaming` via ticker Refresh), `render_flow_frag`, Order Flow tab. |
 | `client.py` | `fetch_quotes` — REST spot pre-fetch for all tickers + ~2 s option-mark refresh (Call/Put Price columns). |
@@ -286,6 +298,12 @@ They are now refreshed every ~2 s from `ensure_atm_streaming` (gated by
    call (`client.py`) — one REST request per ~2 s, not one per column.
 3. The marks are pushed back via `atm_svc.set_ticker_wall_prices` /
    `set_ticker_option_prices`.
+
+Two silent-failure paths in this loop are now instrumented (throttled to one
+journal line per 60 s, level INFO): when `get_ticker_quote_symbols()` yields
+nothing for any ticker (missing walls / ATM strike / expiration — the columns
+then cannot update), and when the batched response matches 0 of the requested
+symbols (logs a sample of the response keys to expose key-format mismatches).
 
 For index symbols (SPX/RUT/NDX) the quote symbols use their **own
 index-option root** via `_index_option_root` — standard (third-Friday)

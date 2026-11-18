@@ -42,12 +42,11 @@ def render_candlesticks_frag():
     _sym = s.get("symbol", "SPY").upper().lstrip("$")
     
     # Get analytics from cache to extract Support/Resistance values
+    # (OI + Vol composite levels from flow.py's analytics cache)
     _ticker_ana = _ticker_analytics_cache.get(_sym) or {}
-    
-    oi_support = _ticker_ana.get("oi_support")
-    oi_resistance = _ticker_ana.get("oi_resistance")
-    volume_support = _ticker_ana.get("volume_support")
-    volume_resistance = _ticker_ana.get("volume_resistance")
+
+    oi_vol_support = _ticker_ana.get("oi_vol_support")
+    oi_vol_resistance = _ticker_ana.get("oi_vol_resistance")
     
     # Get Net Flow and Flow Ratio if ATM service is available
     net_flow = 0.0
@@ -65,20 +64,17 @@ def render_candlesticks_frag():
     nf_color = "green" if net_flow > 0 else ("red" if net_flow < 0 else "#666")
     fr_color = "green" if flow_ratio > 0.70 else ("red" if flow_ratio < 0.30 else "#666")
     
-    # Build Support/Resistance display text
+    # Build Support/Resistance display text — OI + Vol composite levels
+    # (highest-scoring strike of OI x 0.30 + Volume x 0.70 per strike)
     support_text = ""
-    if volume_support is not None:
-        support_text += f"Support - Vol: {round(volume_support, 2):.2f} "
-    if oi_support is not None:
-        support_text += f"OI: {round(oi_support, 2):.2f} "
-    
+    if oi_vol_support is not None:
+        support_text = f"Support: {oi_vol_support:.2f} "
+
     resistance_text = ""
-    if volume_resistance is not None:
-        resistance_text += f"Resistance - Vol: {round(volume_resistance, 2):.2f} "
-    if oi_resistance is not None:
-        resistance_text += f"OI: {round(oi_resistance, 2):.2f} "
-    
-    all_support_resistance = f"{support_text}{resistance_text}".strip()
+    if oi_vol_resistance is not None:
+        resistance_text = f"Resistance: {oi_vol_resistance:.2f} "
+
+    all_support_resistance = f"OI + Vol - {support_text}{resistance_text}".strip()
     
     st.markdown(
         '<div style="display:flex;align-items:center;justify-content:space-between;'
@@ -109,7 +105,7 @@ def render_candlesticks_frag():
         
         with row2:
             indicator_options = ["SMA 20", "SMA 50", "EMA 20", "EMA 50", "EMA 200", "Volume Profile", "VWAP", "Half Trend", "Volume", "Andean Squeeze", "Exponential Envelopes"]
-            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "Exponential Envelopes", "VWAP"], label_visibility="collapsed")
+            selected_indicators = st.multiselect("Indicators", indicator_options, default=["Andean Squeeze", "Exponential Envelopes", "EMA 50"], label_visibility="collapsed")
         
         # Refresh the cache from the API when the existing on-disk bars are
         # stale relative to the user's chosen timeframe. The chart fragment
