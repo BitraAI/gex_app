@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "gex-app": {
+        "type": "http",
+        "url": "http://localhost:8001/mcp"
+      }
+    }
+  }
+}

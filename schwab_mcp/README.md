@@ -2,7 +2,7 @@
 
 Read-only [Model Context Protocol](https://modelcontextprotocol.io) server that
 exposes the repo's market-data and Schwab-account capabilities as tools for AI
-agents (registered globally with OpenCode as **`gex_app`**).
+agents (configured in the project at `/home/spark_admin/gex_app/opencode.json` as **`gex-app`**).
 
 All data comes directly from the **Schwab Trader API** via the official
 `schwab-py` SDK; all analytics are computed locally with the exact same
@@ -152,7 +152,7 @@ which cwd the server starts in.
    ```
 
 2. Add the module to the import list in `schwab_mcp/tools/__init__.py`.
-3. Restart the OpenCode session (or `opencode mcp list` to confirm reconnect).
+3. Restart the OpenCode session or run `opencode mcp list` to confirm reconnect.
 
 Rules of thumb: wrap existing repo fetchers rather than calling the Schwab API
 inline; always take the semaphore per API call; catch everything and return
@@ -162,17 +162,17 @@ inline; always take the semaphore per API call; catch everything and return
 
 ## MCP configuration
 
-**OpenCode registration** (global config,
-`~/.config/opencode/opencode.json`):
+### OpenCode registration (project config)
+
+The server is configured in the project's `opencode.json`:
 
 ```json
 {
   "mcp": {
     "servers": {
       "gex-app": {
-        "type": "local",
-        "command": ["/path/to/.venv/bin/python",
-                    "/path/to/home/gex_app/schwab_mcp/main.py"]
+        "type": "http",
+        "url": "http://localhost:8001/mcp"
       }
     }
   },
@@ -184,16 +184,22 @@ inline; always take the semaphore per API call; catch everything and return
 }
 ```
 
-- **Python**: `/path/to/.venv/bin/python` (has `mcp`, `schwab-py`,
-  pandas, numpy, pyarrow).
-- **Transport**: stdio.
+**Location:** `/home/spark_admin/gex_app/opencode.json`
+
+**To configure:**
+```bash
+cd /home/spark_admin/gex_app
+opencode mcp add gex-app --url http://localhost:8001/mcp
+```
+
+- **Transport**: HTTP (Streamable HTTP at `/mcp` endpoint)
 - **Auth/token**: `~/.local/share/gex_app/schwab_token.json` (same file the
   Streamlit app uses; refresh tokens don't rotate, so both can run safely
   side-by-side and tokens refresh automatically).
 - **Reconnect check**: `opencode mcp list` should show
   `✓ gex-app  connected`. New tools appear in an agent's catalog on the next
   session.
-- **Order confirmation is enforced at the OpenCode layer**: the global config
+- **Order confirmation is enforced at the OpenCode layer**: the config
   carries `permissions` rules with `effect: "ask"` for the three execution
   tools — `gex_app_place_buy_order`, `gex_app_place_sell_order`,
   `gex_app_replace_order` (server name `gex-app` → action prefix `gex_app_`,
@@ -201,27 +207,59 @@ inline; always take the semaphore per API call; catch everything and return
   these tools raises an approval prompt (Allow once / Allow always / Reject)
   before the call reaches the server. `cancel_order` is deliberately NOT
   gated — flattening a position/bracket is a de-risking move.
-- Defense in depth on the trading path (three code-gated layers): the
-  OpenCode permission prompt outside the server (catalog-path calls), the
-  `confirmation_code` gate inside the tools, and the terminal-state checks
-  that preview steps run against live orders. An order can only reach Schwab
-  when all layers agree. Note: a raw subprocess call to `main.py` bypasses
-  the OpenCode prompt by construction — the in-server code gate is what
-  still holds there (it was proven live, including a refused no-code and a
-  refused wrong-code confirm).
+- **Defense in depth on the trading path (three code-gated layers)**:
+  - The OpenCode permission prompt outside the server (catalog-path calls)
+  - The `confirmation_code` gate inside the tools
+  - The terminal-state checks that preview steps run against live orders
+
+  An order can only reach Schwab when all layers agree. Note: a raw subprocess
+  call to `main.py` bypasses the OpenCode prompt by construction — the
+  in-server code gate is what still holds there (it was proven live, including
+  a refused no-code and a refused wrong-code confirm).
 
 ---
 
-## HTTP / Open WebUI
+## Starting the server
 
-The server supports **Streamable HTTP** and **SSE** transports in addition to
-stdio, so you can connect it from **Open WebUI** (or any HTTP-based MCP
-client).
+The server can be started in two ways:
 
-### Start the server
+### 1. Via OpenCode (recommended for local development)
+
+The server is configured in `/home/spark_admin/gex_app/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "gex-app": {
+        "type": "http",
+        "url": "http://localhost:8001/mcp"
+      }
+    }
+  }
+}
+```
+
+**Configuration commands:**
+```bash
+# Verify the server is configured and connected
+opencode mcp list
+
+# Add/reconfigure the server
+cd /home/spark_admin/gex_app
+opencode mcp add gex-app --url http://localhost:8001/mcp
+```
+
+**Start the server:**
+```bash
+cd /home/spark_admin/gex_app
+.venv/bin/python schwab_mcp/main.py --transport streamable-http --port 8001 &
+```
+
+### 2. Manually (for Open WebUI or other HTTP clients)
 
 ```bash
-nohup /path/to/.venv/bin/python /path/to/gex_app/schwab_mcp/main.py \
+nohup /home/spark_admin/gex_app/.venv/bin/python /home/spark_admin/gex_app/schwab_mcp/main.py \
   --transport streamable-http --host 0.0.0.0 \
   > /tmp/gex_mcp.log 2>&1 &
 ```
@@ -239,6 +277,7 @@ In **Open WebUI → Settings → MCP → Add Server**:
 | Field | Value |
 |---|---|
 | **Base URL** | `http://localhost:8001/mcp` |
+| **Server name** | `gex-app` |
 
 The server returns `Access-Control-Allow-Origin: *` on every response so
 browsers and Open WebUI are not blocked by CORS.
@@ -246,9 +285,9 @@ browsers and Open WebUI are not blocked by CORS.
 ### Available transports
 
 ```bash
-python main.py                              # stdio  (OpenCode, CLI agents)
-python main.py --transport sse              # SSE    at http://localhost:8001/sse
-python main.py --transport streamable-http  # HTTP   at http://localhost:8001/mcp
+.venv/bin/python schwab_mcp/main.py                              # stdio  (OpenCode, CLI agents)
+.venv/bin/python schwab_mcp/main.py --transport sse              # SSE    at http://localhost:8001/sse
+.venv/bin/python schwab_mcp/main.py --transport streamable-http  # HTTP   at http://localhost:8001/mcp
 ```
 
 ### Logging
