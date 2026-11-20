@@ -69,53 +69,19 @@ def _get_alert_state() -> dict:
 
 
 def _is_alert_needed(symbol: str, signal_type: str) -> bool:
-    """Check if an alert should be sent for this signal.
-    
-    Returns True if:
-    - Never alerted before for this signal type, OR
-    - Alerted before but condition is no longer active (need reactivation)
-    
+    """True when this ticker+signal has no live alert yet.
+
+    Dedup is per (ticker, signal type).  The caller clears the timestamp
+    whenever the full condition goes inactive, so once the condition
+    re-triggers the signal alerts again.
+
     Signal types: "call" (BUY CALL), "put" (BUY PUT)
     """
     state = _get_alert_state()
     state_symbol = state.setdefault(symbol, {"call": None, "put": None})
-    
-    # If never alerted, we need to alert
-    if state_symbol[signal_type] is None:
-        return True
-    
-    # Check if condition is still active
-    # For this, we need to check current state via session state
-    s = st.session_state
-    current_sym = _normalize_display_symbol(symbol)
-    
-    if current_sym in s.get("ticker_history", []):
-        # Get current spot and walls from ATM service
-        atm_svc = s.get("atm_option_service")
-        if atm_svc:
-            snap = atm_svc.get_ticker_snapshot(current_sym)
-            if snap:
-                spot = snap.get("spot", 0.0)
-                put_wall = snap.get("put_wall")
-                call_wall = snap.get("call_wall")
-                
-                if signal_type == "call" and put_wall is not None:
-                    # Check if BUY CALL condition is still active
-                    spacing = get_strike_spacing(spot) if spot > 0 else 1.0
-                    zone = spacing * 0.25
-                    if not (put_wall < spot < put_wall + zone and _wall_is_stable(current_sym, "put")):
-                        # Condition is no longer active - allow re-alert
-                        return True
-                elif signal_type == "put" and call_wall is not None:
-                    # Check if BUY PUT condition is still active
-                    spacing = get_strike_spacing(spot) if spot > 0 else 1.0
-                    zone = spacing * 0.25
-                    if not (call_wall > spot > call_wall - zone and _wall_is_stable(current_sym, "call")):
-                        # Condition is no longer active - allow re-alert
-                        return True
-    
-    # Condition still active, don't re-alert
-    return False
+    needed = state_symbol[signal_type] is None
+    logger.debug(f"[{symbol}] {signal_type.upper()}: alert needed = {needed}")
+    return needed
 
 
 def _update_alert_timestamp(symbol: str, signal_type: str) -> None:
@@ -123,6 +89,170 @@ def _update_alert_timestamp(symbol: str, signal_type: str) -> None:
     state = _get_alert_state()
     state_symbol = state.setdefault(symbol, {"call": None, "put": None})
     state_symbol[signal_type] = time.time()
+
+
+def _clear_alert_timestamp(symbol: str, signal_type: str) -> None:
+    """Clear the dedup timestamp so the signal can alert again after the
+    condition goes inactive (re-alert on reactivation)."""
+    state = _get_alert_state()
+    state_symbol = state.setdefault(symbol, {"call": None, "put": None})
+    state_symbol[signal_type] = None
+
+
+# --- 1-minute VWAP gate ----------------------------------------------------
+# BUY CALL requires spot > VWAP; BUY PUT requires spot < VWAP.
+# Index tickers ($SPX, $RUT, $NDX) have zero volume → fall back to their
+# proxy ETF (SPY, IWM, QQQ) VWAP instead of using a uniform-price average.
+_VWAP_CACHE_TTL = 60.0                       # seconds between VWAP recomputes
+_vwap_cache: dict[str, tuple[float, float | None]] = {}
+_INDEX_CANDLE_SYMBOLS = {"SPX", "SPXW", "RUT", "RUTW", "NDX", "NDXP"}
+
+# Mapping from index to its proxy ETF for VWAP fallback.
+_INDEX_VWAP_PROXY = {
+    "SPX": "SPY",
+    "SPXW": "SPY",
+    "RUT": "IWM",
+    "RUTW": "IWM",
+    "NDX": "QQQ",
+    "NDXP": "QQQ",
+}
+
+
+def _candle_lookup_symbol(ticker: str) -> str:
+    """Candle cache/API symbol: index tickers keep the leading '$'."""
+    raw = (ticker or "").strip().upper()
+    if raw and not raw.startswith("$") and raw in _INDEX_CANDLE_SYMBOLS:
+        return "$" + raw
+    return raw
+
+
+def _vwap_1m(ticker: str) -> float | None:
+    """Session VWAP from the 1-min Parquet cache.
+
+    Cumulative typical-price * volume / cumulative volume within the current
+    RTH session.  Memoized for _VWAP_CACHE_TTL seconds per ticker.
+    """
+    key = _normalize_display_symbol(ticker) or ticker
+    now = time.monotonic()
+    cached = _vwap_cache.get(key)
+    if cached is not None and (now - cached[0]) < _VWAP_CACHE_TTL:
+        return cached[1]
+
+    sym = _candle_lookup_symbol(ticker)
+    try:
+        from scripts.client import load_candle_cache, fetch_candles_smart
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning(f"VWAP unavailable (import failed): {exc}")
+        return None
+
+    df = load_candle_cache(sym, "1m")
+    need_refresh = df is None or df.empty or len(df) < 2
+    if not need_refresh and "datetime" in df.columns:
+        try:
+            last_ms = int(df["datetime"].iloc[-1])
+            if (time.time() * 1000 - last_ms) > 5 * 60 * 1000:
+                need_refresh = True
+        except Exception:
+            pass
+
+    if need_refresh:
+        client = st.session_state.get("client")
+        if client is not None:
+            try:
+                from scripts.flow import run_async
+                df = run_async(fetch_candles_smart(client, sym, "1m"))
+            except Exception as exc:
+                logger.warning(f"VWAP refresh failed for {sym}: {exc}")
+
+    if df is None or df.empty:
+        # No data loaded (missing parquet / refresh failed). For index
+        # tickers without a parquet file, fall back to the proxy ETF VWAP.
+        proxy = _INDEX_VWAP_PROXY.get(key)
+        if proxy:
+            logger.debug(f"[{key}] VWAP: no parquet, falling back to {proxy}")
+            proxy_vwap = _vwap_1m(proxy)
+            _vwap_cache[key] = (now, proxy_vwap)
+            return proxy_vwap
+        _vwap_cache[key] = (now, None)
+        return None
+
+    try:
+        if "datetime" in df.columns:
+            df = df.sort_values("datetime")
+        closes = df["close"].astype(float)
+        highs = df["high"].astype(float)
+        lows = df["low"].astype(float)
+        volumes = df["volume"].astype(float)
+    except Exception:
+        _vwap_cache[key] = (now, None)
+        return None
+
+    # Compute session-anchored VWAP (same RTH logic as charts.py).
+    if "datetime" in df.columns:
+        try:
+            # Column is in ms; convert to unix seconds and adjust to ET.
+            from datetime import timezone
+            import pytz
+            et = pytz.timezone("America/New_York")
+            unix_secs = (df["datetime"] / 1000).astype(int)
+            et_offset = et.utcoffset(et.localize(datetime.now())).total_seconds()
+            et_day = (unix_secs + int(et_offset)) // 86400
+            et_sod = ((unix_secs + int(et_offset)) % 86400).astype(int)
+        except Exception:
+            et_day = None
+            et_sod = None
+    else:
+        et_day = None
+        et_sod = None
+
+    rth_open_sod = 9 * 3600 + 30 * 60  # 09:30 ET = 34200s
+    cum_pv = 0.0
+    cum_v = 0.0
+    cur_day: int | None = None
+    have_session = False
+
+    for i in range(len(df)):
+        if et_day is not None:
+            d = int(et_day.iloc[i])
+            s = int(et_sod.iloc[i])
+            new_session = False
+            if not have_session:
+                new_session = True
+            elif s >= rth_open_sod and d != cur_day:
+                new_session = True
+            if new_session:
+                cur_day = d
+                have_session = True
+                cum_pv = 0.0
+                cum_v = 0.0
+        else:
+            if i == 0:
+                have_session = True
+            elif i > 0 and cum_v == 0:
+                have_session = True
+
+        v = float(volumes.iloc[i])
+        if v > 0:
+            typical = (float(highs.iloc[i]) + float(lows.iloc[i]) + float(closes.iloc[i])) / 3.0
+            cum_pv += typical * v
+            cum_v += v
+
+    if cum_v <= 0:
+        # Index ticker with zero volume — fall back to proxy ETF VWAP.
+        # E.g. $SPX → SPY, $RUT → IWM, $NDX → QQQ.
+        proxy = _INDEX_VWAP_PROXY.get(key)
+        if proxy:
+            logger.debug(f"[{key}] VWAP: zero volume, falling back to {proxy}")
+            proxy_vwap = _vwap_1m(proxy)
+            _vwap_cache[key] = (now, proxy_vwap)
+            return proxy_vwap
+        _vwap_cache[key] = (now, None)
+        return None
+
+    vwap = cum_pv / cum_v
+    logger.debug(f"[{key}] VWAP 1m: {vwap:.4f}")
+    _vwap_cache[key] = (now, vwap)
+    return vwap
 
 
 def generate_telegram_alerts() -> list[str]:
@@ -150,10 +280,12 @@ def generate_telegram_alerts() -> list[str]:
         # Get current data
         atm_svc = s.get("atm_option_service")
         if not atm_svc:
+            logger.debug(f"[{t_upper}] no atm_option_service -> skip")
             continue
             
         snap = atm_svc.get_ticker_snapshot(t_upper)
         if not snap:
+            logger.debug(f"[{t_upper}] no snapshot -> skip")
             continue
             
         spot = snap.get("spot", 0.0)
@@ -161,12 +293,19 @@ def generate_telegram_alerts() -> list[str]:
         call_wall = snap.get("call_wall")
         opt_prices = snap.get("opt_prices", {})
         wall_prices = snap.get("wall_prices", {})
+        net_gex = snap.get("net_gex")
         # The snapshot has no expiration field; ask the service directly.
         expiration = atm_svc.get_ticker_expiration(t_upper)
         
         # Skip if missing critical data
         if spot <= 0:
+            logger.debug(f"[{t_upper}] spot <= 0 ({spot}) -> skip")
             continue
+        
+        logger.debug(
+            f"[{t_upper}] spot={spot:.2f} put_wall={put_wall} call_wall={call_wall} "
+            f"stable_put={_wall_is_stable(t_upper, 'put')} stable_call={_wall_is_stable(t_upper, 'call')}"
+        )
         
         # Format expiration date for display
         exp_date = ""
@@ -177,39 +316,77 @@ def generate_telegram_alerts() -> list[str]:
         spacing = get_strike_spacing(spot) if spot > 0 else 1.0
         zone = spacing * 0.25
         
-        # Check BUY CALL condition:
-        # Put_Wall < Spot_Price < Put_Wall + (Strike_Spacing / 4)
-        # Put Wall must be STABLE
-        if put_wall is not None:
-            if (put_wall < spot < put_wall + zone and 
-                _wall_is_stable(t_upper, "put") and
-                _is_alert_needed(t_upper, "call")):
-                
+        # Format NET GEX as plain text. Telegram's HTML parse_mode does NOT
+        # support <span> or inline color styles — sending them makes the API
+        # reject the whole message with HTTP 400 ("can't parse entities: Tag
+        # span ..."). Use a colored emoji + explicit sign to convey direction.
+        if net_gex is not None:
+            if net_gex > 0:
+                _gex_emoji = "🟢"
+            elif net_gex < 0:
+                _gex_emoji = "🔴"
+            else:
+                _gex_emoji = "⚪"
+            gex_str = f"{_gex_emoji} GEX: {net_gex:+,.0f}"
+        else:
+            gex_str = "GEX: N/A"
+        
+        # BUY CALL requires ALL of:
+        #   - Put_Wall < Spot < Put_Wall + (Strike_Spacing / 4)
+        #   - Put Wall STABLE
+        #   - net GEX > 0
+        #   - Spot > VWAP
+        _vwap = _vwap_1m(ticker)
+        _call_ok = (
+            put_wall is not None
+            and put_wall < spot < put_wall + zone
+            and _wall_is_stable(t_upper, "put")
+            and net_gex is not None and net_gex > 0
+            and _vwap is not None and spot > _vwap
+        )
+        if _call_ok:
+            if _is_alert_needed(t_upper, "call"):
                 # CALL mark at the put-wall (support) strike
                 call_price = wall_prices.get("put_wall_call_price") or opt_prices.get("call")
                 call_str = f"{float(call_price):.2f}" if call_price is not None else "N/A"
-                
-                alert = f"{t_upper} | {spot:.2f} | BUY CALL {put_wall:.2f} @ {call_str} | Exp: {exp_date}"
+
+                alert = f"{gex_str} | {t_upper} | {spot:.2f} | BUY CALL {put_wall:.2f} @ {call_str} | Exp: {exp_date}"
                 alerts.append(alert)
                 _update_alert_timestamp(t_upper, "call")
-                continue
-        
-        # Check BUY PUT condition:
-        # Call_Wall > Spot_Price > Call_Wall - (Strike_Spacing / 4)
-        # Call Wall must be STABLE
-        if call_wall is not None:
-            if (call_wall > spot > call_wall - zone and 
-                _wall_is_stable(t_upper, "call") and
-                _is_alert_needed(t_upper, "put")):
-                
+                logger.info(f"TELEGRAM ALERT generated: {alert}")
+                if len(alerts) >= 5:
+                    break
+        else:
+            # Condition inactive -> clear dedup so a later re-trigger re-alerts.
+            _clear_alert_timestamp(t_upper, "call")
+
+        # BUY PUT requires ALL of:
+        #   - Call_Wall > Spot > Call_Wall - (Strike_Spacing / 4)
+        #   - Call Wall STABLE
+        #   - net GEX < 0
+        #   - Spot < VWAP
+        _put_ok = (
+            call_wall is not None
+            and call_wall > spot > call_wall - zone
+            and _wall_is_stable(t_upper, "call")
+            and net_gex is not None and net_gex < 0
+            and _vwap is not None and spot < _vwap
+        )
+        if _put_ok:
+            if _is_alert_needed(t_upper, "put"):
                 # PUT mark at the call-wall (resistance) strike
                 put_price = wall_prices.get("call_wall_put_price") or opt_prices.get("put")
                 put_str = f"{float(put_price):.2f}" if put_price is not None else "N/A"
-                
-                alert = f"{t_upper} | {spot:.2f} | BUY PUT {call_wall:.2f} @ {put_str} | Exp: {exp_date}"
+
+                alert = f"{gex_str} | {t_upper} | {spot:.2f} | BUY PUT {call_wall:.2f} @ {put_str} | Exp: {exp_date}"
                 alerts.append(alert)
                 _update_alert_timestamp(t_upper, "put")
-                continue
+                logger.info(f"TELEGRAM ALERT generated: {alert}")
+                if len(alerts) >= 5:
+                    break
+        else:
+            # Condition inactive -> clear dedup so a later re-trigger re-alerts.
+            _clear_alert_timestamp(t_upper, "put")
     
     return alerts
 
@@ -252,6 +429,15 @@ def send_telegram_alerts(alerts: list[str]) -> bool:
             else:
                 logger.error(f"Telegram API returned status {response.status}")
                 return False
+    except urllib.error.HTTPError as e:
+        # HTTPError is a URLError subclass; read the response body so the
+        # Telegram description (e.g. bad markup) is visible in the log.
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        logger.error(f"Failed to send Telegram alert: {e} {body}".strip())
+        return False
     except urllib.error.URLError as e:
         logger.error(f"Failed to send Telegram alert: {e}")
         return False

@@ -38,6 +38,18 @@ for _diag_name in ("scripts.app_data", "scripts.app_candlesticks", "scripts.clie
     _diag.setLevel(logging.INFO)
     _diag.addHandler(handler)
 
+# Telegram alert diagnostics: the alert logger otherwise inherits the
+# WARNING root default with no handler, so a rejected send (e.g. HTTP 400
+# from unsupported markup) is swallowed silently.  Route its INFO/ERROR
+# output to stderr so delivered alerts and failures are both visible.
+_tg = logging.getLogger("gex.telegram_alerts")
+_tg.setLevel(logging.INFO)
+_tg_handler = logging.StreamHandler()
+_tg_handler.setLevel(logging.INFO)
+_tg_handler.setFormatter(formatter)
+_tg.addHandler(_tg_handler)
+_tg.propagate = False
+
 # NOTE: st.set_page_config / theme markdown must NOT run when this module is
 # imported by another module — calling it twice raises StreamlitAPIException.
 # Guard it so the module is safely importable for its helper functions

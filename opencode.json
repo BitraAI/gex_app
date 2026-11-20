@@ -2,7 +2,7 @@
   "mcp": {
     "servers": {
       "gex-app": {
-        "type": "http",
+        "type": "remote",
         "url": "http://localhost:8001/mcp"
       }
     }

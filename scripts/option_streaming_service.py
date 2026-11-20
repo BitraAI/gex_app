@@ -727,6 +727,17 @@ class AtmOptionVolumeService:
                 put_bid = ticker["put_bid"]
                 put_ask = ticker["put_ask"]
                 put = (put_bid + put_ask) / 2 if put_bid <= put_ask else None
+
+            # Pull net_gex from the shared analytics cache (populated by flow.py)
+            net_gex = None
+            _cache_key = display_symbol.split(":")[0]
+            _analytics = getattr(__import__("scripts.flow", fromlist=["_ticker_analytics_cache"]), "_ticker_analytics_cache", {}).get(_cache_key) or {}
+            _net_gex_raw = _analytics.get("net_gex")
+            if _net_gex_raw is not None:
+                try:
+                    net_gex = float(_net_gex_raw)
+                except (ValueError, TypeError):
+                    pass
             
             return {
                 "spot": ticker.get("spot", 0.0),
@@ -747,6 +758,7 @@ class AtmOptionVolumeService:
                 "put_wall": ticker.get("put_wall"),
                 "call_wall": ticker.get("call_wall"),
                 "last_size": ticker.get("last_size", 0),
+                "net_gex": net_gex,
             }
 
     def get_ticker_quote_symbols(self, display_symbol: str) -> dict:

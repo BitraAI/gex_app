@@ -68,19 +68,27 @@ Only two BUY signals are alerted. `generate_telegram_alerts()` evaluates them fo
 
 ### BUY CALL
 
+All of the following must be true:
+
 ```
 Put_Wall < Spot_Price < Put_Wall + (Strike_Spacing / 4)
+Spot_Price > VWAP
+NET_GEX > 0
 ```
 
-Spot is inside the upper edge of the **Put Wall** support zone. Requires the Put Wall to be **STABLE**.
+Spot is inside the upper edge of the **Put Wall** support zone, above the session VWAP, and net Gamma Exposure is positive (demand-side bullish). Requires the Put Wall to be **STABLE**.
 
 ### BUY PUT
 
+All of the following must be true:
+
 ```
 Call_Wall > Spot_Price > Call_Wall - (Strike_Spacing / 4)
+Spot_Price < VWAP
+NET_GEX < 0
 ```
 
-Spot is inside the lower edge of the **Call Wall** resistance zone. Requires the Call Wall to be **STABLE**.
+Spot is inside the lower edge of the **Call Wall** resistance zone, below the session VWAP, and net Gamma Exposure is negative (demand-side bearish). Requires the Call Wall to be **STABLE**.
 
 ### Stability gate
 
@@ -100,17 +108,37 @@ A wall counts as STABLE only after surviving `_WALL_STABLE_REFRESHES = 2` consec
 
 ---
 
+## VWAP computation
+
+The VWAP used in the alert gates is a session-anchored 1-minute VWAP computed from the Parquet candle cache, with automatic fallback for index tickers:
+
+| Ticker | Volume | VWAP source |
+|---|---|---|
+| **SPY, IWM, QQQ, AAPL, …** (equities) | Real volume in parquet | Own volume-weighted VWAP (`Σ typical_price × volume / Σ volume`) |
+| **$SPX, SPX** | Zero (index) | **SPY** VWAP (volume-weighted) |
+| **$RUT, RUT** | Zero (index) | **IWM** VWAP (volume-weighted) |
+| **$NDX, NDX** | Zero (index) | **QQQ** VWAP (volume-weighted) |
+
+- VWAP is session-anchored: resets at the first bar at/after 9:30 ET of a new ET date (same RTH logic as the charts).
+- Index tickers without parquet data or with all-zero volume transparently delegate to their proxy ETF and cache the result.
+- Results are memoized per ticker for **60 seconds** to avoid redundant disk reads.
+- If the cache is older than 5 minutes, a fresh fetch from the Schwab API is attempted (when a live client is available).
+
+---
+
 ## Message format
 
 ```
-<b>GEX Alerts</b>
-
-SYMBOL | 250.25 | BUY CALL 250.00 @ 45.25 | Exp: 2024-12-20
-SYMBOL | 345.50 | BUY PUT 346.00 @ 345.50 | Exp: 2024-12-20
+<emoji> GEX: +123,456,789 | SYMBOL | 250.25 | BUY CALL 250.00 @ 45.25 | Exp: 2024-12-20
 ```
 
 - One line per alert, joined with `\n`, maximum 5 lines.
 - Sent as HTML (`parse_mode: HTML`) so the header renders bold.
+- The GEX field leads the line with a direction emoji:
+  - 🟢 — positive net GEX (BUY CALL condition)
+  - 🔴 — negative net GEX (BUY PUT condition)
+  - ⚪ — zero net GEX (edge case, neutral)
+  - N/A — missing data
 - The option price (`@ ...`) comes from the wall snapshot prices, falling back to the snapshot's ATM option price, then `N/A`.
 
 ---
@@ -134,7 +162,7 @@ Alerts only generate while the app is running with a logged-in client and the Or
 | No alerts, no log output | Telegram not configured (missing/empty `[telegram]` values) — the pre-send check returns silently. Verify with the config-load check below. |
 | Test send returns `False` | Token wrong (Telegram returns 401) or bot not in the target chat (403). Read the app log for `Failed to send Telegram alert: ...`. |
 | Config edits have no effect | App not restarted — `config.py` reads the TOML once at import. |
-| Configured but never alerts live | Normal if no qualifying setup: price must be inside a *stable* wall zone, and the signal must be *fresh* (not active-when-last-alerted). Silence ≠ broken. |
+| Configured but never alerts live | Normal if no qualifying setup: price must be inside a *stable* wall zone, spot must be on the correct side of VWAP, GEX must match direction, and the signal must be *fresh* (not active-when-last-alerted). Silence ≠ broken. |
 | Duplicate-looking alerts | A condition that deactivates and re-triggers intentionally re-alerts; dedup is per condition, not per day. |
 
 Config-load check (prints booleans, not the secret values):
@@ -152,7 +180,7 @@ print(bool(config.TELEGRAM_BOT_TOKEN), bool(config.TELEGRAM_CHAT_ID))
 
 | File | Role |
 |---|---|
-| `scripts/telegram_alerts.py` | Condition evaluation, dedup state, Telegram send |
+| `scripts/telegram_alerts.py` | Condition evaluation, VWAP gate, dedup state, Telegram send |
 | `scripts/flow.py` | `_maybe_send_telegram_alerts()` hook in `render_flow_frag()` |
 | `scripts/config.py` | Loads `[telegram]` bot_token/chat_id + env overrides |
 | `.streamlit/config.toml` | User configuration (`[telegram]` section) |
